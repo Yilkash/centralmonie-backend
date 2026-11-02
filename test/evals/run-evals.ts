@@ -18,14 +18,14 @@ import { PlansService, PlanView } from '../../src/plans/plans.service';
 import { UsersRepository } from '../../src/users/users.repository';
 import { CASES, EvalCase, ExpectedItem } from './cases';
 
-// USD per million tokens. Cache prices for Haiku and Sonnet write are estimates: 0.1x to read, 1.25x to write.
+// USD per million tokens. Haiku and Sonnet cache prices are estimates: 0.1x to read, 1.25x to write.
 const MODEL = process.env.AGENT_MODEL ?? 'claude-haiku-5-5';
 const ALL_PRICES: Record<string, { input: number; output: number; cacheRead: number; cacheWrite: number }> = {
   'claude-opus-5-5': { input: 4, output: 20, cacheRead: 0.2, cacheWrite: 5 },
   'claude-sonnet-5-5': { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 },
   'claude-haiku-5-5': { input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0.125 },
 };
-const PRICES = ALL_PRICES[MODEL];
+const PRICES = ALL_PRICES[MODEL]!;
 if (!PRICES) throw new Error(`No prices for ${MODEL}`);
 const WALLET = '0x393eA6fbd50b821CdE7EdC1b936c567dbb15c26d';
 const b = (accountNumber: string, bankName = 'Access'): NewDestination => ({ kind: 'bank', bankName, accountNumber });

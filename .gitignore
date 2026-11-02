@@ -5,3 +5,4 @@ dist
 !.env.example
 *.key
 eval-results.json
+eval-run.log
