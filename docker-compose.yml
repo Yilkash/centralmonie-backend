@@ -1,0 +1,24 @@
+# Pinned so the volume name does not follow the directory name.
+name: tenkobo
+
+services:
+  db:
+    image: postgres:16
+    container_name: tenkobo-pg
+    environment:
+      POSTGRES_USER: tenkobo
+      POSTGRES_PASSWORD: localdev
+      POSTGRES_DB: tenkobo
+    ports:
+      - '${POSTGRES_PORT:-54445}:5432'
+    volumes:
+      - tenkobo-pg:/var/lib/postgresql/data
+      - ./scripts/init-test-db.sql:/docker-entrypoint-initdb.d/01-test-db.sql:ro
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U tenkobo -d tenkobo']
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  tenkobo-pg:
