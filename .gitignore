@@ -6,3 +6,5 @@ dist
 *.key
 eval-results.json
 eval-run.log
+eval-run-*.log
+eval-results-*.json
