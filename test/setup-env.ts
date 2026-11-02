@@ -6,3 +6,4 @@ process.env.CORS_ORIGINS = 'http://allowed.test';
 process.env.PRIVY_APP_ID = 'test';
 process.env.PRIVY_APP_SECRET = 'test';
 process.env.PRIVY_VERIFICATION_KEY = 'test';
+delete process.env.ANTHROPIC_API_KEY;

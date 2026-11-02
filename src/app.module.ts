@@ -10,7 +10,8 @@ import { UsersModule } from './users/users.module';
 
 @Module({
   imports: [
-    ConfigModule.forRoot({ isGlobal: true, validate: validateEnv }),
+    // Tests must never read a developer's .env, or they could reach real services with real keys.
+    ConfigModule.forRoot({ isGlobal: true, validate: validateEnv, ignoreEnvFile: process.env.NODE_ENV === 'test' }),
     DatabaseModule,
     UsersModule,
     ChatModule,
