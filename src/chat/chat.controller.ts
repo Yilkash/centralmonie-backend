@@ -9,7 +9,7 @@ import { PlansService } from '../plans/plans.service';
 import { ChatService } from './chat.service';
 
 const sendMessage = z.object({ content: z.string().trim().min(1).max(2000) });
-
+const contactConfirmed = z.object({ contact_id: z.string().uuid() });
 
 @Controller('v1/chat/messages')
 @UseGuards(AuthGuard)
@@ -39,7 +39,18 @@ export class ChatController {
 
   @Get()
   async list(@CurrentUser() user: User) {
-    return { messages: await Promise.all((await this.chat.history(user)).map((message) => this.present(user, message))) };
+    return { messages: await Promise.all((await this.chat.history(user)).filter((message) => !message.hidden).map((message) => this.present(user, message))) };
+  }
+
+  /** Lets the agent carry on after a contact card is confirmed. The server writes this message, not the client. */
+  @Post('contact-confirmed')
+  async afterContactConfirmed(@CurrentUser() user: User, @Body() body: unknown) {
+    const parsed = contactConfirmed.safeParse(body);
+    if (!parsed.success) throw new BadRequestException('A contact is required');
+    const contact = await this.contacts.get(user.id, parsed.data.contact_id);
+    if (contact?.status !== 'confirmed') throw new BadRequestException('This contact is not confirmed');
+    const message = `I confirmed ${contact.name}. Please continue.`;
+    return { reply: await this.present(user, await this.chat.send(user, message, { hidden: true })) };
   }
 
   @Post()

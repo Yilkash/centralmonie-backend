@@ -15,6 +15,13 @@
       "when": 1793653606287,
       "tag": "0001_tricky_gambit",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1793658019783,
+      "tag": "0002_tiresome_susan_delgado",
+      "breakpoints": true
     }
   ]
 }

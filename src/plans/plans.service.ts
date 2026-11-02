@@ -89,7 +89,7 @@ export class PlansService {
           throw new PlanRefused('A naira payment needs a positive whole naira amount.');
         }
         if (item.route === 'airtime' && item.amountNaira! < AIRTIME_MIN_NAIRA) {
-          throw new PlanRefused(`The smallest airtime purchase is N${AIRTIME_MIN_NAIRA}.`);
+          throw new PlanRefused(`The smallest airtime purchase is ₦${AIRTIME_MIN_NAIRA}.`);
         }
         amountKobo = nairaToKobo(item.amountNaira!);
       }

@@ -39,6 +39,7 @@ describe('agent through the API', () => {
   let model: ScriptedModel;
   let userId: string;
   let destinationId: string;
+  let motherId: string;
 
   const call = (method: 'GET' | 'POST', url: string, body?: object) =>
     app.inject({ method, url, headers: { authorization: 'Bearer alice' }, ...(body ? { payload: body } : {}) });
@@ -69,6 +70,7 @@ describe('agent through the API', () => {
     const mother = await contacts.propose(userId, 'Mother', ['mum'], { kind: 'bank', bankName: 'Access', accountNumber: '0123454821' });
     await contacts.confirm(userId, mother.id);
     destinationId = mother.destinations[0]!.id;
+    motherId = mother.id;
   });
 
   afterAll(async () => {
@@ -85,12 +87,30 @@ describe('agent through the API', () => {
 
     const { reply } = (await call('POST', '/v1/chat/messages', { content: 'send 5k to my mum' })).json();
     expect(reply.plan.status).toBe('proposed');
-    expect(reply.plan.items[0]).toMatchObject({ recipient_name: 'Mother', amount_naira: 'N5,000' });
+    expect(reply.plan.items[0]).toMatchObject({ recipient_name: 'Mother', amount_naira: '₦5,000' });
     expect(await paymentCount()).toBe('0');
 
     const approved = (await call('POST', `/v1/plans/${reply.plan.id}/approve`)).json();
     expect(approved.items[0].payment_status).toBe('completed');
     expect(await paymentCount()).toBe('1');
+  });
+
+  it('continues after a contact is confirmed, without showing the app\'s message', async () => {
+    let seen = '';
+    model.script = [(request) => ((seen = JSON.stringify(request.messages)), say('Please check and approve.')())];
+    const response = await call('POST', '/v1/chat/messages/contact-confirmed', { contact_id: motherId });
+    expect(response.statusCode).toBe(201);
+    expect(seen).toContain('I confirmed Mother');
+    const { messages } = (await call('GET', '/v1/chat/messages')).json();
+    expect(messages.some((message: { content: string }) => message.content.includes('I confirmed'))).toBe(false);
+    expect(messages.at(-1).content).toBe('Please check and approve.');
+  });
+
+  it('refuses to continue for a contact that is not this user\'s', async () => {
+    const response = await call('POST', '/v1/chat/messages/contact-confirmed', {
+      contact_id: '00000000-0000-4000-8000-000000000000',
+    });
+    expect(response.statusCode).toBe(400);
   });
 
   it('shows the contacts to the model, and only this user\'s', async () => {

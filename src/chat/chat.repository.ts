@@ -11,11 +11,11 @@ export class ChatRepository {
     userId: string,
     role: ChatMessage['role'],
     content: string,
-    cards: { planId?: string | undefined; contactId?: string | undefined } = {},
+    extra: { planId?: string | undefined; contactId?: string | undefined; hidden?: boolean } = {},
   ): Promise<ChatMessage> {
     const [message] = await this.db
       .insert(chatMessages)
-      .values({ userId, role, content, planId: cards.planId ?? null, contactId: cards.contactId ?? null })
+      .values({ userId, role, content, planId: extra.planId ?? null, contactId: extra.contactId ?? null, hidden: extra.hidden ?? false })
       .returning();
     return message!;
   }

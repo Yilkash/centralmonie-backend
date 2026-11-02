@@ -4,7 +4,7 @@ export const DAILY_LIMIT_KOBO = 500_000 * 100;
 export const nairaToKobo = (naira: number): number => naira * 100;
 
 export function formatNaira(kobo: number): string {
-  return `N${(kobo / 100).toLocaleString('en-NG', { maximumFractionDigits: 2 })}`;
+  return `₦${(kobo / 100).toLocaleString('en-NG', { maximumFractionDigits: 2 })}`;
 }
 
 export function formatUsdc(minor: number): string {

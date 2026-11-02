@@ -22,6 +22,6 @@ describe('money', () => {
   });
 
   it('formats naira', () => {
-    expect(formatNaira(nairaToKobo(105050))).toBe('N105,050');
+    expect(formatNaira(nairaToKobo(105050))).toBe('₦105,050');
   });
 });

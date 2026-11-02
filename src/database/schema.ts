@@ -1,5 +1,5 @@
 import { sql } from 'drizzle-orm';
-import { bigint, index, integer, jsonb, pgEnum, pgTable, text, timestamp, uuid } from 'drizzle-orm/pg-core';
+import { bigint, boolean, index, integer, jsonb, pgEnum, pgTable, text, timestamp, uuid } from 'drizzle-orm/pg-core';
 
 export const users = pgTable('users', {
   id: uuid('id').primaryKey().defaultRandom(),
@@ -25,6 +25,8 @@ export const chatMessages = pgTable(
     // A card shown with the message. Plain IDs: these tables are declared further down.
     planId: uuid('plan_id'),
     contactId: uuid('contact_id'),
+    // Written by the app rather than typed by the user: the model reads it, the chat does not show it.
+    hidden: boolean('hidden').notNull().default(false),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [index('chat_messages_user_created_idx').on(table.userId, table.createdAt)],

@@ -17,9 +17,9 @@ export class ChatService {
   }
 
   /** The user's message is saved first, so a failed reply never loses what they typed. */
-  async send(user: User, content: string): Promise<ChatMessage> {
+  async send(user: User, content: string, options: { hidden?: boolean } = {}): Promise<ChatMessage> {
     const history = await this.messages.recent(user.id, HISTORY_LIMIT);
-    await this.messages.add(user.id, 'user', content);
+    await this.messages.add(user.id, 'user', content, options);
     const reply = await this.responder.reply({ user, message: content, history });
     return this.messages.add(user.id, 'assistant', reply.text, { planId: reply.planId, contactId: reply.contactId });
   }
