@@ -7,8 +7,16 @@ import { ChatMessage, chatMessages } from '../database/schema';
 export class ChatRepository {
   constructor(@Inject(DATABASE) private readonly db: Database) {}
 
-  async add(userId: string, role: ChatMessage['role'], content: string): Promise<ChatMessage> {
-    const [message] = await this.db.insert(chatMessages).values({ userId, role, content }).returning();
+  async add(
+    userId: string,
+    role: ChatMessage['role'],
+    content: string,
+    cards: { planId?: string | undefined; contactId?: string | undefined } = {},
+  ): Promise<ChatMessage> {
+    const [message] = await this.db
+      .insert(chatMessages)
+      .values({ userId, role, content, planId: cards.planId ?? null, contactId: cards.contactId ?? null })
+      .returning();
     return message!;
   }
 

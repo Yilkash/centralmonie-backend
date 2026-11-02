@@ -1,6 +1,6 @@
 import { ChatMessage, User } from '../database/schema';
 import { ChatRepository } from './chat.repository';
-import { ChatResponder, ChatTurn } from './chat-responder';
+import { ChatReply, ChatResponder, ChatTurn } from './chat-responder';
 import { ChatService } from './chat.service';
 
 const user = { id: 'user-1' } as User;
@@ -16,7 +16,7 @@ class FakeRepository {
   }
 }
 
-function serviceWith(reply: (turn: ChatTurn) => Promise<string>) {
+function serviceWith(reply: (turn: ChatTurn) => Promise<ChatReply>) {
   const repository = new FakeRepository();
   const responder = { reply } as ChatResponder;
   return { repository, service: new ChatService(repository as unknown as ChatRepository, responder) };
@@ -24,7 +24,7 @@ function serviceWith(reply: (turn: ChatTurn) => Promise<string>) {
 
 describe('ChatService', () => {
   it('saves the message and the reply in order', async () => {
-    const { repository, service } = serviceWith(async () => 'hello back');
+    const { repository, service } = serviceWith(async () => ({ text: 'hello back' }));
     const answer = await service.send(user, 'hello');
     expect(answer.content).toBe('hello back');
     expect(repository.saved).toEqual([
@@ -34,7 +34,7 @@ describe('ChatService', () => {
   });
 
   it('gives the responder earlier messages, without the new one', async () => {
-    const reply = jest.fn(async (_turn: ChatTurn) => 'ok');
+    const reply = jest.fn(async (_turn: ChatTurn) => ({ text: 'ok' }));
     const { repository, service } = serviceWith(reply);
     repository.saved.push({ role: 'user', content: 'earlier' });
     await service.send(user, 'new');

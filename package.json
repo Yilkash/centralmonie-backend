@@ -14,7 +14,8 @@
     "test:e2e": "jest --config test/jest-e2e.json --runInBand",
     "db:up": "docker compose up -d --wait db",
     "db:generate": "drizzle-kit generate",
-    "db:migrate": "ts-node --transpile-only src/database/migrate-cli.ts"
+    "db:migrate": "ts-node --transpile-only src/database/migrate-cli.ts",
+    "eval": "ts-node --transpile-only test/evals/run-evals.ts"
   },
   "jest": {
     "rootDir": "src",
@@ -25,6 +26,7 @@
     "testEnvironment": "node"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^1.4.0",
     "@fastify/cors": "^11.4.0",
     "@nestjs/common": "^11.2.8",
     "@nestjs/config": "^4.0.4",
