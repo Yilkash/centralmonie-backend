@@ -82,6 +82,49 @@ describe('PrivyIdentityProvider', () => {
     await expect(provider.verify(await sign())).rejects.toBeInstanceOf(IdentityUnavailableError);
   });
 
+  describe('saved profiles', () => {
+    const withWallet = { id: SUBJECT, linked_accounts: [{ type: 'smart_wallet', address: WALLET }] };
+
+    it('asks Privy once while the profile is fresh', async () => {
+      const fetchSpy = privyAnswers(200, withWallet);
+      fetchSpy.mockImplementation(async () => new Response(JSON.stringify(withWallet)));
+      await provider.verify(await sign());
+      await provider.verify(await sign());
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps asking until the wallet exists', async () => {
+      const fetchSpy = jest.spyOn(global, 'fetch').mockImplementation(async () => new Response(JSON.stringify({ id: SUBJECT, linked_accounts: [] })));
+      await provider.verify(await sign());
+      await provider.verify(await sign());
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
+    });
+
+    it('still checks the token every time', async () => {
+      jest.spyOn(global, 'fetch').mockImplementation(async () => new Response(JSON.stringify(withWallet)));
+      await provider.verify(await sign());
+      await expect(provider.verify(await sign({ audience: 'other' }))).rejects.toBeInstanceOf(InvalidIdentityError);
+    });
+
+    it('uses the saved profile when Privy is down', async () => {
+      const fetchSpy = jest.spyOn(global, 'fetch').mockImplementation(async () => new Response(JSON.stringify(withWallet)));
+      await provider.verify(await sign());
+      const now = Date.now();
+      jest.spyOn(Date, 'now').mockReturnValue(now + 10 * 60 * 1000);
+      fetchSpy.mockRejectedValue(new Error('network down'));
+      await expect(provider.verify(await sign())).resolves.toMatchObject({ walletAddress: WALLET });
+    });
+
+    it('notices a deleted user once the profile is no longer fresh', async () => {
+      const fetchSpy = jest.spyOn(global, 'fetch').mockImplementation(async () => new Response(JSON.stringify(withWallet)));
+      await provider.verify(await sign());
+      const now = Date.now();
+      jest.spyOn(Date, 'now').mockReturnValue(now + 10 * 60 * 1000);
+      fetchSpy.mockImplementation(async () => new Response('{}', { status: 404 }));
+      await expect(provider.verify(await sign())).rejects.toBeInstanceOf(InvalidIdentityError);
+    });
+  });
+
   it('refuses a user record for someone else', async () => {
     privyAnswers(200, { id: 'did:privy:other', linked_accounts: [] });
     await expect(provider.verify(await sign())).rejects.toBeInstanceOf(IdentityUnavailableError);
