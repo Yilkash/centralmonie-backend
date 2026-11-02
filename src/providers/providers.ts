@@ -15,14 +15,29 @@ export interface PaymentRequest {
   usdcMinor: number;
 }
 
-export type PaymentResult = { ok: true; providerReference: string } | { ok: false; reason: string };
+/** pending: the partner accepted it and will finish later, so status() must be asked until it settles. */
+export type PaymentResult = { ok: true; providerReference: string; pending?: boolean } | { ok: false; reason: string };
+
+export type PaymentState = { state: 'completed' } | { state: 'pending' } | { state: 'failed'; reason: string };
 
 /**
- * The outside services behind money. Each is simulated in Phase 1, and the real
- * partners replace them one at a time without changing the plan or chat code.
+ * The outside services behind money. Each starts simulated, and the real partners
+ * replace them one at a time without changing the plan or chat code.
  */
 export abstract class PaymentProvider {
+  /** Why this payment cannot be taken on right now, such as a low naira balance, or null if it can. */
+  abstract refusal(request: PaymentRequest): Promise<string | null>;
+
+  /**
+   * Where the user's USDC must arrive before pay() runs, or null to use the platform's collection
+   * address. Called once per payment. A partner may tie the address to this reference.
+   */
+  abstract fundingAddress(request: PaymentRequest): Promise<string | null>;
+
+  /** Must be safe to call twice with one reference: the partner must not pay twice. */
   abstract pay(request: PaymentRequest): Promise<PaymentResult>;
+
+  abstract status(reference: string, providerReference: string): Promise<PaymentState>;
 }
 
 export abstract class ExchangeRates {

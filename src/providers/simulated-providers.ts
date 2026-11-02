@@ -1,10 +1,22 @@
 import { randomUUID } from 'node:crypto';
 import { Injectable } from '@nestjs/common';
-import { BankLookup, DataPlan, DataPlans, ExchangeRates, PaymentProvider, PaymentRequest, PaymentResult } from './providers';
+import { BankLookup, DataPlan, DataPlans, ExchangeRates, PaymentProvider, PaymentRequest, PaymentResult, PaymentState } from './providers';
 
 /** Moves nothing. An account number ending in 0000 fails, so failure paths can be exercised. */
 @Injectable()
 export class SimulatedPaymentProvider extends PaymentProvider {
+  async refusal(): Promise<string | null> {
+    return null;
+  }
+
+  async fundingAddress(): Promise<string | null> {
+    return null;
+  }
+
+  async status(): Promise<PaymentState> {
+    return { state: 'completed' };
+  }
+
   async pay(request: PaymentRequest): Promise<PaymentResult> {
     const destination = request.destination as { accountNumber?: string };
     if (destination.accountNumber?.endsWith('0000')) {

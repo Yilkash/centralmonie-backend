@@ -13,6 +13,8 @@ const envSchema = z.object({
   // Without a key, the app runs with the placeholder reply and no AI.
   ANTHROPIC_API_KEY: z.string().min(1).optional(),
   AGENT_MODEL: z.string().min(1).default('claude-haiku-5-5'),
+  // 'test' accepts sign-ins with no check, for automated browser tests. Refused in production below.
+  IDENTITY_PROVIDER: z.enum(['privy', 'test']).default('privy'),
 });
 
 export type Env = z.infer<typeof envSchema>;
@@ -23,6 +25,9 @@ export function validateEnv(raw: Record<string, unknown>): Env {
   if (!result.success) {
     const names = result.error.issues.map((issue) => issue.path.join('.')).join(', ');
     throw new Error(`Invalid environment variables: ${names}`);
+  }
+  if (result.data.IDENTITY_PROVIDER === 'test' && process.env.NODE_ENV === 'production') {
+    throw new Error('IDENTITY_PROVIDER=test is not allowed in production');
   }
   return result.data;
 }
