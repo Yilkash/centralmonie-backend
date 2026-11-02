@@ -12,7 +12,7 @@ const envSchema = z.object({
   PRIVY_VERIFICATION_KEY: z.string().min(1),
   // Without a key, the app runs with the placeholder reply and no AI.
   ANTHROPIC_API_KEY: z.string().min(1).optional(),
-  AGENT_MODEL: z.string().min(1).default('claude-opus-5-5'),
+  AGENT_MODEL: z.string().min(1).default('claude-haiku-5-5'),
 });
 
 export type Env = z.infer<typeof envSchema>;
