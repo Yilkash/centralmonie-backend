@@ -102,6 +102,17 @@ describe('agent through the API', () => {
     expect(seen).not.toContain('0123454821');
   });
 
+  it('shows two saved entries with one name as one person', async () => {
+    const contacts = app.get(ContactsService, { strict: false });
+    const phone = await contacts.propose(userId, 'mother', [], { kind: 'phone', phone: '08031234567' });
+    await contacts.confirm(userId, phone.id);
+    let seen: { name: string; destinations: unknown[] }[] = [];
+    model.script = [tool('list_contacts', {}), (request) => ((seen = JSON.parse(String(lastToolResult(request).content))), say('ok')())];
+    await call('POST', '/v1/chat/messages', { content: 'who do I know?' });
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.destinations).toHaveLength(2);
+  });
+
   it('refuses an invented recipient, and tells the model why', async () => {
     let refusal: Anthropic.ToolResultBlockParam | undefined;
     model.script = [

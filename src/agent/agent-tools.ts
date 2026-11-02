@@ -138,15 +138,22 @@ export class AgentToolbox {
   }
 
   private async listContacts(user: User) {
-    return (await this.contacts.listConfirmed(user.id)).map((contact) => ({
-      name: contact.name,
-      aliases: contact.aliases,
-      destinations: contact.destinations.map((destination) => ({
-        destination_id: destination.id,
-        kind: destination.kind,
-        detail: describeDestination(destination),
-      })),
-    }));
+    // Saving someone's phone and later their bank makes two rows. To the user, that is one person.
+    const people = new Map<string, { name: string; aliases: string[]; destinations: object[] }>();
+    for (const contact of await this.contacts.listConfirmed(user.id)) {
+      const key = contact.name.trim().toLowerCase();
+      const person = people.get(key) ?? { name: contact.name, aliases: [], destinations: [] };
+      person.aliases = [...new Set([...person.aliases, ...contact.aliases])];
+      person.destinations.push(
+        ...contact.destinations.map((destination) => ({
+          destination_id: destination.id,
+          kind: destination.kind,
+          detail: describeDestination(destination),
+        })),
+      );
+      people.set(key, person);
+    }
+    return [...people.values()];
   }
 
   private async listDataPlans(input: unknown): Promise<string> {
