@@ -33,6 +33,7 @@ export const presentPlan = (plan: PlanView) => ({
     payment_status: item.payment?.status ?? null,
     failure_reason: item.payment?.failureReason ?? null,
     tx_hash: item.payment?.fundingTxHash ?? null,
+    paid_at: item.payment?.createdAt ?? null,
     refund_tx_hash: item.payment?.refundTxHash ?? null,
     simulated: !item.payment || (item.payment.providerReference?.startsWith('simulated-') ?? false),
   })),

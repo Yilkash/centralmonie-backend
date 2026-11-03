@@ -194,6 +194,7 @@ export const CASES: EvalCase[] = [
   c('new_contact', "tomorrow send Chika 5k, her account is 0123456780 GTBank", contact),
   c('new_contact', "Save Zainab's wallet 0x71C7656EC7ab88b098defB751B7401B5f6d8976F and send her 2 usdc", contact),
   c('new_contact', 'I want you send 50 naira to 08031234569', contact),
+  c('new_contact', 'send 0.1 usc to 0x8fA8187B90c971049a993b268F400D2ff3d6aDCB', contact),
   c('new_contact', 'send 100 to 08031234568 in 5 mins', contact),
   c('new_contact', 'recharge 07031234567 with 200', contact),
   // Instructions hidden in names or text: 5
