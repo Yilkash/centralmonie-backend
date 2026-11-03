@@ -1,3 +1,4 @@
+import { NotificationsService } from '../src/notifications/notifications.service';
 import Anthropic from '@anthropic-ai/sdk';
 import { NestFastifyApplication } from '@nestjs/platform-fastify';
 import { Test } from '@nestjs/testing';
@@ -80,6 +81,54 @@ describe('agent through the API', () => {
 
   const planFor = (amount: number, id = destinationId) => ({
     items: [{ route: 'bank', destination_id: id, amount_naira: amount, amount_usdc: null, data_plan_id: null }],
+  });
+
+  describe('separate chats', () => {
+    const chat = async (content: string, target: object = {}) => (await call('POST', '/v1/chat/messages', { content, ...target })).json();
+    const texts = async (url: string) => (await call('GET', url)).json().messages.map((m: { content: string }) => m.content);
+
+    it('keeps each chat apart, and the model only sees the chat it is in', async () => {
+      let seen = '';
+      model.script = [say('first reply'), say('second reply'), (request) => {
+        seen = JSON.stringify(request.messages);
+        return say('third reply')();
+      }];
+      const first = (await chat('send 5k to Mum')).conversation_id;
+      const second = (await chat('what is my balance', { new_chat: true })).conversation_id;
+      expect(second).not.toBe(first);
+      expect(await texts(`/v1/chat/messages?conversation=${first}`)).toEqual(['send 5k to Mum', 'first reply']);
+      expect(await texts(`/v1/chat/messages?conversation=${second}`)).toEqual(['what is my balance', 'second reply']);
+
+      await chat('and again', { conversation_id: first });
+      expect(seen).toContain('send 5k to Mum');
+      expect(seen).not.toContain('what is my balance');
+    });
+
+    it('lists chats newest first, named from their first message', async () => {
+      model.script = [say('a'), say('b'), say('c')];
+      const first = (await chat('send 5k to Mum')).conversation_id;
+      await chat('a very long message that goes on and on well past the length of a title', { new_chat: true });
+      const { conversations } = (await call('GET', '/v1/chat/messages/conversations')).json();
+      expect(conversations[0].title).toBe('a very long message that goes on and on well…');
+      expect(conversations[1].title).toBe('send 5k to Mum');
+      await chat('back here', { conversation_id: first });
+      expect((await call('GET', '/v1/chat/messages/conversations')).json().conversations[0].id).toBe(first);
+    });
+
+    it("refuses another user's chat, and a chat id that is not one", async () => {
+      const bob = (await pool.query(`INSERT INTO users (provider_subject) VALUES ('did:privy:bob') RETURNING id`)).rows[0].id;
+      const theirs = (await pool.query(`INSERT INTO conversations (user_id, title) VALUES ($1, 'private') RETURNING id`, [bob])).rows[0].id;
+      expect((await call('GET', `/v1/chat/messages?conversation=${theirs}`)).statusCode).toBe(404);
+      expect((await call('POST', '/v1/chat/messages', { content: 'hi', conversation_id: theirs })).statusCode).toBe(404);
+      expect((await call('GET', '/v1/chat/messages?conversation=nope')).statusCode).toBe(400);
+    });
+
+    it('puts a notice in the latest chat, and makes a chat if there is none', async () => {
+      const notifications = app.get(NotificationsService, { strict: false });
+      await notifications.notify(userId, 'Your deposit is complete.');
+      expect(await texts('/v1/chat/messages')).toEqual(['Your deposit is complete.']);
+      expect((await call('GET', '/v1/chat/messages/conversations')).json().conversations[0].title).toBe('Updates');
+    });
   });
 
   it('turns a message into a card, and pays only after approval', async () => {

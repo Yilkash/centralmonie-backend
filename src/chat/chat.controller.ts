@@ -1,6 +1,6 @@
 import { presentDeposit } from '../deposits/deposits.controller';
 import { NairaDepositsService } from '../deposits/deposits.service';
-import { BadRequestException, Body, Controller, Get, Post, UseGuards } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Get, Post, Query, UseGuards } from '@nestjs/common';
 import { z } from 'zod';
 import { AuthGuard } from '../auth/auth.guard';
 import { CurrentUser } from '../auth/current-user.decorator';
@@ -12,8 +12,9 @@ import { presentGroup, presentSchedule } from '../schedules/schedules.controller
 import { SchedulesService } from '../schedules/schedules.service';
 import { ChatService } from './chat.service';
 
-const sendMessage = z.object({ content: z.string().trim().min(1).max(2000) });
-const contactConfirmed = z.object({ contact_id: z.string().uuid() });
+const chatId = z.string().uuid();
+const sendMessage = z.object({ content: z.string().trim().min(1).max(2000), conversation_id: chatId.optional(), new_chat: z.boolean().optional() });
+const contactConfirmed = z.object({ contact_id: z.string().uuid(), conversation_id: chatId.optional() });
 
 @Controller('v1/chat/messages')
 @UseGuards(AuthGuard)
@@ -50,9 +51,17 @@ export class ChatController {
     };
   }
 
+  @Get('conversations')
+  async conversations(@CurrentUser() user: User) {
+    return { conversations: (await this.chat.conversations(user)).map((chat) => ({ id: chat.id, title: chat.title, updated_at: chat.updatedAt })) };
+  }
+
   @Get()
-  async list(@CurrentUser() user: User) {
-    return { messages: await Promise.all((await this.chat.history(user)).filter((message) => !message.hidden).map((message) => this.present(user, message))) };
+  async list(@CurrentUser() user: User, @Query('conversation') conversation?: string) {
+    const id = conversation === undefined ? undefined : chatId.safeParse(conversation);
+    if (id && !id.success) throw new BadRequestException('That is not a chat');
+    const messages = await this.chat.history(user, id?.data);
+    return { messages: await Promise.all(messages.filter((message) => !message.hidden).map((message) => this.present(user, message))) };
   }
 
   /** Lets the agent carry on after a contact card is confirmed. The server writes this message, not the client. */
@@ -63,13 +72,14 @@ export class ChatController {
     const contact = await this.contacts.get(user.id, parsed.data.contact_id);
     if (contact?.status !== 'confirmed') throw new BadRequestException('This contact is not confirmed');
     const message = `I confirmed ${contact.name}. Please continue.`;
-    return { reply: await this.present(user, await this.chat.send(user, message, { hidden: true })) };
+    return { reply: await this.present(user, await this.chat.send(user, message, { conversationId: parsed.data.conversation_id }, { hidden: true })) };
   }
 
   @Post()
   async send(@CurrentUser() user: User, @Body() body: unknown) {
     const parsed = sendMessage.safeParse(body);
     if (!parsed.success) throw new BadRequestException('A message needs 1 to 2000 characters');
-    return { reply: await this.present(user, await this.chat.send(user, parsed.data.content)) };
+    const saved = await this.chat.send(user, parsed.data.content, { conversationId: parsed.data.conversation_id, startNew: parsed.data.new_chat });
+    return { reply: await this.present(user, saved), conversation_id: saved.conversationId };
   }
 }

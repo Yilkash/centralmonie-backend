@@ -11,7 +11,14 @@ class FakeRepository {
     return 0;
   }
 
-  async add(_userId: string, role: ChatMessage['role'], content: string) {
+  async latestConversation() {
+    return { id: 'chat-1' };
+  }
+  async createConversation() {
+    return { id: 'chat-1' };
+  }
+
+  async add(_userId: string, _conversationId: string, role: ChatMessage['role'], content: string) {
     this.saved.push({ role, content });
     return { role, content } as ChatMessage;
   }

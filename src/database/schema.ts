@@ -17,6 +17,21 @@ export const users = pgTable('users', {
 
 export const chatRole = pgEnum('chat_role', ['user', 'assistant']);
 
+/** One chat a user can return to. The agent only remembers what was said in the same one. */
+export const conversations = pgTable(
+  'conversations',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    title: text('title').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [index('conversations_user_updated_idx').on(table.userId, table.updatedAt)],
+);
+
 export const chatMessages = pgTable(
   'chat_messages',
   {
@@ -24,6 +39,7 @@ export const chatMessages = pgTable(
     userId: uuid('user_id')
       .notNull()
       .references(() => users.id, { onDelete: 'cascade' }),
+    conversationId: uuid('conversation_id').references(() => conversations.id, { onDelete: 'cascade' }),
     role: chatRole('role').notNull(),
     content: text('content').notNull(),
     // A card shown with the message. Plain IDs: these tables are declared further down.
@@ -40,11 +56,12 @@ export const chatMessages = pgTable(
     hidden: boolean('hidden').notNull().default(false),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
-  (table) => [index('chat_messages_user_created_idx').on(table.userId, table.createdAt)],
+  (table) => [index('chat_messages_user_created_idx').on(table.userId, table.createdAt), index('chat_messages_conversation_idx').on(table.conversationId, table.createdAt)],
 );
 
 export type User = typeof users.$inferSelect;
 export type ChatMessage = typeof chatMessages.$inferSelect;
+export type Conversation = typeof conversations.$inferSelect;
 
 export const contactStatus = pgEnum('contact_status', ['proposed', 'confirmed']);
 export const destinationKind = pgEnum('destination_kind', ['phone', 'bank', 'wallet']);
