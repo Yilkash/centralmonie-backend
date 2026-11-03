@@ -227,6 +227,31 @@ export const deposits = pgTable(
   (table) => [uniqueIndex('deposits_tx_log_idx').on(table.txHash, table.logIndex), index('deposits_user_idx').on(table.userId)],
 );
 
+export const nairaDepositStatus = pgEnum('naira_deposit_status', ['waiting', 'processing', 'completed', 'failed', 'expired', 'cancelled']);
+
+/** Naira a user is paying in to get USDC. The id is the reference the partner knows it by. */
+export const nairaDeposits = pgTable(
+  'naira_deposits',
+  {
+    id: uuid('id').primaryKey(),
+    userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+    amountKobo: bigint('amount_kobo', { mode: 'number' }).notNull(),
+    usdcMinor: bigint('usdc_minor', { mode: 'number' }).notNull(),
+    rate: text('rate').notNull(),
+    bankName: text('bank_name'),
+    accountNumber: text('account_number').notNull(),
+    accountName: text('account_name'),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    status: nairaDepositStatus('status').notNull().default('waiting'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    completedAt: timestamp('completed_at', { withTimezone: true }),
+  },
+  (table) => [
+    index('naira_deposits_user_idx').on(table.userId, table.createdAt),
+    uniqueIndex('naira_deposits_one_waiting_idx').on(table.userId).where(sql`${table.status} = 'waiting'`),
+  ],
+);
+
 /** A pause switch for a route or the scheduler. No row means not paused. */
 export const opSwitches = pgTable('op_switches', {
   name: text('name').primaryKey(),
@@ -262,3 +287,4 @@ export type ContactDestination = typeof contactDestinations.$inferSelect;
 export type Plan = typeof plans.$inferSelect;
 export type PlanItem = typeof planItems.$inferSelect;
 export type Payment = typeof payments.$inferSelect;
+export type NairaDeposit = typeof nairaDeposits.$inferSelect;

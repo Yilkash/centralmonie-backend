@@ -1,7 +1,7 @@
 import { Logger } from '@nestjs/common';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { isAddress } from 'viem';
-import { BankLookup, ExchangeRates, PaymentProvider, PaymentRequest, PaymentResult, PaymentState } from '../providers';
+import { BankLookup, ExchangeRates, NairaOnramp, OnrampState, PaymentProvider, PaymentRequest, PaymentResult, PaymentState } from '../providers';
 import { echoesAmount, fromSwitchNumber, KOBO_DECIMALS, switchNumberToMinor, toSwitchNumber, USDC_DECIMALS } from './switch-money';
 
 // Naira to a bank and naira to USDC through Switch. Ported from Tokkenly's src/switch. Never run
@@ -158,7 +158,7 @@ const NEVER_STARTED = 'The partner has no record of this bank payment. Check it 
 const NO_SUCH_BANK = 'I could not find that bank.';
 
 /** The bank half of PaymentProvider, plus real exchange rates and bank account lookup. */
-export class SwitchProvider extends PaymentProvider implements ExchangeRates, BankLookup {
+export class SwitchProvider extends PaymentProvider implements ExchangeRates, BankLookup, NairaOnramp {
   private readonly logger = new Logger(SwitchProvider.name);
   private readonly baseUrl: string;
   private readonly apiKey: string;
@@ -266,6 +266,32 @@ export class SwitchProvider extends PaymentProvider implements ExchangeRates, Ba
     if (STOPPED.has(word)) return { state: 'failed', reason: BANK_NOT_PAID };
     // AWAITING_DEPOSIT, PROCESSING, SCHEDULED, and any word not seen before.
     return { state: 'pending' };
+  }
+
+  /** Where a deposit stands. An unseen word changes nothing, so nobody is told their money arrived when it did not. */
+  async onrampState(reference: string): Promise<OnrampState> {
+    let word: string;
+    try {
+      const payment = await this.call<RawPayment>('GET', `/payment/status?${new URLSearchParams({ reference }).toString()}`);
+      word = String(payment.status ?? '').toUpperCase();
+    } catch {
+      return 'unknown';
+    }
+    if (word === 'AWAITING_DEPOSIT') return 'waiting';
+    if (word === COMPLETED) return 'completed';
+    if (STOPPED.has(word)) return 'failed';
+    if (word.includes('EXPIRE')) return 'expired';
+    if (word === 'PROCESSING' || word === 'SCHEDULED' || word.includes('RECEIVED')) return 'processing';
+    this.logger.warn(`onramp ${reference}: status word not seen before: ${word}`);
+    return 'unknown';
+  }
+
+  /** Switch states its floor as 1 US dollar. Rounded up to ₦100, so a small rate move cannot put it under. */
+  async onrampTerms(): Promise<{ nairaPerUsdc: number; minimumKobo: number }> {
+    const result = await this.call<{ rate?: number }>('POST', '/onramp/rate', { country: COUNTRY, currency: CURRENCY, asset: this.assetCode, channel: CHANNEL });
+    const rate = Number(fromSwitchNumber(result.rate, 6));
+    if (rate <= 0) throw new SwitchError('the rate was not positive', 200, true);
+    return { nairaPerUsdc: rate, minimumKobo: Math.ceil((rate * 1.01) / 100) * 100 * 100 };
   }
 
   /** The off-ramp rate. Buying and selling carry different spreads, so this does not price an on-ramp. */

@@ -7,6 +7,7 @@ import { WalletModule } from './wallet/wallet.module';
 import { validateEnv } from './config/env';
 import { ContactsModule } from './contacts/contacts.module';
 import { DatabaseModule } from './database/database.module';
+import { DepositsModule } from './deposits/deposits.module';
 import { HealthController } from './health/health.controller';
 import { PlansModule } from './plans/plans.module';
 import { AdminModule } from './ops/admin.module';
@@ -24,6 +25,7 @@ import { UsersModule } from './users/users.module';
     ChainModule,
     NotificationsModule,
     WalletModule,
+    DepositsModule,
     UsersModule,
     ChatModule,
     ContactsModule,

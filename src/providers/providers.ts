@@ -45,6 +45,28 @@ export abstract class PaymentProvider {
   abstract status(reference: string, providerReference: string, route?: PaymentRoute): Promise<PaymentState>;
 }
 
+export interface OnrampOrder {
+  reference: string;
+  amountKobo: number;
+  usdcMinor: number;
+  rate: string;
+  bankName: string | null;
+  accountNumber: string;
+  accountName: string | null;
+  expiresAt: string | null;
+}
+
+/** Where a naira deposit stands. "unknown" means we could not tell, so nothing should change. */
+export type OnrampState = 'waiting' | 'processing' | 'completed' | 'failed' | 'expired' | 'unknown';
+
+/** Naira in, USDC out to the user's own wallet. Absent when no partner is set up. */
+export abstract class NairaOnramp {
+  abstract nairaOnramp(input: { reference: string; amountKobo: number; walletAddress: string }): Promise<OnrampOrder>;
+  abstract onrampState(reference: string): Promise<OnrampState>;
+  /** The live rate and smallest deposit. */
+  abstract onrampTerms(): Promise<{ nairaPerUsdc: number; minimumKobo: number }>;
+}
+
 export abstract class ExchangeRates {
   abstract nairaPerUsdc(): Promise<number>;
 }

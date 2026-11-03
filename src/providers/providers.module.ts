@@ -2,7 +2,7 @@ import { Module } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Env } from '../config/env';
 import { PayscribeProvider } from './payscribe/payscribe.provider';
-import { BankLookup, DataPlans, ExchangeRates, PaymentProvider } from './providers';
+import { BankLookup, DataPlans, ExchangeRates, NairaOnramp, PaymentProvider } from './providers';
 import { RoutedPaymentProvider } from './routed-provider';
 import { SimulatedBankLookup, SimulatedDataPlans, SimulatedExchangeRates, SimulatedPaymentProvider } from './simulated-providers';
 import { SwitchProvider } from './switch/switch.provider';
@@ -58,8 +58,9 @@ const SWITCH = Symbol('switch');
     },
     { provide: ExchangeRates, inject: [SWITCH], useFactory: (switch_: SwitchProvider | null) => switch_ ?? new SimulatedExchangeRates() },
     { provide: BankLookup, inject: [SWITCH], useFactory: (switch_: SwitchProvider | null) => switch_ ?? new SimulatedBankLookup() },
+    { provide: NairaOnramp, inject: [SWITCH], useFactory: (switch_: SwitchProvider | null) => switch_ },
     { provide: DataPlans, inject: [PAYSCRIBE], useFactory: (payscribe: PayscribeProvider | null) => payscribe ?? new SimulatedDataPlans() },
   ],
-  exports: [PaymentProvider, ExchangeRates, BankLookup, DataPlans],
+  exports: [PaymentProvider, ExchangeRates, BankLookup, DataPlans, NairaOnramp],
 })
 export class ProvidersModule {}
