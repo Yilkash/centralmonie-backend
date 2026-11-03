@@ -55,6 +55,8 @@ const envSchema = z.object({
 
 export type Env = z.infer<typeof envSchema>;
 
+const MAINNET_USDC = '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913';
+
 /** Refuses to start on bad settings, naming the variable but never its value. */
 export function validateEnv(raw: Record<string, unknown>): Env {
   const result = envSchema.safeParse(raw);
@@ -69,6 +71,7 @@ export function validateEnv(raw: Record<string, unknown>): Env {
     throw new Error('CHAIN_ID is not a test network. Real money needs ALLOW_REAL_MONEY set');
   }
   const onTestNetwork = result.data.CHAIN_ID !== 8453;
+  if (onTestNetwork && result.data.USDC_ADDRESS.toLowerCase() === MAINNET_USDC) throw new Error('USDC_ADDRESS is real USDC, on a test network');
   if (result.data.SWITCH_API_KEY) {
     // A live partner paying out against test USDC loses real naira. A sandbox partner on mainnet takes real USDC and pays nothing.
     if (onTestNetwork && result.data.SWITCH_SANDBOX !== 'true') throw new Error('SWITCH_SANDBOX must be true on a test network, with a sandbox key');
@@ -90,6 +93,10 @@ export function validateEnv(raw: Record<string, unknown>): Env {
     if (!result.data.REQUIRE_PIN) throw new Error('Real money needs REQUIRE_PIN=true');
     if (result.data.PAYMENTS_MODE !== 'chain') throw new Error('Real money needs PAYMENTS_MODE=chain');
     if (result.data.IDENTITY_PROVIDER !== 'privy') throw new Error('Real money needs the real sign-in');
+    // The defaults point at the test network, so these would otherwise follow it without a word.
+    if (result.data.USDC_ADDRESS.toLowerCase() !== MAINNET_USDC) throw new Error('Real money needs USDC_ADDRESS set to USDC on Base');
+    if (/sepolia/i.test(result.data.CHAIN_RPC_URL)) throw new Error('Real money needs CHAIN_RPC_URL set to a Base mainnet RPC');
+    if (result.data.PAYSCRIBE_BASE_URL?.includes('sandbox')) throw new Error('Real money needs the live PAYSCRIBE_BASE_URL');
   }
   if (result.data.PAYMENTS_MODE === 'chain' && !result.data.COLLECTION_ADDRESS) {
     throw new Error('PAYMENTS_MODE=chain needs COLLECTION_ADDRESS');

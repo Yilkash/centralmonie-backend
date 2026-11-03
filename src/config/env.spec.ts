@@ -23,6 +23,46 @@ describe('validateEnv', () => {
     expect(() => validateEnv({ ...valid, PORT: 'not-a-port' })).not.toThrow('super-secret-value');
   });
 
+  describe('real money', () => {
+    const live = {
+      ...valid,
+      CHAIN_ID: '8453',
+      ALLOW_REAL_MONEY: 'I understand this moves real money',
+      PAYMENTS_MODE: 'chain',
+      REQUIRE_PIN: 'true',
+      CHAIN_RPC_URL: 'https://mainnet.base.org',
+      USDC_ADDRESS: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+      COLLECTION_ADDRESS: '0x1',
+      COLLECTION_KEY: 'k',
+      SERVER_OWNER_KEY: 'k',
+      ADMIN_TOKEN: 'a'.repeat(24),
+      PAYSCRIBE_SECRET_KEY: 'k',
+      PAYSCRIBE_BASE_URL: 'https://api.payscribe.ng/api/v1/',
+      SWITCH_API_KEY: 'k',
+      SWITCH_BASE_URL: 'https://api.onswitch.xyz',
+      SWITCH_REFUND_ADDRESS: '0x1',
+      SWITCH_SANDBOX: 'false',
+    };
+
+    it('accepts complete live settings', () => {
+      expect(validateEnv(live).CHAIN_ID).toBe(8453);
+    });
+
+    it('refuses test-network leftovers', () => {
+      const { USDC_ADDRESS: _usdc, ...noUsdc } = live;
+      const { CHAIN_RPC_URL: _rpc, ...noRpc } = live;
+      expect(() => validateEnv(noUsdc)).toThrow(/USDC_ADDRESS/);
+      expect(() => validateEnv(noRpc)).toThrow(/CHAIN_RPC_URL/);
+      expect(() => validateEnv({ ...live, PAYSCRIBE_BASE_URL: 'https://sandbox.payscribe.ng/api/v1/' })).toThrow(/PAYSCRIBE_BASE_URL/);
+      expect(() => validateEnv({ ...live, SWITCH_SANDBOX: 'true' })).toThrow(/SWITCH_SANDBOX/);
+      expect(() => validateEnv({ ...live, REQUIRE_PIN: 'false' })).toThrow(/REQUIRE_PIN/);
+    });
+
+    it('refuses real USDC on a test network', () => {
+      expect(() => validateEnv({ ...valid, USDC_ADDRESS: live.USDC_ADDRESS })).toThrow(/real USDC/);
+    });
+  });
+
   describe('partners on a test network', () => {
     const chain = { ...valid, PAYMENTS_MODE: 'chain', COLLECTION_ADDRESS: '0x1' };
     const switchKey = { ...chain, SWITCH_API_KEY: 'k', SWITCH_BASE_URL: 'https://api.onswitch.xyz' };

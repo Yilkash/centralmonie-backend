@@ -383,9 +383,9 @@ describe('what the real sandbox answered on 3 November 2026', () => {
     await expect(provider(fake.fetch).fundingAddress(bank())).rejects.toThrow(/unavailable/);
   });
 
-  it('in the sandbox, still uses a real address if one comes back', async () => {
+  it('on test money, refuses a real address, because that means the key is a live one', async () => {
     const fake = partner({ 'GET /institution': banksRoute, 'POST /offramp/initiate': () => ok(offramp()) });
-    await expect(provider(fake.fetch, { sandbox: true }).fundingAddress(bank())).resolves.toBe(DEPOSIT);
+    await expect(provider(fake.fetch, { sandbox: true }).fundingAddress(bank())).rejects.toThrow(/unavailable/);
   });
 
   it('says a refused name needs saving again, not that the amount is too small', async () => {

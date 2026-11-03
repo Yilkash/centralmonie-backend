@@ -409,7 +409,8 @@ export class SwitchProvider extends PaymentProvider implements ExchangeRates, Ba
     const amountsAgree =
       echoesAmount(payment.source?.amount, request.usdcMinor, USDC_DECIMALS) &&
       (depositAmount === undefined || echoesAmount(depositAmount, request.usdcMinor, USDC_DECIMALS));
-    const usable = typeof address === 'string' && (isAddress(address, { strict: false }) || (this.sandbox && isSandboxPlaceholder(address)));
+    // A real address while we are on test money means the key is really a live one: stop before anything is sent.
+    const usable = typeof address === 'string' && (this.sandbox ? isSandboxPlaceholder(address) : isAddress(address, { strict: false }));
     if (!usable || !amountsAgree) {
       this.logger.error(`offramp ${request.reference}: the answer named no usable deposit address or a different amount`);
       throw new Error(BANK_UNAVAILABLE);

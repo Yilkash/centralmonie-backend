@@ -62,7 +62,7 @@ describe('10kobo API', () => {
   });
 
   it('reports health', async () => {
-    expect((await call('GET', '/health')).json()).toEqual({ status: 'ok' });
+    expect((await call('GET', '/health')).json()).toEqual({ status: 'ok', chain_id: 84532 });
   });
 
   it.each(['/v1/me', '/v1/chat/messages'])('refuses %s without a valid token', async (url) => {

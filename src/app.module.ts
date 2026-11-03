@@ -18,7 +18,8 @@ import { UsersModule } from './users/users.module';
 @Module({
   imports: [
     // Tests must never read a developer's .env, or they could reach real services with real keys.
-    ConfigModule.forRoot({ isGlobal: true, validate: validateEnv, ignoreEnvFile: process.env.NODE_ENV === 'test' }),
+    // Only the chosen file is read, so a setting missing from .env.mainnet cannot be filled in from the test .env.
+    ConfigModule.forRoot({ isGlobal: true, validate: validateEnv, envFilePath: process.env.DOTENV_CONFIG_PATH ?? '.env', ignoreEnvFile: process.env.NODE_ENV === 'test' }),
     DatabaseModule,
     ChainModule,
     NotificationsModule,
