@@ -103,13 +103,13 @@ export class ContactsService {
     return row ?? null;
   }
 
-  /** A phone the user gave just now for a plan, which approving that plan will save. */
-  async newPhoneDestination(userId: string, destinationId: string): Promise<{ contact: Contact; destination: ContactDestination } | null> {
+  /** A phone or wallet the user gave just now for a plan, which approving that plan will save. */
+  async newDestination(userId: string, destinationId: string, kind: 'phone' | 'wallet'): Promise<{ contact: Contact; destination: ContactDestination } | null> {
     const [row] = await this.db
       .select({ contact: contacts, destination: contactDestinations })
       .from(contactDestinations)
       .innerJoin(contacts, eq(contactDestinations.contactId, contacts.id))
-      .where(and(eq(contactDestinations.id, destinationId), eq(contacts.userId, userId), eq(contacts.status, 'proposed'), eq(contactDestinations.kind, 'phone')));
+      .where(and(eq(contactDestinations.id, destinationId), eq(contacts.userId, userId), eq(contacts.status, 'proposed'), eq(contactDestinations.kind, kind)));
     return row ?? null;
   }
 

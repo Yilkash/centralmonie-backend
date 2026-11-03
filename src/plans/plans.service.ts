@@ -79,8 +79,8 @@ export class PlansService {
 
   async priced(userId: string, item: ProposedItem, nairaPerUsdc: number) {
     const usable =
-      item.newPhone && item.route === 'airtime'
-        ? await this.contacts.newPhoneDestination(userId, item.destinationId)
+      item.newRecipient && (item.route === 'airtime' || item.route === 'usdc')
+        ? await this.contacts.newDestination(userId, item.destinationId, item.route === 'airtime' ? 'phone' : 'wallet')
         : await this.contacts.usableDestination(userId, item.destinationId);
     if (!usable) throw new PlanRefused('That recipient is not one of the saved contacts.');
     const { contact, destination } = usable;
@@ -132,7 +132,8 @@ export class PlansService {
     return {
       route: item.route,
       recipientName: contact.name,
-      recipientDetail: describeDestination(destination),
+      // Nobody has checked a new wallet yet, so its whole address is shown, not a shortened one.
+      recipientDetail: item.newRecipient && destination.walletAddress ? destination.walletAddress : describeDestination(destination),
       // The partner needs the plan's own id to deliver it.
       destination: dataPlanId ? { ...destination, dataPlanId } : destination,
       dataPlan,
