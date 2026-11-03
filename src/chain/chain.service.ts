@@ -13,7 +13,7 @@ import {
 } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { Env } from '../config/env';
-import { erc20Abi, managerAbi, smartWalletAbi, SpendPermission, SPEND_PERMISSION_MANAGER, Transfer, TxOutcome, WalletCall } from './chain';
+import { blockRanges, erc20Abi, managerAbi, smartWalletAbi, SpendPermission, SPEND_PERMISSION_MANAGER, Transfer, TxOutcome, WalletCall } from './chain';
 
 /** The contract refused the spend in a dry run, so no transaction was sent and nothing moved. */
 export class SpendRefused extends Error {}
@@ -90,15 +90,20 @@ export class ViemChain extends Chain {
   }
 
   async transfers(filter: { from?: string[]; to?: string[] }, fromBlock: number, toBlock: number): Promise<Transfer[]> {
-    const logs = await this.client.getContractEvents({
-      address: this.usdc,
-      abi: erc20Abi,
-      eventName: 'Transfer',
-      args: { from: filter.from as Address[] | undefined, to: filter.to as Address[] | undefined },
-      fromBlock: BigInt(fromBlock),
-      toBlock: BigInt(toBlock),
-    });
-    return logs.map((log) => this.toTransfer(log));
+    const found: Transfer[] = [];
+    // toBlock - fromBlock must stay under the limit, so each piece is one block short of it.
+    for (const [start, end] of blockRanges(fromBlock, toBlock, 199)) {
+      const logs = await this.client.getContractEvents({
+        address: this.usdc,
+        abi: erc20Abi,
+        eventName: 'Transfer',
+        args: { from: filter.from as Address[] | undefined, to: filter.to as Address[] | undefined },
+        fromBlock: BigInt(start),
+        toBlock: BigInt(end),
+      });
+      found.push(...logs.map((log) => this.toTransfer(log)));
+    }
+    return found;
   }
 
   private toTransfer(log: { transactionHash: Hash; logIndex: number; blockNumber: bigint; args: { from?: Address; to?: Address; value?: bigint } }): Transfer {

@@ -141,6 +141,21 @@ describe('nairaPerUsdc', () => {
   });
 });
 
+describe('nairaPerUsdc in an outage', () => {
+  it('keeps the recent rate for a few minutes, then says it cannot tell', async () => {
+    let time = 0;
+    let up = true;
+    const fake = partner({ 'POST /offramp/rate': () => (up ? ok({ rate: 1400 }) : down()) });
+    const switch_ = provider(fake.fetch, { now: () => time });
+    await expect(switch_.nairaPerUsdc()).resolves.toBe(1400);
+    up = false;
+    time = 5 * 60_000;
+    await expect(switch_.nairaPerUsdc()).resolves.toBe(1400);
+    time = 11 * 60_000;
+    await expect(switch_.nairaPerUsdc()).rejects.toThrow();
+  });
+});
+
 describe('accountName', () => {
   const lookup = () => ok({ bank_code: '058', account_number: ACCOUNT, account_name: 'CHINONSO ADEYEMI' });
 

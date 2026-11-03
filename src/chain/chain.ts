@@ -99,4 +99,11 @@ export function transfersCover(
   });
 }
 
+/** Splits a block range into pieces a public RPC will answer. Base Sepolia's limit was seen to be 200 blocks. */
+export function blockRanges(from: number, to: number, size = 200): [number, number][] {
+  const ranges: [number, number][] = [];
+  for (let start = from; start <= to; start += size) ranges.push([start, Math.min(start + size - 1, to)]);
+  return ranges;
+}
+
 export const same = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCase();

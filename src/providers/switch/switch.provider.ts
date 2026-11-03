@@ -137,6 +137,7 @@ const HOLDER_TYPE = 'INDIVIDUAL';
 // The bank name lookup was seen taking 14 seconds in the sandbox.
 const TIMEOUT_MS = 30_000;
 const RATE_TTL_MS = 30_000;
+const STALE_RATE_MS = 10 * 60_000;
 const BANKS_TTL_MS = 60 * 60_000;
 const MAX_REFERENCE_BYTES = 64;
 const REPLAY_WINDOW_MS = 5 * 60_000;
@@ -171,6 +172,7 @@ export class SwitchProvider extends PaymentProvider implements ExchangeRates, Ba
   private rateCache: { until: number; rate: number } | null = null;
   private banksCache: { until: number; banks: SwitchBank[] } | null = null;
   private readonly sandbox: boolean;
+  private lastRate: { at: number; rate: number } | undefined;
   private readonly deposits = new Map<string, Promise<SwitchDeposit>>();
 
   constructor(config: SwitchConfig) {
@@ -269,16 +271,23 @@ export class SwitchProvider extends PaymentProvider implements ExchangeRates, Ba
   /** The off-ramp rate. Buying and selling carry different spreads, so this does not price an on-ramp. */
   async nairaPerUsdc(): Promise<number> {
     if (this.rateCache && this.rateCache.until > this.now()) return this.rateCache.rate;
-    const result = await this.call<{ rate?: number }>('POST', '/offramp/rate', {
-      country: COUNTRY,
-      currency: CURRENCY,
-      asset: this.assetCode,
-      channel: CHANNEL,
-    });
-    const rate = Number(fromSwitchNumber(result.rate, 6));
-    if (rate <= 0) throw new SwitchError('the rate was not positive', 200, true);
-    this.rateCache = { until: this.now() + RATE_TTL_MS, rate };
-    return rate;
+    try {
+      const result = await this.call<{ rate?: number }>('POST', '/offramp/rate', {
+        country: COUNTRY,
+        currency: CURRENCY,
+        asset: this.assetCode,
+        channel: CHANNEL,
+      });
+      const rate = Number(fromSwitchNumber(result.rate, 6));
+      if (rate <= 0) throw new SwitchError('the rate was not positive', 200, true);
+      this.rateCache = { until: this.now() + RATE_TTL_MS, rate };
+      this.lastRate = { at: this.now(), rate };
+      return rate;
+    } catch (err) {
+      // A short outage keeps the recent rate. This only prices the card: Switch quotes again before any payment.
+      if (this.lastRate && this.now() - this.lastRate.at < STALE_RATE_MS) return this.lastRate.rate;
+      throw err;
+    }
   }
 
   /** Null when the bank or account does not exist. Throws when Switch cannot answer, which is not the same. */

@@ -14,7 +14,7 @@ export interface WalletSummary {
   balance_naira: string | null;
   limit_used: string;
   limit_left: string;
-  naira_per_usdc: number;
+  naira_per_usdc: number | null;
 }
 
 export interface ActivityEntry {
@@ -40,12 +40,13 @@ export class WalletService {
   ) {}
 
   async summary(user: User): Promise<WalletSummary> {
-    const [used, rate] = await Promise.all([this.limits.usedTodayKobo(user.id), this.rates.nairaPerUsdc()]);
+    // The balance must still show if the rate cannot be read, so it is shown without its naira value.
+    const [used, rate] = await Promise.all([this.limits.usedTodayKobo(user.id), this.rates.nairaPerUsdc().catch(() => null)]);
     const balance = user.walletAddress ? await this.chain.usdcBalance(user.walletAddress).catch(() => null) : null;
     return {
       address: user.walletAddress,
       balance_usdc: balance === null ? null : formatUsdc(Number(balance)),
-      balance_naira: balance === null ? null : formatNaira(usdcMinorToKobo(Number(balance), rate)),
+      balance_naira: balance === null || rate === null ? null : formatNaira(usdcMinorToKobo(Number(balance), rate)),
       limit_used: formatNaira(used),
       limit_left: formatNaira(Math.max(DAILY_LIMIT_KOBO - used, 0)),
       naira_per_usdc: rate,

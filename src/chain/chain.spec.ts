@@ -1,9 +1,21 @@
-import { transfersCover } from './chain';
+import { blockRanges, transfersCover } from './chain';
 
 const WALLET = '0xAAaa000000000000000000000000000000000001';
 const A = '0xbbbb000000000000000000000000000000000002';
 const B = '0xCcCc000000000000000000000000000000000003';
 const t = (from: string, to: string, value: bigint) => ({ from, to, value });
+
+describe('blockRanges', () => {
+  it('covers every block once, in pieces no bigger than the limit', () => {
+    expect(blockRanges(1, 450)).toEqual([[1, 200], [201, 400], [401, 450]]);
+    expect(blockRanges(5, 5)).toEqual([[5, 5]]);
+    expect(blockRanges(6, 5)).toEqual([]);
+  });
+
+  it('treats a span of exactly the limit as one piece, which the RPC accepts', () => {
+    expect(blockRanges(1, 200)).toEqual([[1, 200]]);
+  });
+});
 
 describe('transfersCover', () => {
   it('accepts exact transfers, whatever the letter case', () => {
