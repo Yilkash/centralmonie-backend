@@ -157,7 +157,7 @@ const NEVER_STARTED = 'The partner has no record of this bank payment. Check it 
 const NO_SUCH_BANK = 'I could not find that bank.';
 
 /** The bank half of PaymentProvider, plus real exchange rates and bank account lookup. */
-export class SwitchProvider implements PaymentProvider, ExchangeRates, BankLookup {
+export class SwitchProvider extends PaymentProvider implements ExchangeRates, BankLookup {
   private readonly logger = new Logger(SwitchProvider.name);
   private readonly baseUrl: string;
   private readonly apiKey: string;
@@ -174,6 +174,7 @@ export class SwitchProvider implements PaymentProvider, ExchangeRates, BankLooku
   private readonly deposits = new Map<string, Promise<SwitchDeposit>>();
 
   constructor(config: SwitchConfig) {
+    super();
     if (!config.baseUrl || !config.apiKey) throw new Error('SwitchProvider needs a baseUrl and an apiKey');
     if (!isAddress(config.refundAddress)) throw new Error('SwitchProvider needs a valid refundAddress');
     this.baseUrl = config.baseUrl.replace(/\/+$/, '');
@@ -189,6 +190,11 @@ export class SwitchProvider implements PaymentProvider, ExchangeRates, BankLooku
   }
 
   /** Turned away before any USDC moves: a bad destination, or an amount Switch will not price. */
+  /** Switch refuses anything under 1 USDC per transaction. */
+  override minimumUsdcMinor(): number {
+    return 1_000_000;
+  }
+
   async refusal(request: PaymentRequest): Promise<string | null> {
     const payout = readPayout(request);
     if (typeof payout === 'string') return payout;

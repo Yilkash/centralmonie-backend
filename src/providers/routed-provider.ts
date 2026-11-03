@@ -7,6 +7,10 @@ export class RoutedPaymentProvider extends PaymentProvider {
     super();
   }
 
+  override minimumUsdcMinor(route: PaymentRoute): number {
+    return this.routes[route].minimumUsdcMinor(route);
+  }
+
   refusal(request: PaymentRequest): Promise<string | null> {
     return this.routes[request.route].refusal(request);
   }

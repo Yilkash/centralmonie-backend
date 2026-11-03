@@ -25,6 +25,11 @@ export type PaymentState = { state: 'completed' } | { state: 'pending' } | { sta
  * replace them one at a time without changing the plan or chat code.
  */
 export abstract class PaymentProvider {
+  /** The smallest payment this partner takes on this route, in USDC minor units. */
+  minimumUsdcMinor(_route: PaymentRoute): number {
+    return 0;
+  }
+
   /** Why this payment cannot be taken on right now, such as a low naira balance, or null if it can. */
   abstract refusal(request: PaymentRequest): Promise<string | null>;
 

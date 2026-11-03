@@ -118,6 +118,13 @@ export class PlansService {
       usdcMinor = koboToUsdcMinor(amountKobo, nairaPerUsdc);
     }
 
+    const minimum = this.provider.minimumUsdcMinor(item.route);
+    if (usdcMinor < minimum) {
+      // Said before the card appears, with the naira figure, so nobody approves a payment that cannot go.
+      const smallest = formatNaira(Math.ceil(usdcMinorToKobo(minimum, nairaPerUsdc) / 100) * 100);
+      throw new PlanRefused(`The smallest bank transfer is ${formatUsdc(minimum)}, about ${smallest}.`);
+    }
+
     return {
       route: item.route,
       recipientName: contact.name,

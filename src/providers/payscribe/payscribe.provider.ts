@@ -107,7 +107,7 @@ type Order =
   | { route: 'data'; network: string; phone: string; plan: string };
 
 /** The airtime and data half of PaymentProvider, plus the real data plan list. */
-export class PayscribeProvider implements PaymentProvider, DataPlans {
+export class PayscribeProvider extends PaymentProvider implements DataPlans {
   private readonly logger = new Logger(PayscribeProvider.name);
   private readonly baseUrl: string;
   private readonly apiKey: string;
@@ -119,6 +119,7 @@ export class PayscribeProvider implements PaymentProvider, DataPlans {
   private readonly attempts = new Map<string, Promise<PaymentResult>>();
 
   constructor(config: PayscribeConfig) {
+    super();
     if (!config.baseUrl || !config.apiKey) throw new Error('PayscribeProvider needs a baseUrl and an apiKey');
     if (getDefaultAutoSelectFamilyAttemptTimeout() < CONNECTION_ATTEMPT_TIMEOUT_MS) {
       setDefaultAutoSelectFamilyAttemptTimeout(CONNECTION_ATTEMPT_TIMEOUT_MS);

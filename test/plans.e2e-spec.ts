@@ -8,6 +8,7 @@ import { applyMigrations } from '../src/database/migrate';
 import { IdentityProvider, InvalidIdentityError } from '../src/identity/identity-provider';
 import { ProposedItem } from '../src/plans/plan.types';
 import { PlanRefused, PlansService } from '../src/plans/plans.service';
+import { PaymentProvider } from '../src/providers/providers';
 import { User } from '../src/database/schema';
 import { UsersRepository } from '../src/users/users.repository';
 
@@ -66,6 +67,15 @@ describe('plans and contacts', () => {
   afterAll(async () => {
     await app?.close();
     await pool?.end();
+  });
+
+  it('refuses a bank transfer under the partner minimum before showing a card, and allows one at it', async () => {
+    const destination = await mother();
+    const provider = app.get(PaymentProvider, { strict: false });
+    const minimum = jest.spyOn(provider, 'minimumUsdcMinor').mockReturnValue(1_000_000);
+    await expect(plans.propose(alice, [bank(1000, destination.id)])).rejects.toThrow('The smallest bank transfer is 1.00 USDC, about ₦1,500.');
+    await expect(plans.propose(alice, [bank(1500, destination.id)])).resolves.toBeDefined();
+    minimum.mockRestore();
   });
 
   describe('contacts', () => {
