@@ -29,6 +29,8 @@ const envSchema = z.object({
   COLLECTION_KEY: z.string().optional(),
   // Owner key of the server smart account that runs scheduled payments.
   SERVER_OWNER_KEY: z.string().optional(),
+  // Bundler and paymaster for that account. Set, the paymaster pays its gas. Unset, the owner key pays in ETH.
+  SERVER_BUNDLER_URL: z.string().url().optional(),
   // A partner goes live for its route when its key is set. Sandbox URLs until Phase 6.
   PAYSCRIBE_BASE_URL: z.string().url().optional(),
   PAYSCRIBE_SECRET_KEY: z.string().min(1).optional(),

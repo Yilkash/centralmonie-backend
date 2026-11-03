@@ -5,7 +5,10 @@ import { Pool } from 'pg';
 import type { Address } from 'viem';
 import { configureApp, createAdapter } from '../../src/app';
 import { AppModule } from '../../src/app.module';
-import { Chain } from '../../src/chain/chain.service';
+import { generatePrivateKey } from 'viem/accounts';
+import { Chain, SpendRefused, ViemChain } from '../../src/chain/chain.service';
+import { approvePermissionCall } from '../../src/chain/chain.service';
+import { FakeBundler } from './fake-bundler';
 import { ContactsService } from '../../src/contacts/contacts.service';
 import { applyMigrations } from '../../src/database/migrate';
 import { User } from '../../src/database/schema';
@@ -14,7 +17,7 @@ import { SchedulerService } from '../../src/schedules/scheduler.service';
 import { ProposedSchedule, SchedulesService } from '../../src/schedules/schedules.service';
 import { Timing } from '../../src/schedules/timing';
 import { UsersRepository } from '../../src/users/users.repository';
-import { address, dealUsdc, KEYS, smartWallet, startFork, syncClock, test as chainTest, usdcBalance, walletSend } from './fork';
+import { address, dealUsdc, KEYS, RPC, smartWallet, startFork, syncClock, test as chainTest, USDC, usdcBalance, walletSend } from './fork';
 
 const COLLECTION = address(KEYS.collection);
 const RECIPIENT = '0x000000000000000000000000000000000000bEEF' as Address;
@@ -214,5 +217,76 @@ describe('scheduled payments on a fork of Base Sepolia', () => {
     await scheduler.tick(new Date(Date.now() + 6 * 60000));
     expect((await texts()).at(-1)).toMatch(/approval has ended/);
     expect(await paymentRows()).toHaveLength(0);
+  });
+
+  describe('through a bundler, so a paymaster pays the gas', () => {
+    // Brand new every run, so its account really has never been deployed.
+    const OWNER = generatePrivateKey();
+    let bundler: FakeBundler;
+    let sponsored: ViemChain;
+    let spender: Address;
+
+    /** A permission to a server account that has never been deployed and has no way to pay for itself but its deposit. */
+    async function permissionFor(amount: string) {
+      const proposed = await schedules.propose(user.id, [usdcItem(amount, monthly)]);
+      const { items } = await schedules.approve(user, proposed.groupId);
+      const permission = { ...(items[0]!.permission as Parameters<Chain['spendAndForward']>[0]), spender };
+      await walletSend(KEYS.user, wallet, [approvePermissionCall(permission)]);
+      return permission;
+    }
+
+    beforeAll(async () => {
+      bundler = new FakeBundler(KEYS.collection, 18546);
+      await bundler.start();
+      const settings: Record<string, unknown> = {
+        CHAIN_RPC_URL: RPC,
+        CHAIN_ID: 84532,
+        USDC_ADDRESS: USDC,
+        SERVER_OWNER_KEY: OWNER,
+        SERVER_BUNDLER_URL: bundler.url,
+        COLLECTION_KEY: KEYS.collection,
+      };
+      sponsored = new ViemChain({ get: (name: string) => settings[name] } as never);
+      spender = (await sponsored.spender()) as Address;
+      // The fake bundler has no paymaster, so the account's own deposit stands in for it. The owner key stays empty.
+      await chainTest.setBalance({ address: spender, value: 10n ** 18n });
+      await chainTest.setBalance({ address: address(OWNER), value: 0n });
+    });
+
+    afterAll(() => bundler.stop());
+
+    beforeEach(() => {
+      bundler.refusePaymaster = false;
+      bundler.refuseSend = false;
+    });
+
+    it('deploys the account and pays in one operation, with no ETH on the owner key', async () => {
+      expect(await chainTest.getCode({ address: spender })).toBeUndefined();
+      const permission = await permissionFor('1');
+      const before = await usdcBalance(RECIPIENT);
+      const seen: string[] = [];
+      const hash = await sponsored.spendAndForward(permission, 1_000_000, RECIPIENT, async (sent) => void seen.push(sent));
+      expect(await usdcBalance(RECIPIENT)).toBe(before + 1_000_000n);
+      expect(seen).toEqual([hash]);
+      expect(await chainTest.getCode({ address: spender })).toBeDefined();
+      expect(await chainTest.getBalance({ address: address(OWNER) })).toBe(0n);
+    });
+
+    it('says nothing moved when the permission or the paymaster refuses', async () => {
+      const permission = await permissionFor('1');
+      const before = await usdcBalance(RECIPIENT);
+      await expect(sponsored.spendAndForward(permission, 1_000_001, RECIPIENT)).rejects.toBeInstanceOf(SpendRefused);
+      bundler.refusePaymaster = true;
+      await expect(sponsored.spendAndForward(permission, 1_000_000, RECIPIENT)).rejects.toBeInstanceOf(SpendRefused);
+      expect(await usdcBalance(RECIPIENT)).toBe(before);
+    });
+
+    it('treats trouble at the send as doubt, never as nothing sent', async () => {
+      const permission = await permissionFor('1');
+      bundler.refuseSend = true;
+      const failure = await sponsored.spendAndForward(permission, 1_000_000, RECIPIENT).catch((error: Error) => error);
+      expect(failure).toBeInstanceOf(Error);
+      expect(failure).not.toBeInstanceOf(SpendRefused);
+    });
   });
 });

@@ -49,6 +49,7 @@ export class ViemChain extends Chain {
   private readonly rpcUrl: string;
   private readonly collectionKey: string | undefined;
   private readonly serverKey: string | undefined;
+  private readonly bundlerUrl: string | undefined;
   private serverAccount: Promise<Address> | undefined;
 
   constructor(config: ConfigService<Env, true>) {
@@ -57,6 +58,7 @@ export class ViemChain extends Chain {
     this.usdc = config.get('USDC_ADDRESS', { infer: true }) as Address;
     this.collectionKey = config.get('COLLECTION_KEY', { infer: true });
     this.serverKey = config.get('SERVER_OWNER_KEY', { infer: true });
+    this.bundlerUrl = config.get('SERVER_BUNDLER_URL', { infer: true });
     this.chainDef = defineChain({
       id: config.get('CHAIN_ID', { infer: true }),
       name: 'configured',
@@ -164,7 +166,8 @@ export class ViemChain extends Chain {
     const { toCoinbaseSmartAccount } = await import('viem/account-abstraction');
     const owner = privateKeyToAccount(this.serverKey as Hex);
     const account = await toCoinbaseSmartAccount({ client: this.client, owners: [owner], version: '1.1' });
-    if (!(await this.client.getCode({ address: account.address }))) {
+    // Through a bundler, the first operation deploys it, so the owner key never needs ETH.
+    if (!this.bundlerUrl && !(await this.client.getCode({ address: account.address }))) {
       const { factory, factoryData } = await account.getFactoryArgs();
       const hash = await this.wallet(this.serverKey!).sendTransaction({ to: factory!, data: factoryData! });
       const receipt = await this.client.waitForTransactionReceipt({ hash, timeout: 60000 });
@@ -176,6 +179,7 @@ export class ViemChain extends Chain {
 
   async spendAndForward(permission: SpendPermission, usdcMinor: number, to: string, onSent?: (hash: string) => Promise<void>): Promise<string> {
     if (!this.serverKey) throw new Error('No server key is set');
+    if (this.bundlerUrl) return this.spendThroughBundler(this.bundlerUrl, permission, usdcMinor, to, onSent);
     const account = await this.ensureServerAccount();
     const value = BigInt(usdcMinor);
     // The owner key calls the account directly and pays gas in ETH. Both steps run in one transaction.
@@ -210,6 +214,48 @@ export class ViemChain extends Chain {
     await onSent?.(hash);
     const receipt = await this.client.waitForTransactionReceipt({ hash, timeout: 60000 });
     if (receipt.status !== 'success') throw new SpendRefused('The spend transaction reverted');
+    return hash;
+  }
+
+  /**
+   * The same one transaction, sent as a user operation so a paymaster pays the gas. Everything before
+   * the send is certain to have moved nothing. From the send onwards, doubt means stop and never resend.
+   */
+  private async spendThroughBundler(url: string, permission: SpendPermission, usdcMinor: number, to: string, onSent?: (hash: string) => Promise<void>): Promise<string> {
+    const { createBundlerClient, toCoinbaseSmartAccount } = await import('viem/account-abstraction');
+    const value = BigInt(usdcMinor);
+    const account = await toCoinbaseSmartAccount({ client: this.client, owners: [privateKeyToAccount(this.serverKey as Hex)], version: '1.1' });
+    const bundler = createBundlerClient({ account, client: this.client, transport: http(url), paymaster: true });
+
+    let signed;
+    try {
+      await this.client.simulateContract({
+        address: SPEND_PERMISSION_MANAGER,
+        abi: managerAbi,
+        functionName: 'spend',
+        args: [toContractPermission(permission), value],
+        account: account.address,
+      });
+      const prepared = await bundler.prepareUserOperation({
+        calls: [
+          { to: SPEND_PERMISSION_MANAGER, data: encodeFunctionData({ abi: managerAbi, functionName: 'spend', args: [toContractPermission(permission), value] }) },
+          { to: this.usdc, data: encodeFunctionData({ abi: erc20Abi, functionName: 'transfer', args: [to as Address, value] }) },
+        ],
+      });
+      signed = { ...prepared, signature: await account.signUserOperation(prepared) };
+    } catch (error) {
+      // The name only: a bundler's error can carry its URL, and that holds a key.
+      this.logger.warn(`Could not prepare a scheduled payment: ${(error as Error).name}`);
+      throw new SpendRefused('The payment could not be prepared');
+    }
+
+    const operation = await bundler.sendUserOperation(signed as Parameters<typeof bundler.sendUserOperation>[0]);
+    this.logger.log(`Scheduled payment sent as operation ${operation}`);
+    const receipt = await bundler.waitForUserOperationReceipt({ hash: operation, timeout: 120000 });
+    const hash = receipt.receipt.transactionHash;
+    await onSent?.(hash);
+    // The batch stands or falls together, so a failed operation moved nothing.
+    if (!receipt.success) throw new SpendRefused('The spend operation reverted');
     return hash;
   }
 }
