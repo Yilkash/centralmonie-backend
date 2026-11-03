@@ -544,7 +544,6 @@ const BANK_ALIASES: Record<string, string> = {
   gtb: 'guaranty trust bank',
   gt: 'guaranty trust bank',
   'gt bank': 'guaranty trust bank',
-  guaranty: 'guaranty trust bank',
   firstbank: 'first bank',
   fbn: 'first bank',
   uba: 'united bank for africa plc',
