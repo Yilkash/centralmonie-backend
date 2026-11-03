@@ -46,6 +46,7 @@ export interface EvalCase {
 const bank = (to: string, naira: number): ExpectedItem => ({ route: 'bank', to, naira });
 const air = (to: string, naira: number): ExpectedItem => ({ route: 'airtime', to, naira });
 const usdc = (to: string, amount: number): ExpectedItem => ({ route: 'usdc', to, usdc: amount });
+const usdcToBank = (to: string, amount: number): ExpectedItem => ({ route: 'bank', to, usdc: amount });
 const data = (to: string, naira: number): ExpectedItem => ({ route: 'data', to, naira });
 const plan = (...items: ExpectedItem[]): Expected => ({ type: 'plan', items });
 const ask = (...mentions: string[]): Expected => ({ type: 'ask', mentions });
@@ -102,6 +103,10 @@ export const CASES: EvalCase[] = [
   c('amounts', 'send one hundred and fifty thousand naira to Emeka', plan(bank('Emeka', 150000))),
   c('amounts', 'give Ada 2 hundred thousand', plan(bank('Ada', 200000))),
   c('amounts', 'send 0.5 USDC to Halima', plan(usdc('Halima', 0.5))),
+  c('usdc_to_bank', 'send 10 usdc to Mother', plan(usdcToBank('Mother', 10))),
+  c('usdc_to_bank', 'Send 1.5 usdc to mum', plan(usdcToBank('Mother', 1.5))),
+  c('usdc_to_bank', 'transfer 2 USDC to Mother and 5 usdc to Halima', plan(usdcToBank('Mother', 2), usdc('Halima', 5))),
+  c('usdc_to_bank', 'in 30 minutes send 3 usdc to Mother', sched(later(usdcToBank('Mother', 3), { delay: 30 }))),
   c('amounts', 'buy N50 airtime for Scolar', plan(air('Scolar', 50))),
 
   // Several in one message: 12
@@ -127,7 +132,6 @@ export const CASES: EvalCase[] = [
   c('ask_recipient', 'airtime to my sister 100', ask()),
   c('ask_recipient', 'send money to my pastor, 20k', ask()),
   c('ask_recipient', 'send 1000 to him', ask()),
-  c('ask_recipient', 'send 10 usdc to Mother', ask()),
   c('ask_recipient', 'send 5000 to Scolar', ask()),
   c('ask_recipient', 'send 5 usdc to Kc', ask()),
   c('ask_recipient', 'buy data for Mother', ask()),

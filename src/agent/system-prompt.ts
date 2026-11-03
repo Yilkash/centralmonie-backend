@@ -20,7 +20,8 @@ When to ask a question. The test: could a wrong guess change who gets paid, or h
 
 Choosing the route:
 - Airtime goes to a phone. Data goes to a phone: call list_data_plans, and ask which plan if the request does not clearly match one.
-- "Send money" in naira goes to a bank account. USDC goes to a wallet address.
+- "Send money" in naira goes to a bank account. USDC goes to a wallet address when the contact has one.
+- A USDC amount to a contact with a bank account and no wallet goes to that bank account, paid out as naira: use route bank with amount_usdc set and amount_naira null. Do not ask for a wallet address. Only ask if the contact has neither a wallet nor a bank account.
 - "Pay", "send" or "transfer" with an amount and no mention of airtime or data means a bank transfer. If the contact has a bank account, use it without asking, even if they also have a phone number.
 - If the contact has no destination for that route, ask for it.
 

@@ -78,6 +78,12 @@ describe('plans and contacts', () => {
     minimum.mockRestore();
   });
 
+  it('takes a USDC amount to a bank account as exactly that much USDC, paid out in naira', async () => {
+    const destination = await mother();
+    const plan = await plans.propose(alice, [{ route: 'bank', destinationId: destination.id, amountNaira: null, amountUsdc: '1.5', dataPlanId: null }]);
+    expect(plan.items[0]).toMatchObject({ route: 'bank', usdcMinor: 1_500_000, amountKobo: 225_000 });
+  });
+
   describe('contacts', () => {
     it('stores the name the bank gives, and the network of a phone', async () => {
       const account = await contacts.propose(alice, 'Mother', ['mum'], { kind: 'bank', bankName: 'Access', accountNumber: '0123454821' });

@@ -86,7 +86,7 @@ export class SchedulesService {
             destination: priced.destination,
             dataPlan: priced.dataPlan,
             amountKobo: priced.amountKobo,
-            fixedUsdcMinor: item.route === 'usdc' ? priced.usdcMinor : null,
+            fixedUsdcMinor: item.route === 'usdc' || (item.route === 'bank' && item.amountNaira === null) ? priced.usdcMinor : null,
             runsLeft: timing.kind === 'once' ? 1 : timing.occurrences,
             expiresAt: new Date(now.getTime() + PROPOSAL_LIFETIME_MS),
           };

@@ -48,7 +48,7 @@ export const AGENT_TOOLS: Anthropic.Tool[] = [
   {
     name: 'propose_plan',
     description:
-      'Shows the user an approval card for one or more payments. Moves no money. amount_naira is for airtime and bank; amount_usdc is a decimal string for usdc; data_plan_id is for data. Set the others to null.',
+      'Shows the user an approval card for one or more payments. Moves no money. amount_naira is for airtime and bank; amount_usdc is a decimal string for usdc, or for bank when the user named a USDC amount and amount_naira is then null; data_plan_id is for data. Set the others to null.',
     strict: true,
     input_schema: {
       type: 'object',

@@ -92,7 +92,8 @@ export class PlansService {
     let dataPlan: string | null = null;
     let dataPlanId: string | null = null;
 
-    if (item.route === 'usdc') {
+    // A USDC amount to a bank account is exactly that much USDC, paid out as naira at the rate.
+    if (item.route === 'usdc' || (item.route === 'bank' && item.amountNaira === null && item.amountUsdc !== null)) {
       const parsed = item.amountUsdc === null ? null : parseUsdc(item.amountUsdc);
       if (!parsed) throw new PlanRefused('A USDC payment needs a positive USDC amount.');
       usdcMinor = parsed;
