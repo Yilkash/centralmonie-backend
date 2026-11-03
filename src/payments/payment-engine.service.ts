@@ -98,7 +98,7 @@ export class PaymentEngine {
       const hash = owner?.wallet ? await this.chain.sendFromCollection(owner.wallet, payment.usdcMinor) : null;
       if (!hash) return await support(keep);
       await this.finish(payment.id, { status: 'returned', refundTxHash: hash });
-      await this.notifications.notify(payment.userId, `Your payment to ${name} failed, so ${formatUsdc(payment.usdcMinor)} went back to your wallet.`);
+      await this.notifications.notify(payment.userId, `Your payment to ${name} failed, so ${formatUsdc(payment.usdcMinor)} went back to your wallet.`, hash);
     } catch (error) {
       // The refund may or may not have gone out. A person must check before anything is sent again.
       this.logger.error(`Refund failed for ${payment.id}: ${(error as Error).name}`);

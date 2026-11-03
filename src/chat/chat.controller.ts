@@ -31,6 +31,7 @@ export class ChatController {
       role: message.role,
       content: message.content,
       notice: message.notice,
+      tx_hash: message.txHash,
       created_at: message.createdAt,
       plan: message.planId ? presentPlan(await this.plans.get(user.id, message.planId)) : null,
       schedule_group: message.scheduleGroupId ? presentGroup(await this.schedules.group(user.id, message.scheduleGroupId)) : null,

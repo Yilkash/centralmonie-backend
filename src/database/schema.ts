@@ -31,6 +31,8 @@ export const chatMessages = pgTable(
     contactId: uuid('contact_id'),
     scheduleGroupId: uuid('schedule_group_id'),
     cancelScheduleId: uuid('cancel_schedule_id'),
+    // The blockchain transaction a notice is about, so the chat can link to it.
+    txHash: text('tx_hash'),
     // An automatic notice from the app, such as a scheduled payment going out. The AI did not write it.
     notice: boolean('notice').notNull().default(false),
     // Written by the app rather than typed by the user: the model reads it, the chat does not show it.
@@ -167,6 +169,9 @@ export const schedules = pgTable(
     runsLeft: integer('runs_left'),
     attempts: integer('attempts').notNull().default(0),
     lastError: text('last_error'),
+    // The latest payment that went out, for the receipt on the card.
+    lastTxHash: text('last_tx_hash'),
+    lastPaidAt: timestamp('last_paid_at', { withTimezone: true }),
     remindedFor: timestamp('reminded_for', { withTimezone: true }),
     permission: jsonb('permission'),
     expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),

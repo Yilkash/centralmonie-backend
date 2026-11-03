@@ -46,7 +46,7 @@ export class DepositsService {
           .onConflictDoNothing()
           .returning({ id: deposits.id });
         if (inserted.length === 0) continue;
-        await this.notifications.notify(userId, `You received ${formatUsdc(Number(transfer.value))} in your wallet.`);
+        await this.notifications.notify(userId, `You received ${formatUsdc(Number(transfer.value))} in your wallet.`, transfer.txHash);
         announced += 1;
       }
     }

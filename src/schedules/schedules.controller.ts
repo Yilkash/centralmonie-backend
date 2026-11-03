@@ -23,6 +23,8 @@ export const presentSchedule = (schedule: Schedule) => ({
   when: whenOf(schedule),
   next_run_at: schedule.nextRunAt,
   last_error: schedule.lastError,
+  last_tx_hash: schedule.lastTxHash,
+  last_paid_at: schedule.lastPaidAt,
 });
 
 export const presentGroup = (group: ScheduleGroupView) => ({
