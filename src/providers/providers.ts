@@ -37,7 +37,7 @@ export abstract class PaymentProvider {
   /** Must be safe to call twice with one reference: the partner must not pay twice. */
   abstract pay(request: PaymentRequest): Promise<PaymentResult>;
 
-  abstract status(reference: string, providerReference: string): Promise<PaymentState>;
+  abstract status(reference: string, providerReference: string, route?: PaymentRoute): Promise<PaymentState>;
 }
 
 export abstract class ExchangeRates {
