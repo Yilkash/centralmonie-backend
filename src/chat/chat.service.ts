@@ -28,6 +28,14 @@ export class ChatService {
     return conversation;
   }
 
+  async rename(user: User, id: string, title: string): Promise<void> {
+    if (!(await this.messages.renameConversation(user.id, id, title))) throw new NotFoundException('Chat not found');
+  }
+
+  async remove(user: User, id: string): Promise<void> {
+    if (!(await this.messages.deleteConversation(user.id, id))) throw new NotFoundException('Chat not found');
+  }
+
   async history(user: User, conversationId?: string): Promise<ChatMessage[]> {
     const conversation = conversationId ? await this.owned(user, conversationId) : await this.messages.latestConversation(user.id);
     return conversation ? this.messages.recent(conversation.id, HISTORY_LIMIT) : [];

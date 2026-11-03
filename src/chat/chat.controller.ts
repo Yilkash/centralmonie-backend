@@ -1,6 +1,6 @@
 import { presentDeposit } from '../deposits/deposits.controller';
 import { NairaDepositsService } from '../deposits/deposits.service';
-import { BadRequestException, Body, Controller, Get, Post, Query, UseGuards } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Delete, Get, Param, ParseUUIDPipe, Patch, Post, Query, UseGuards } from '@nestjs/common';
 import { z } from 'zod';
 import { AuthGuard } from '../auth/auth.guard';
 import { CurrentUser } from '../auth/current-user.decorator';
@@ -13,6 +13,7 @@ import { SchedulesService } from '../schedules/schedules.service';
 import { ChatService } from './chat.service';
 
 const chatId = z.string().uuid();
+const renameChat = z.object({ title: z.string().trim().min(1).max(80) });
 const sendMessage = z.object({ content: z.string().trim().min(1).max(2000), conversation_id: chatId.optional(), new_chat: z.boolean().optional() });
 const contactConfirmed = z.object({ contact_id: z.string().uuid(), conversation_id: chatId.optional() });
 
@@ -54,6 +55,20 @@ export class ChatController {
   @Get('conversations')
   async conversations(@CurrentUser() user: User) {
     return { conversations: (await this.chat.conversations(user)).map((chat) => ({ id: chat.id, title: chat.title, updated_at: chat.updatedAt })) };
+  }
+
+  @Patch('conversations/:id')
+  async rename(@CurrentUser() user: User, @Param('id', ParseUUIDPipe) id: string, @Body() body: unknown) {
+    const parsed = renameChat.safeParse(body);
+    if (!parsed.success) throw new BadRequestException('A chat name needs 1 to 80 characters');
+    await this.chat.rename(user, id, parsed.data.title);
+    return { ok: true };
+  }
+
+  @Delete('conversations/:id')
+  async remove(@CurrentUser() user: User, @Param('id', ParseUUIDPipe) id: string) {
+    await this.chat.remove(user, id);
+    return { ok: true };
   }
 
   @Get()

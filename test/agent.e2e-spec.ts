@@ -123,6 +123,36 @@ describe('agent through the API', () => {
       expect((await call('GET', '/v1/chat/messages?conversation=nope')).statusCode).toBe(400);
     });
 
+    it('renames and deletes a chat, leaving payments alone', async () => {
+      model.script = [tool('list_contacts', {}), tool('propose_plan', planFor(5000)), say('Please approve.'), say('other')];
+      const first = (await call('POST', '/v1/chat/messages', { content: 'send 5k to my mum' })).json();
+      const planId = first.reply.plan.id;
+      await call('POST', `/v1/plans/${planId}/approve`);
+      const second = (await chat('hello', { new_chat: true })).conversation_id;
+      const patch = (id: string, title: string) => app.inject({ method: 'PATCH', url: `/v1/chat/messages/conversations/${id}`, headers: { authorization: 'Bearer alice' }, payload: { title } });
+      const remove = (id: string) => app.inject({ method: 'DELETE', url: `/v1/chat/messages/conversations/${id}`, headers: { authorization: 'Bearer alice' } });
+
+      expect((await patch(first.conversation_id, 'Family')).statusCode).toBe(200);
+      expect((await patch(first.conversation_id, '  ')).statusCode).toBe(400);
+      expect((await call('GET', '/v1/chat/messages/conversations')).json().conversations.find((c: { id: string }) => c.id === first.conversation_id).title).toBe('Family');
+
+      expect((await remove(first.conversation_id)).statusCode).toBe(200);
+      expect((await call('GET', `/v1/chat/messages?conversation=${first.conversation_id}`)).statusCode).toBe(404);
+      expect((await pool.query('SELECT count(*) FROM chat_messages WHERE conversation_id = $1', [first.conversation_id])).rows[0].count).toBe('0');
+      expect(await paymentCount()).toBe('1');
+      expect((await call('GET', '/v1/chat/messages/conversations')).json().conversations.map((c: { id: string }) => c.id)).toEqual([second]);
+      expect((await remove(first.conversation_id)).statusCode).toBe(404);
+    });
+
+    it("cannot rename or delete another user's chat", async () => {
+      const bob = (await pool.query(`INSERT INTO users (provider_subject) VALUES ('did:privy:bob') RETURNING id`)).rows[0].id;
+      const theirs = (await pool.query(`INSERT INTO conversations (user_id, title) VALUES ($1, 'private') RETURNING id`, [bob])).rows[0].id;
+      const headers = { authorization: 'Bearer alice' };
+      expect((await app.inject({ method: 'PATCH', url: `/v1/chat/messages/conversations/${theirs}`, headers, payload: { title: 'mine' } })).statusCode).toBe(404);
+      expect((await app.inject({ method: 'DELETE', url: `/v1/chat/messages/conversations/${theirs}`, headers })).statusCode).toBe(404);
+      expect((await pool.query('SELECT title FROM conversations WHERE id = $1', [theirs])).rows[0].title).toBe('private');
+    });
+
     it('puts a notice in the latest chat, and makes a chat if there is none', async () => {
       const notifications = app.get(NotificationsService, { strict: false });
       await notifications.notify(userId, 'Your deposit is complete.');

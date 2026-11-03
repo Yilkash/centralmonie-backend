@@ -81,6 +81,17 @@ export class ChatRepository {
     return row ?? null;
   }
 
+  async renameConversation(userId: string, id: string, title: string): Promise<boolean> {
+    const rows = await this.db.update(conversations).set({ title }).where(and(eq(conversations.id, id), eq(conversations.userId, userId))).returning({ id: conversations.id });
+    return rows.length > 0;
+  }
+
+  /** Removes the chat and its messages. Payments and schedules are separate records, so they are untouched. */
+  async deleteConversation(userId: string, id: string): Promise<boolean> {
+    const rows = await this.db.delete(conversations).where(and(eq(conversations.id, id), eq(conversations.userId, userId))).returning({ id: conversations.id });
+    return rows.length > 0;
+  }
+
   async latestConversation(userId: string): Promise<Conversation | null> {
     const [row] = await this.conversations(userId, 1);
     return row ?? null;

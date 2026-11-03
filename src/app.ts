@@ -11,7 +11,7 @@ export async function configureApp(app: NestFastifyApplication): Promise<void> {
   await app.register(cors, {
     origin: (origin: string | undefined, done: (error: Error | null, allow: boolean) => void) =>
       done(null, origin !== undefined && origins.includes(origin)),
-    methods: ['GET', 'POST', 'OPTIONS'],
+    methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Authorization', 'Content-Type'],
   });
   app.enableShutdownHooks();
