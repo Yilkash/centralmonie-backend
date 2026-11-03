@@ -90,7 +90,7 @@ describe('scheduled payments', () => {
     await scheduler.tick(later(31 * MINUTE));
     expect(await paymentRows(alice)).toEqual([{ amount_kobo: '500000', status: 'completed' }]);
     expect((await schedules.get(alice.id, group.items[0]!.id))!.status).toBe('completed');
-    expect((await texts(alice)).at(-1)).toMatch(/Sent: ₦5,000 bank transfer to Mother/);
+    expect((await texts(alice)).at(-1)).toMatch(/Scheduled payment sent, as you approved: ₦5,000 bank transfer to Mother/);
 
     await scheduler.tick(later(2 * DAY));
     expect(await paymentRows(alice)).toHaveLength(1);

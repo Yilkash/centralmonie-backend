@@ -106,8 +106,8 @@ export class SchedulerService {
       await this.db.update(scheduleRuns).set({ status: 'succeeded' }).where(eq(scheduleRuns.id, run.id));
       await this.advance(schedule, now);
       const [done] = await this.db.select().from(payments).where(eq(payments.id, attempt.payment.id));
-      if (done?.status === 'completed') await this.notifications.notify(schedule.userId, `Sent: ${labelOf(schedule)}.`);
-      else if (done?.status === 'paying') await this.notifications.notify(schedule.userId, `Processing: ${labelOf(schedule)}.`);
+      if (done?.status === 'completed') await this.notifications.notify(schedule.userId, `Scheduled payment sent, as you approved: ${labelOf(schedule)} (${schedule.recipientDetail}).`);
+      else if (done?.status === 'paying') await this.notifications.notify(schedule.userId, `Scheduled payment processing, as you approved: ${labelOf(schedule)} (${schedule.recipientDetail}).`);
       return;
     }
     await this.db.update(scheduleRuns).set({ status: 'failed', error: attempt.reason }).where(eq(scheduleRuns.id, run.id));

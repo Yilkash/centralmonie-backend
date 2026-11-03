@@ -8,6 +8,6 @@ export class NotificationsService {
   constructor(@Inject(DATABASE) private readonly db: Database) {}
 
   async notify(userId: string, text: string): Promise<void> {
-    await this.db.insert(chatMessages).values({ userId, role: 'assistant', content: text });
+    await this.db.insert(chatMessages).values({ userId, role: 'assistant', content: text, notice: true });
   }
 }

@@ -31,6 +31,8 @@ export const chatMessages = pgTable(
     contactId: uuid('contact_id'),
     scheduleGroupId: uuid('schedule_group_id'),
     cancelScheduleId: uuid('cancel_schedule_id'),
+    // An automatic notice from the app, such as a scheduled payment going out. The AI did not write it.
+    notice: boolean('notice').notNull().default(false),
     // Written by the app rather than typed by the user: the model reads it, the chat does not show it.
     hidden: boolean('hidden').notNull().default(false),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),

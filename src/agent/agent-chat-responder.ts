@@ -45,7 +45,8 @@ export class AgentChatResponder extends ChatResponder {
 
         if (response.stop_reason !== 'tool_use') {
           if (response.stop_reason !== 'end_turn') this.logger.warn(`Model stopped with ${response.stop_reason}`);
-          return { text: text || FAILED, ...cards() };
+          // The chat shows plain text, so markdown stars would appear as they are.
+          return { text: text.replace(/\*\*/g, '') || FAILED, ...cards() };
         }
 
         // The full content goes back, because it can carry thinking the model needs.
@@ -82,6 +83,7 @@ export class AgentChatResponder extends ChatResponder {
   }
 
   private async described(turn: ChatTurn, message: ChatMessage): Promise<string> {
+    if (message.notice) return `[Automatic notice from the app, not written by you: ${message.content}]`;
     if (message.scheduleGroupId) {
       const group = await this.schedules.group(turn.user.id, message.scheduleGroupId);
       return `${message.content}\n[Scheduled payment card shown earlier. Its status now: ${group.status}. ${group.items

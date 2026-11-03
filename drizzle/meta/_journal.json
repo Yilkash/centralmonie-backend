@@ -50,6 +50,13 @@
       "when": 1793692810577,
       "tag": "0006_grey_dragon_lord",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1793695171346,
+      "tag": "0007_tidy_redwing",
+      "breakpoints": true
     }
   ]
 }
