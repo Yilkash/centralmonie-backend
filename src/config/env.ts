@@ -42,6 +42,8 @@ const envSchema = z.object({
   SWITCH_SANDBOX: z.enum(['true', 'false']).optional(),
   // Asks for the user's PIN on every approval and new recipient. Turn on before real money.
   REQUIRE_PIN: z.enum(['true', 'false']).default('false').transform((value) => value === 'true'),
+  // Lets real money run without a PIN. Only this exact phrase does.
+  ALLOW_NO_PIN: z.string().optional(),
   // All users together, per day. A bug or an attack cannot move more than this.
   COMPANY_DAILY_CAP_NAIRA: z.coerce.number().int().positive().default(5_000_000),
   // Opens the admin API. Without it, the admin API refuses everyone.
@@ -90,7 +92,8 @@ export function validateEnv(raw: Record<string, unknown>): Env {
       ['PAYSCRIBE_SECRET_KEY', 'PAYSCRIBE_BASE_URL', 'SWITCH_API_KEY', 'SWITCH_BASE_URL', 'SWITCH_REFUND_ADDRESS', 'SERVER_OWNER_KEY', 'COLLECTION_KEY', 'ADMIN_TOKEN'] as const
     ).filter((name) => !result.data[name]);
     if (missing.length) throw new Error(`Real money needs: ${missing.join(', ')}`);
-    if (!result.data.REQUIRE_PIN) throw new Error('Real money needs REQUIRE_PIN=true');
+    // Without a PIN, a signed-in session alone can approve payments, so turning it off must be deliberate.
+    if (!result.data.REQUIRE_PIN && result.data.ALLOW_NO_PIN !== 'I understand approvals have no PIN') throw new Error('Real money needs REQUIRE_PIN=true');
     if (result.data.PAYMENTS_MODE !== 'chain') throw new Error('Real money needs PAYMENTS_MODE=chain');
     if (result.data.IDENTITY_PROVIDER !== 'privy') throw new Error('Real money needs the real sign-in');
     // The defaults point at the test network, so these would otherwise follow it without a word.

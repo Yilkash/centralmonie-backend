@@ -58,6 +58,11 @@ describe('validateEnv', () => {
       expect(() => validateEnv({ ...live, REQUIRE_PIN: 'false' })).toThrow(/REQUIRE_PIN/);
     });
 
+    it('runs without a PIN only when that is stated in full', () => {
+      expect(() => validateEnv({ ...live, REQUIRE_PIN: 'false', ALLOW_NO_PIN: 'yes' })).toThrow(/REQUIRE_PIN/);
+      expect(validateEnv({ ...live, REQUIRE_PIN: 'false', ALLOW_NO_PIN: 'I understand approvals have no PIN' }).REQUIRE_PIN).toBe(false);
+    });
+
     it('refuses real USDC on a test network', () => {
       expect(() => validateEnv({ ...valid, USDC_ADDRESS: live.USDC_ADDRESS })).toThrow(/real USDC/);
     });
