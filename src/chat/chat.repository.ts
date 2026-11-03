@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { desc, eq } from 'drizzle-orm';
+import { and, desc, eq, gte, sql } from 'drizzle-orm';
 import { DATABASE, Database } from '../database/database.module';
 import { ChatMessage, chatMessages } from '../database/schema';
 
@@ -18,6 +18,14 @@ export class ChatRepository {
       .values({ userId, role, content, planId: extra.planId ?? null, contactId: extra.contactId ?? null, scheduleGroupId: extra.scheduleGroupId ?? null, cancelScheduleId: extra.cancelScheduleId ?? null, hidden: extra.hidden ?? false })
       .returning();
     return message!;
+  }
+
+  async sentSince(userId: string, since: Date): Promise<number> {
+    const [row] = await this.db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(chatMessages)
+      .where(and(eq(chatMessages.userId, userId), eq(chatMessages.role, 'user'), gte(chatMessages.createdAt, since)));
+    return row?.count ?? 0;
   }
 
   /** The newest messages, returned oldest first. */

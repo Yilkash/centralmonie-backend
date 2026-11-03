@@ -38,6 +38,14 @@ const envSchema = z.object({
   SWITCH_CALLBACK_URL: z.string().url().optional(),
   SWITCH_ONRAMP_CALLBACK_URL: z.string().url().optional(),
   SWITCH_REFUND_ADDRESS: z.string().optional(),
+  // Asks for the user's PIN on every approval and new recipient. Turn on before real money.
+  REQUIRE_PIN: z.enum(['true', 'false']).default('false').transform((value) => value === 'true'),
+  // All users together, per day. A bug or an attack cannot move more than this.
+  COMPANY_DAILY_CAP_NAIRA: z.coerce.number().int().positive().default(5_000_000),
+  // Opens the admin API. Without it, the admin API refuses everyone.
+  ADMIN_TOKEN: z.string().min(24).optional(),
+  // Lets the web app's gas proxy ask whether a wallet belongs to one of our users.
+  SPONSORSHIP_TOKEN: z.string().min(24).optional(),
   // Timers for deposits, reconciliation and schedules. Off in unit tests.
   WORKER_ENABLED: z.enum(['true', 'false']).default('true').transform((value) => value === 'true'),
   WORKER_INTERVAL_MS: z.coerce.number().int().positive().default(15000),
@@ -61,6 +69,9 @@ export function validateEnv(raw: Record<string, unknown>): Env {
   // In simulated mode no USDC is collected, so a real partner would be paying out for free.
   if (result.data.PAYMENTS_MODE === 'simulated' && (result.data.PAYSCRIBE_SECRET_KEY || result.data.SWITCH_API_KEY)) {
     throw new Error('Partner keys need PAYMENTS_MODE=chain');
+  }
+  if (result.data.CHAIN_ID === 8453 && !result.data.REQUIRE_PIN) {
+    throw new Error('Real money needs REQUIRE_PIN=true');
   }
   if (result.data.PAYMENTS_MODE === 'chain' && !result.data.COLLECTION_ADDRESS) {
     throw new Error('PAYMENTS_MODE=chain needs COLLECTION_ADDRESS');

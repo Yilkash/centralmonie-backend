@@ -1,6 +1,5 @@
 import { Module, OnModuleInit } from '@nestjs/common';
 import { AuthModule } from '../auth/auth.module';
-import { OpsModule } from '../ops/ops.module';
 import { PaymentsModule } from '../payments/payments.module';
 import { WorkerService } from '../payments/worker.service';
 import { PlansModule } from '../plans/plans.module';
@@ -10,7 +9,7 @@ import { SchedulesController } from './schedules.controller';
 import { SchedulesService } from './schedules.service';
 
 @Module({
-  imports: [AuthModule, PaymentsModule, PlansModule, ProvidersModule, OpsModule],
+  imports: [AuthModule, PaymentsModule, PlansModule, ProvidersModule],
   controllers: [SchedulesController],
   providers: [SchedulesService, SchedulerService],
   exports: [SchedulesService, SchedulerService],

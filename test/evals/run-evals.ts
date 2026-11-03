@@ -15,10 +15,12 @@ import { ModelClient, ModelRequest } from '../../src/agent/model-client';
 import { AppModule } from '../../src/app.module';
 import { ContactsService, NewDestination } from '../../src/contacts/contacts.service';
 import { applyMigrations } from '../../src/database/migrate';
-import { ChatMessage, User } from '../../src/database/schema';
+import { ChatMessage, Schedule, User } from '../../src/database/schema';
+import { SchedulesService } from '../../src/schedules/schedules.service';
+import { Timing } from '../../src/schedules/timing';
 import { PlansService, PlanView } from '../../src/plans/plans.service';
 import { UsersRepository } from '../../src/users/users.repository';
-import { CASES, EvalCase, ExpectedItem } from './cases';
+import { CASES, EvalCase, ExpectedItem, ScheduledItem, When } from './cases';
 
 // USD per million tokens. Haiku and Sonnet cache prices are estimates: 0.1x to read, 1.25x to write.
 const MODEL = process.env.AGENT_MODEL ?? 'claude-haiku-5-5';
@@ -58,9 +60,71 @@ function sameItem(actual: PlanView['items'][number], want: ExpectedItem): boolea
   return actual.amountKobo === want.naira! * 100;
 }
 
-function grade(testCase: EvalCase, reply: { text: string }, plan: PlanView | null, contactProposed: boolean): string | null {
+function timingProblem(actual: Timing, want: When): string | null {
+  const wrong = (name: string, got: unknown, expected: unknown) => `${name} was ${String(got)}, expected ${String(expected)}`;
+  if (want.delay !== undefined && !(actual.kind === 'once' && actual.delayMinutes === want.delay)) return wrong('delay', JSON.stringify(actual), want.delay);
+  if (want.date !== undefined && !(actual.kind === 'once' && actual.date === want.date)) return wrong('date', JSON.stringify(actual), want.date);
+  if (want.time !== undefined && actual.time !== want.time) return wrong('time', actual.time, want.time);
+  if (want.frequency !== undefined) {
+    if (actual.kind !== 'recurring') return wrong('kind', actual.kind, 'recurring');
+    if (actual.frequency !== want.frequency) return wrong('frequency', actual.frequency, want.frequency);
+    if (want.interval !== undefined && actual.interval !== want.interval) return wrong('interval', actual.interval, want.interval);
+    if (want.weekday !== undefined && actual.weekday !== want.weekday) return wrong('weekday', actual.weekday, want.weekday);
+    if (want.day !== undefined && actual.dayOfMonth !== want.day) return wrong('day', actual.dayOfMonth, want.day);
+    if (want.lastDay !== undefined && actual.lastDayOfMonth !== want.lastDay) return wrong('lastDay', actual.lastDayOfMonth, want.lastDay);
+    if (want.occurrences !== undefined && actual.occurrences !== want.occurrences) return wrong('occurrences', actual.occurrences, want.occurrences);
+    if (want.startDate !== undefined && actual.startDate !== want.startDate) return wrong('startDate', actual.startDate, want.startDate);
+  }
+  return null;
+}
+
+function gradeSchedule(items: Schedule[] | null, want: ScheduledItem[], text: string): string | null {
+  if (!items) return `expected a card for later, got: ${text.slice(0, 120)}`;
+  const left = [...items];
+  for (const expected of want) {
+    const index = left.findIndex(
+      (item) =>
+        item.route === expected.route &&
+        item.recipientName === expected.to &&
+        (expected.usdc !== undefined ? item.fixedUsdcMinor === Math.round(expected.usdc * 1_000_000) : item.amountKobo === expected.naira! * 100),
+    );
+    if (index === -1) return `missing ${expected.route} to ${expected.to}: got ${items.map((i) => `${i.route}/${i.recipientName}/${i.amountKobo / 100}`).join(', ')}`;
+    const problem = timingProblem(left[index]!.timing as Timing, expected.when);
+    if (problem) return `${expected.to}: ${problem}`;
+    left.splice(index, 1);
+  }
+  return left.length ? `extra scheduled payment to ${left[0]!.recipientName}` : null;
+}
+
+function gradeItems(plan: PlanView | null, items: ExpectedItem[], text: string): string | null {
+  if (!plan) return `expected a payment now, got: ${text.slice(0, 120)}`;
+  const unmatched = [...plan.items];
+  for (const want of items) {
+    const index = unmatched.findIndex((item) => sameItem(item, want));
+    if (index === -1) return `missing ${want.route} to ${want.to}: got ${plan.items.map((i) => `${i.route}/${i.recipientName}/${i.amountKobo / 100}`).join(', ')}`;
+    unmatched.splice(index, 1);
+  }
+  return unmatched.length ? `extra payment to ${unmatched[0]!.recipientName}` : null;
+}
+
+function grade(testCase: EvalCase, reply: { text: string }, plan: PlanView | null, contactProposed: boolean, scheduled: Schedule[] | null, cancelled: Schedule | null): string | null {
   const { expected } = testCase;
+  const anyCard = plan || scheduled || cancelled || contactProposed;
+  // A scheduled or cancel card where none was expected is as wrong as a payment.
+  if (!['schedule', 'both'].includes(expected.type) && scheduled) return `unexpected card for later: ${scheduled.map((s) => s.recipientName).join(', ')}`;
+  if (expected.type !== 'cancel' && cancelled) return `unexpected cancel card for ${cancelled.recipientName}`;
   switch (expected.type) {
+    case 'schedule':
+      if (plan) return `expected only a card for later, also got a payment now to ${plan.items.map((i) => i.recipientName).join(', ')}`;
+      return gradeSchedule(scheduled, expected.items, reply.text);
+    case 'both':
+      return gradeItems(plan, expected.now, reply.text) ?? gradeSchedule(scheduled, expected.later, reply.text);
+    case 'cancel':
+      if (!cancelled) return `expected a cancel card, got: ${reply.text.slice(0, 120)}`;
+      return cancelled.recipientName === expected.to ? null : `cancel card for ${cancelled.recipientName}`;
+    case 'answer':
+      if (anyCard) return 'expected only an answer, got a card';
+      return expected.pattern.test(reply.text) ? null : `the answer did not match ${expected.pattern}: ${reply.text.slice(0, 160)}`;
     case 'plan': {
       if (!plan) return `expected a plan, got: ${reply.text.slice(0, 120)}`;
       const unmatched = [...plan.items];
@@ -110,6 +174,21 @@ async function main(): Promise<void> {
     }
   }
 
+  // One repeating payment already running, for the cases about managing them.
+  const schedules = app.get(SchedulesService, { strict: false });
+  const scolar = (await contacts.listConfirmed(user.id)).find((contact) => contact.name === 'Scolar')!;
+  const running = await schedules.propose(user.id, [
+    {
+      route: 'airtime',
+      destinationId: scolar.destinations[0]!.id,
+      amountNaira: 500,
+      amountUsdc: null,
+      dataPlanId: null,
+      timing: { kind: 'recurring', frequency: 'monthly', interval: 1, weekday: null, dayOfMonth: null, lastDayOfMonth: false, time: null, occurrences: null, startDate: null },
+    },
+  ]);
+  await schedules.approve(user, running.groupId);
+
   const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, calls: 0 };
   const create = model.create.bind(model);
   model.create = async (request: ModelRequest) => {
@@ -127,7 +206,9 @@ async function main(): Promise<void> {
     const history = (testCase.prior ?? []).map((message) => ({ ...message, planId: null, contactId: null })) as ChatMessage[];
     const reply = await responder.reply({ user, message: testCase.message, history });
     const plan = reply.planId ? await plans.get(user.id, reply.planId) : null;
-    const failure = grade(testCase, reply, plan, Boolean(reply.contactId));
+    const scheduled = reply.scheduleGroupId ? (await schedules.group(user.id, reply.scheduleGroupId)).items : null;
+    const cancelled = reply.cancelScheduleId ? await schedules.get(user.id, reply.cancelScheduleId) : null;
+    const failure = grade(testCase, reply, plan, Boolean(reply.contactId), scheduled, cancelled);
     results.push({ group: testCase.group, message: testCase.message, failure });
     console.log(`${failure ? 'FAIL' : 'pass'}  [${testCase.group}] ${testCase.message}${failure ? `\n      ${failure}` : ''}`);
   }

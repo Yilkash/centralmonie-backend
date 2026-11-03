@@ -7,6 +7,10 @@ export const users = pgTable('users', {
   providerSubject: text('provider_subject').notNull().unique(),
   email: text('email'),
   walletAddress: text('wallet_address'),
+  // A salted scrypt hash. The PIN itself is never stored.
+  pinHash: text('pin_hash'),
+  pinFailures: integer('pin_failures').notNull().default(0),
+  pinLockedUntil: timestamp('pin_locked_until', { withTimezone: true }),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 });
@@ -217,6 +221,20 @@ export const opSwitches = pgTable('op_switches', {
   paused: boolean('paused').notNull().default(false),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 });
+
+/** Who or what did each sensitive thing, including what the AI proposed. Never updated or deleted by the app. */
+export const auditLog = pgTable(
+  'audit_log',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    actor: text('actor').notNull(),
+    action: text('action').notNull(),
+    subject: text('subject'),
+    details: jsonb('details'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [index('audit_log_created_idx').on(table.createdAt)],
+);
 
 /** How far a chain watcher has read. */
 export const chainCursors = pgTable('chain_cursors', {

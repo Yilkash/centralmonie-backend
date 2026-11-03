@@ -8,6 +8,8 @@ import { describeDestination, ContactsService } from '../contacts/contacts.servi
 import { DATABASE, Database } from '../database/database.module';
 import { LimitsService } from '../payments/limits.service';
 import { PaymentEngine } from '../payments/payment-engine.service';
+import { AuditService } from '../ops/audit.service';
+import { GuardsService } from '../ops/guards.service';
 import { Plan, PlanItem, Payment, payments, planItems, plans, User } from '../database/schema';
 import { DAILY_LIMIT_KOBO, formatNaira, formatUsdc, koboToUsdcMinor, nairaToKobo, parseUsdc, usdcMinorToKobo } from '../money/money';
 import { DataPlans, ExchangeRates, PaymentProvider, PaymentRequest } from '../providers/providers';
@@ -40,6 +42,8 @@ export class PlansService {
     private readonly engine: PaymentEngine,
     private readonly chain: Chain,
     private readonly config: ConfigService<Env, true>,
+    private readonly guards: GuardsService,
+    private readonly audit: AuditService,
   ) {}
 
   private get onChain(): boolean {
@@ -58,6 +62,8 @@ export class PlansService {
 
     const total = rows.reduce((sum, row) => sum + row.amountKobo, 0);
     await this.assertWithinDailyLimit(this.db, userId, total);
+    const refused = await this.guards.refusal(rows.map((row) => row.route), total);
+    if (refused) throw new PlanRefused(refused);
 
     const plan = await this.db.transaction(async (tx) => {
       const [created] = await tx
@@ -67,6 +73,7 @@ export class PlansService {
       await tx.insert(planItems).values(rows.map((row) => ({ ...row, planId: created!.id })));
       return created!;
     });
+    await this.audit.record('agent', 'plan.proposed', plan.id, { userId, items: rows.map((row) => ({ route: row.route, to: row.recipientName, kobo: row.amountKobo })) });
     return this.get(userId, plan.id);
   }
 
@@ -181,7 +188,10 @@ export class PlansService {
         return null;
       }
       const items = await tx.select().from(planItems).where(eq(planItems.planId, planId)).orderBy(asc(planItems.position));
-      await this.assertWithinDailyLimit(tx, userId, items.reduce((sum, item) => sum + item.amountKobo, 0));
+      const total = items.reduce((sum, item) => sum + item.amountKobo, 0);
+      await this.assertWithinDailyLimit(tx, userId, total);
+      const refused = await this.guards.refusal(items.map((item) => item.route), total, tx);
+      if (refused) throw new PlanRefused(refused);
       const rows = await tx
         .insert(payments)
         .values(
@@ -209,6 +219,7 @@ export class PlansService {
     });
     if (!created) throw new PlanRefused('This quote has expired. Please ask again for a new one.');
 
+    await this.audit.record(userId, 'plan.approved', planId);
     if (!preparation) for (const payment of created.rows) await this.engine.paySimulated(payment);
     return this.get(userId, planId);
   }

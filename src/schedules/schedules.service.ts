@@ -8,6 +8,8 @@ import { Env } from '../config/env';
 import { DATABASE, Database } from '../database/database.module';
 import { Schedule, schedules, User } from '../database/schema';
 import { DAILY_LIMIT_KOBO, formatNaira, koboToUsdcMinor } from '../money/money';
+import { AuditService } from '../ops/audit.service';
+import { GuardsService } from '../ops/guards.service';
 import { PlanRefused } from '../plans/plan-refused';
 import { ProposedItem } from '../plans/plan.types';
 import { PlansService } from '../plans/plans.service';
@@ -31,8 +33,13 @@ export interface ScheduleGroupView {
   calls: WalletCall[];
 }
 
-export const whenOf = (schedule: Schedule): string =>
-  describeTiming(schedule.timing as Timing, schedule.status === 'proposed' ? null : schedule.nextRunAt);
+export const whenOf = (schedule: Schedule): string => {
+  const timing = schedule.timing as Timing;
+  if (schedule.status === 'proposed') return describeTiming(timing, null);
+  // Finished or stopped: there is no next date, and "from when you approve" would no longer make sense.
+  if (!schedule.nextRunAt && timing.kind === 'once') return 'One time';
+  return describeTiming(timing, schedule.nextRunAt);
+};
 
 /** Approval and cancellation of payments for later. Running them is the scheduler's job. */
 @Injectable()
@@ -45,6 +52,8 @@ export class SchedulesService {
     private readonly chain: Chain,
     private readonly rates: ExchangeRates,
     private readonly config: ConfigService<Env, true>,
+    private readonly guards: GuardsService,
+    private readonly audit: AuditService,
   ) {}
 
   private get onChain(): boolean {
@@ -87,7 +96,10 @@ export class SchedulesService {
         }
       }),
     );
+    const refused = await this.guards.refusal(rows.map((row) => row.route), 0);
+    if (refused) throw new PlanRefused(refused);
     await this.db.insert(schedules).values(rows);
+    await this.audit.record('agent', 'schedule.proposed', groupId, { userId, items: rows.map((row) => ({ route: row.route, to: row.recipientName, kobo: row.amountKobo, timing: row.timing })) });
     return this.group(userId, groupId);
   }
 
@@ -166,6 +178,7 @@ export class SchedulesService {
           .where(eq(schedules.id, item.id));
       }
     });
+    await this.audit.record(user.id, 'schedule.approved', groupId);
     return this.group(user.id, groupId);
   }
 
@@ -243,6 +256,7 @@ export class SchedulesService {
       if (existing.status === 'cancelled') return { schedule: existing, calls: this.revokeCalls(existing) };
       throw new ConflictException('This is no longer active.');
     }
+    await this.audit.record(userId, 'schedule.cancelled', scheduleId);
     return { schedule, calls: this.revokeCalls(schedule) };
   }
 

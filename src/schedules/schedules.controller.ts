@@ -4,7 +4,9 @@ import { AuthGuard } from '../auth/auth.guard';
 import { CurrentUser } from '../auth/current-user.decorator';
 import { Schedule, User } from '../database/schema';
 import { formatNaira, formatUsdc } from '../money/money';
+import { PinService } from '../pin/pin.service';
 import { PlanRefused } from '../plans/plan-refused';
+import { pinIn } from '../plans/plans.controller';
 import { ScheduleGroupView, SchedulesService, whenOf } from './schedules.service';
 
 const activateBody = z.object({ tx_hash: z.string().regex(/^0x[0-9a-fA-F]{64}$/) });
@@ -42,7 +44,10 @@ const refusals = async <T>(action: () => Promise<T>): Promise<T> => {
 @Controller('v1/schedules')
 @UseGuards(AuthGuard)
 export class SchedulesController {
-  constructor(private readonly schedules: SchedulesService) {}
+  constructor(
+    private readonly schedules: SchedulesService,
+    private readonly pins: PinService,
+  ) {}
 
   @Get()
   async list(@CurrentUser() user: User) {
@@ -51,7 +56,8 @@ export class SchedulesController {
 
   @Post('groups/:id/approve')
   @HttpCode(200)
-  approve(@CurrentUser() user: User, @Param('id', ParseUUIDPipe) id: string) {
+  async approve(@CurrentUser() user: User, @Param('id', ParseUUIDPipe) id: string, @Body() body: unknown) {
+    await this.pins.check(user, pinIn(body));
     return refusals(async () => presentGroup(await this.schedules.approve(user, id)));
   }
 

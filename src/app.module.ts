@@ -9,6 +9,9 @@ import { ContactsModule } from './contacts/contacts.module';
 import { DatabaseModule } from './database/database.module';
 import { HealthController } from './health/health.controller';
 import { PlansModule } from './plans/plans.module';
+import { AdminModule } from './ops/admin.module';
+import { OpsModule } from './ops/ops.module';
+import { PinModule } from './pin/pin.module';
 import { SchedulesModule } from './schedules/schedules.module';
 import { UsersModule } from './users/users.module';
 
@@ -24,6 +27,9 @@ import { UsersModule } from './users/users.module';
     ChatModule,
     ContactsModule,
     PlansModule,
+    OpsModule,
+    PinModule,
+    AdminModule,
     SchedulesModule,
   ],
   controllers: [HealthController],

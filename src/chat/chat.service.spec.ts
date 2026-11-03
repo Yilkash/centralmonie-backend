@@ -7,6 +7,10 @@ const user = { id: 'user-1' } as User;
 
 class FakeRepository {
   saved: Pick<ChatMessage, 'role' | 'content'>[] = [];
+  async sentSince() {
+    return 0;
+  }
+
   async add(_userId: string, role: ChatMessage['role'], content: string) {
     this.saved.push({ role, content });
     return { role, content } as ChatMessage;

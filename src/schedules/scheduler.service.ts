@@ -11,6 +11,7 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { LimitsService } from '../payments/limits.service';
 import { PaymentEngine } from '../payments/payment-engine.service';
 import { ExchangeRates, PaymentProvider } from '../providers/providers';
+import { GuardsService } from '../ops/guards.service';
 import { SwitchesService } from '../ops/switches.service';
 import { SchedulesService } from './schedules.service';
 import { describeMoment, nextRun, Timing } from './timing';
@@ -44,6 +45,7 @@ export class SchedulerService {
     private readonly engine: PaymentEngine,
     private readonly notifications: NotificationsService,
     private readonly switches: SwitchesService,
+    private readonly guards: GuardsService,
     private readonly config: ConfigService<Env, true>,
   ) {}
 
@@ -127,6 +129,8 @@ export class SchedulerService {
     const nairaPerUsdc = await this.rates.nairaPerUsdc();
     const usdcMinor = schedule.fixedUsdcMinor ?? koboToUsdcMinor(schedule.amountKobo, nairaPerUsdc);
     const label = labelOf(schedule);
+    const paused = await this.guards.refusal([schedule.route], schedule.amountKobo);
+    if (paused) return { ok: false, reason: 'Paused or over the company cap', notify: '' };
     const request = { reference: runId, route: schedule.route, destination: schedule.destination, amountKobo: schedule.amountKobo, usdcMinor };
 
     if (this.onChain) {

@@ -1,11 +1,17 @@
 import { BadRequestException, Body, Controller, Get, HttpCode, Param, ParseUUIDPipe, Post, UnprocessableEntityException, UseGuards } from '@nestjs/common';
 import { z } from 'zod';
 import { FundingService } from '../payments/funding.service';
+import { PinService } from '../pin/pin.service';
 import { AuthGuard } from '../auth/auth.guard';
 import { CurrentUser } from '../auth/current-user.decorator';
 import { User } from '../database/schema';
 import { formatNaira, formatUsdc } from '../money/money';
 import { PlanRefused, PlansService, PlanView } from './plans.service';
+
+export const pinIn = (body: unknown): string | undefined => {
+  const pin = (body as { pin?: unknown } | null | undefined)?.pin;
+  return typeof pin === 'string' ? pin : undefined;
+};
 
 const fundingBody = z.object({ tx_hash: z.string() });
 
@@ -38,6 +44,7 @@ export class PlansController {
   constructor(
     private readonly plans: PlansService,
     private readonly funding_: FundingService,
+    private readonly pins: PinService,
   ) {}
 
   @Get(':id')
@@ -47,7 +54,8 @@ export class PlansController {
 
   @Post(':id/approve')
   @HttpCode(200)
-  async approve(@CurrentUser() user: User, @Param('id', ParseUUIDPipe) id: string) {
+  async approve(@CurrentUser() user: User, @Param('id', ParseUUIDPipe) id: string, @Body() body: unknown) {
+    await this.pins.check(user, pinIn(body));
     try {
       return presentPlan(await this.plans.approve(user, id));
     } catch (error) {
