@@ -98,12 +98,12 @@ describe('plans and contacts', () => {
     it('splits activity into pages, newest first', async () => {
       for (let day = 1; day <= 12; day += 1) await insert(alice, { when: new Date(Date.UTC(2026, 10, day)).toISOString() });
       const first = (await get('/v1/activity')).json();
-      expect(first).toMatchObject({ page: 1, per_page: 10, total: 12 });
-      expect(first.activity).toHaveLength(10);
+      expect(first).toMatchObject({ page: 1, per_page: 6, total: 12 });
+      expect(first.activity).toHaveLength(6);
       expect(first.activity[0].created_at).toContain('2026-11-12');
       const second = (await get('/v1/activity?page=2')).json();
-      expect(second.activity).toHaveLength(2);
-      expect(second.activity[1].created_at).toContain('2026-11-01');
+      expect(second.activity).toHaveLength(6);
+      expect(second.activity[5].created_at).toContain('2026-11-01');
       expect((await get('/v1/activity?page=0')).statusCode).toBe(400);
       expect((await get('/v1/activity?page=abc')).statusCode).toBe(400);
     });

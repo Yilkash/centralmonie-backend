@@ -5,7 +5,7 @@ import { CurrentUser } from '../auth/current-user.decorator';
 import { User } from '../database/schema';
 import { WalletService } from './wallet.service';
 
-const PER_PAGE = 10;
+const PER_PAGE = 6;
 const activityPage = z.coerce.number().int().min(1).max(10_000);
 
 @Controller('v1')
