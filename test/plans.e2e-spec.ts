@@ -84,6 +84,51 @@ describe('plans and contacts', () => {
     expect(plan.items[0]).toMatchObject({ route: 'bank', usdcMinor: 1_500_000, amountKobo: 225_000 });
   });
 
+  describe('activity and receipts', () => {
+    const get = (url: string, token = 'alice') => app.inject({ method: 'GET', url, headers: { authorization: `Bearer ${token}` } });
+    const insert = (userId: string, overrides: object = {}) => {
+      const row = { status: 'completed', route: 'bank', amount: 137636, usdc: 1000000, ref: 'switch-1', when: new Date('2026-11-03T18:06:00Z').toISOString(), ...overrides };
+      return pool.query(
+        `INSERT INTO payments (user_id, route, amount_kobo, usdc_minor, recipient_name, destination, status, provider_reference, funding_tx_hash, created_at)
+         VALUES ($1, $2, $3, $4, 'Halima', $5, $6, $7, '0xabc', $8) RETURNING id`,
+        [userId, row.route, row.amount, row.usdc, JSON.stringify({ kind: 'bank', accountName: 'Ada Bello', bankName: 'OPay', accountNumber: '8031234568' }), row.status, row.ref, row.when],
+      );
+    };
+
+    it('splits activity into pages, newest first', async () => {
+      for (let day = 1; day <= 12; day += 1) await insert(alice, { when: new Date(Date.UTC(2026, 10, day)).toISOString() });
+      const first = (await get('/v1/activity')).json();
+      expect(first).toMatchObject({ page: 1, per_page: 10, total: 12 });
+      expect(first.activity).toHaveLength(10);
+      expect(first.activity[0].created_at).toContain('2026-11-12');
+      const second = (await get('/v1/activity?page=2')).json();
+      expect(second.activity).toHaveLength(2);
+      expect(second.activity[1].created_at).toContain('2026-11-01');
+      expect((await get('/v1/activity?page=0')).statusCode).toBe(400);
+      expect((await get('/v1/activity?page=abc')).statusCode).toBe(400);
+    });
+
+    it('makes a receipt for a finished payment, with the account number masked', async () => {
+      const { id } = (await insert(alice)).rows[0];
+      const response = await get(`/v1/receipts/payment/${id}`);
+      expect(response.json().receipt).toMatchObject({ title: 'Payment successful', kind: 'Bank transfer', recipient: 'Halima', recipient_detail: 'Ada Bello, OPay ****4568', amount: '₦1,376.36', tx_hash: '0xabc' });
+      expect(response.body).not.toContain('8031234568');
+      expect((await get('/v1/activity')).json().activity[0].has_receipt).toBe(true);
+    });
+
+    it('refuses a receipt for unfinished, simulated or someone else\'s payments', async () => {
+      const unfinished = (await insert(alice, { status: 'paying' })).rows[0].id;
+      const simulated = (await insert(alice, { ref: 'simulated-1' })).rows[0].id;
+      const mine = (await insert(alice)).rows[0].id;
+      expect((await get(`/v1/receipts/payment/${unfinished}`)).statusCode).toBe(404);
+      expect((await get(`/v1/receipts/payment/${simulated}`)).statusCode).toBe(404);
+      expect((await get(`/v1/receipts/payment/${mine}`, 'bob')).statusCode).toBe(404);
+      expect((await get(`/v1/receipts/other/${mine}`)).statusCode).toBe(404);
+      const list = (await get('/v1/activity')).json().activity;
+      expect(list.filter((entry: { has_receipt: boolean }) => entry.has_receipt)).toHaveLength(1);
+    });
+  });
+
   describe('contacts', () => {
     it('stores the name the bank gives, and the network of a phone', async () => {
       const account = await contacts.propose(alice, 'Mother', ['mum'], { kind: 'bank', bankName: 'Access', accountNumber: '0123454821' });

@@ -30,6 +30,7 @@ export const presentPlan = (plan: PlanView) => ({
     data_plan: item.dataPlan,
     amount_naira: formatNaira(item.amountKobo),
     amount_usdc: formatUsdc(item.usdcMinor),
+    payment_id: item.payment?.id ?? null,
     payment_status: item.payment?.status ?? null,
     failure_reason: item.payment?.failureReason ?? null,
     tx_hash: item.payment?.fundingTxHash ?? null,
