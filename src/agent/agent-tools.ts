@@ -77,7 +77,7 @@ export const AGENT_TOOLS: Anthropic.Tool[] = [
     name: 'propose_schedule',
     description:
       'Shows the user an approval card for payments that happen later: at a set time, after a delay, or repeating. Moves no money, and nothing runs until they approve. Every item needs its own when. Fields you do not need are null.',
-    strict: true,
+    // Not strict: the API allows 16 optional fields across strict tools, and this one alone has more. The code below checks every field.
     input_schema: {
       type: 'object',
       properties: {
@@ -98,7 +98,7 @@ export const AGENT_TOOLS: Anthropic.Tool[] = [
                   delay_minutes: { ...nullable('integer'), description: 'once only: minutes from now. "in 4 hours" is 240.' },
                   date: { ...nullable('string'), description: 'once only: YYYY-MM-DD. Leave null when using delay_minutes.' },
                   time: { ...nullable('string'), description: '24-hour HH:MM in Nigeria. Null means 09:00.' },
-                  frequency: { type: ['string', 'null'], enum: ['daily', 'weekly', 'monthly', null], description: 'recurring only' },
+                  frequency: { anyOf: [{ type: 'string', enum: ['daily', 'weekly', 'monthly'] }, { type: 'null' }], description: 'recurring only' },
                   interval: { ...nullable('integer'), description: 'recurring only: every 2 weeks is weekly with interval 2. Null means 1.' },
                   weekday: { ...nullable('integer'), description: 'weekly only: 0 is Sunday, 6 is Saturday' },
                   day_of_month: { ...nullable('integer'), description: 'monthly only: 1 to 28. Null means the 28th.' },
@@ -170,6 +170,8 @@ const planInput = z.object({
   ),
 });
 
+const optional = <T extends z.ZodType>(type: T) => type.nullish().transform((value) => value ?? null);
+
 const scheduleInput = z.object({
   items: z.array(
     z.object({
@@ -180,16 +182,16 @@ const scheduleInput = z.object({
       data_plan_id: z.string().nullable(),
       when: z.object({
         kind: z.enum(['once', 'recurring']),
-        delay_minutes: z.number().nullable(),
-        date: z.string().nullable(),
-        time: z.string().nullable(),
-        frequency: z.enum(['daily', 'weekly', 'monthly']).nullable(),
-        interval: z.number().nullable(),
-        weekday: z.number().nullable(),
-        day_of_month: z.number().nullable(),
-        last_day_of_month: z.boolean().nullable(),
-        occurrences: z.number().nullable(),
-        start_date: z.string().nullable(),
+        delay_minutes: optional(z.number()),
+        date: optional(z.string()),
+        time: optional(z.string()),
+        frequency: optional(z.enum(['daily', 'weekly', 'monthly'])),
+        interval: optional(z.number()),
+        weekday: optional(z.number()),
+        day_of_month: optional(z.number()),
+        last_day_of_month: optional(z.boolean()),
+        occurrences: optional(z.number()),
+        start_date: optional(z.string()),
       }),
     }),
   ),
