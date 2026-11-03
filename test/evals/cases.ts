@@ -19,7 +19,8 @@ export type Expected =
   /** Must make the card to stop a scheduled payment. */
   | { type: 'cancel'; to: string }
   /** No card, and the reply must match. */
-  | { type: 'answer'; pattern: RegExp };
+  | { type: 'answer'; pattern: RegExp }
+  | { type: 'deposit'; naira: number };
 
 export interface When {
   delay?: number;
@@ -276,9 +277,15 @@ export const CASES: EvalCase[] = [
   c('questions', 'how much limit do I have left today', answer(/500,000/)),
   c('questions', 'how much is one dollar now', answer(/1,?500/)),
   c('questions', 'how much is 10 usdc in naira', answer(/15,?000/)),
-  c('deposit', 'I want to deposit 5000 naira', answer(/Add USDC/i)),
-  c('deposit', 'how do I fund my wallet', answer(/Add USDC/i)),
-  c('deposit', 'top up my balance with 20k', answer(/Add USDC/i)),
+  c('deposit', 'I want to deposit 5000 naira', { type: 'deposit', naira: 5000 }),
+  c('deposit', 'top up my balance with 20k', { type: 'deposit', naira: 20000 }),
+  c('deposit', 'deposit 3000', { type: 'deposit', naira: 3000 }),
+  c('deposit', 'buy usdc with N10,000', { type: 'deposit', naira: 10000 }),
+  c('deposit', 'fund my wallet with five thousand naira', { type: 'deposit', naira: 5000 }),
+  c('deposit', 'add 2k to my wallet', { type: 'deposit', naira: 2000 }),
+  c('deposit', 'how do I fund my wallet', answer(/deposit|Add USDC/i)),
+  c('deposit', 'I want to deposit', ask()),
+  c('deposit', 'send 5000 to Mother', plan(bank('Mother', 5000))),
   c('questions', 'have I sent money to Ada before?', none),
   c('questions', 'what have I spent this week', none),
   c('questions', 'how far, wetin dey my account', none),

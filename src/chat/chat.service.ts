@@ -35,6 +35,7 @@ export class ChatService {
       contactId: reply.contactId,
       scheduleGroupId: reply.scheduleGroupId,
       cancelScheduleId: reply.cancelScheduleId,
+      depositId: reply.depositId,
     });
   }
 }

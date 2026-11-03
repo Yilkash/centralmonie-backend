@@ -8,7 +8,7 @@ import { NairaDepositsService } from './deposits.service';
 
 const startBody = z.object({ amount_naira: z.number().int().positive() });
 
-const present = (deposit: NairaDeposit | null) =>
+export const presentDeposit = (deposit: NairaDeposit | null) =>
   deposit && {
     id: deposit.id,
     status: deposit.status,
@@ -35,7 +35,12 @@ export class NairaDepositsController {
 
   @Get('current')
   async current(@CurrentUser() user: User) {
-    return { deposit: present(await this.deposits.current(user.id)) };
+    return { deposit: presentDeposit(await this.deposits.current(user.id)) };
+  }
+
+  @Get(':id')
+  async get(@CurrentUser() user: User, @Param('id', ParseUUIDPipe) id: string) {
+    return { deposit: presentDeposit(await this.deposits.get(user.id, id)) };
   }
 
   @Post()
@@ -43,7 +48,7 @@ export class NairaDepositsController {
   async start(@CurrentUser() user: User, @Body() body: unknown) {
     const parsed = startBody.safeParse(body);
     if (!parsed.success) throw new BadRequestException('Enter a whole naira amount.');
-    return { deposit: present(await this.deposits.start(user, parsed.data.amount_naira)) };
+    return { deposit: presentDeposit(await this.deposits.start(user, parsed.data.amount_naira)) };
   }
 
   @Post(':id/close')

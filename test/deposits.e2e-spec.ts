@@ -123,6 +123,12 @@ describe('naira deposits', () => {
     expect(next.id).not.toBe(id);
   });
 
+  it('reads one deposit by its id, for its owner only', async () => {
+    const { id } = (await call('POST', '/v1/deposits', 'alice', { amount_naira: 2000 })).json().deposit;
+    expect((await call('GET', `/v1/deposits/${id}`, 'alice')).json().deposit.id).toBe(id);
+    expect((await call('GET', `/v1/deposits/${id}`, 'bob')).json().deposit).toBeNull();
+  });
+
   it('needs a wallet, and stops when paused', async () => {
     await call('GET', '/v1/me', 'bob');
     expect((await call('POST', '/v1/deposits', 'bob', { amount_naira: 2000 })).statusCode).toBe(422);

@@ -1,3 +1,5 @@
+import { HttpException } from '@nestjs/common';
+import { NairaDepositsService } from '../deposits/deposits.service';
 import Anthropic from '@anthropic-ai/sdk';
 import { Injectable } from '@nestjs/common';
 import { z } from 'zod';
@@ -160,6 +162,18 @@ export const AGENT_TOOLS: Anthropic.Tool[] = [
       additionalProperties: false,
     },
   },
+  {
+    name: 'start_deposit',
+    description:
+      'Gets a bank account the user can transfer naira into, to receive USDC in their wallet, and shows it on a card with a countdown. Moves no money: the user makes the transfer themselves from their bank.',
+    strict: true,
+    input_schema: {
+      type: 'object',
+      properties: { amount_naira: { type: 'integer', description: 'The naira amount the user wants to deposit' } },
+      required: ['amount_naira'],
+      additionalProperties: false,
+    },
+  },
 ];
 
 const planInput = z.object({
@@ -237,6 +251,7 @@ export interface ToolOutcome {
   contactId?: string;
   scheduleGroupId?: string;
   cancelScheduleId?: string;
+  depositId?: string;
 }
 
 @Injectable()
@@ -247,6 +262,7 @@ export class AgentToolbox {
     private readonly dataPlans: DataPlans,
     private readonly wallet: WalletService,
     private readonly schedules: SchedulesService,
+    private readonly deposits: NairaDepositsService,
   ) {}
 
   /** The user comes from the signed-in session, never from the model, so it cannot act for anyone else. */
@@ -271,11 +287,14 @@ export class AgentToolbox {
           return await this.proposeCancel(user, input);
         case 'propose_contact':
           return await this.proposeContact(user, input);
+        case 'start_deposit':
+          return await this.startDeposit(user, input);
         default:
           return { result: `Unknown tool: ${name}`, isError: true };
       }
     } catch (error) {
       if (error instanceof PlanRefused || error instanceof ContactRefused) return { result: error.message, isError: true };
+      if (error instanceof HttpException) return { result: error.message, isError: true };
       if (error instanceof z.ZodError) return { result: 'Those details are not in the expected form.', isError: true };
       throw error;
     }
@@ -366,6 +385,19 @@ export class AgentToolbox {
     return {
       result: `The approval card is showing: ${group.items.map((item) => `${item.recipientName}: ${whenOf(item)}`).join('; ')}. Nothing runs until they approve.`,
       scheduleGroupId: group.groupId,
+    };
+  }
+
+  private async startDeposit(user: User, input: unknown): Promise<ToolOutcome> {
+    const { amount_naira: naira } = z.object({ amount_naira: z.number().int().positive() }).parse(input);
+    const deposit = await this.deposits.start(user, naira);
+    const amount = formatNaira(deposit.amountKobo);
+    return {
+      result:
+        deposit.amountKobo === naira * 100
+          ? `The deposit card is showing the bank account, the exact amount of ${amount} and a countdown. No money has arrived yet.`
+          : `The user already has a ${amount} deposit waiting, so the card shows that one. To change the amount they cancel it on the card and ask again.`,
+      depositId: deposit.id,
     };
   }
 

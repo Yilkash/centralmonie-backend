@@ -111,6 +111,11 @@ export class NairaDepositsService {
     return row ?? null;
   }
 
+  async get(userId: string, id: string): Promise<NairaDeposit | null> {
+    const [row] = await this.db.select().from(nairaDeposits).where(and(eq(nairaDeposits.id, id), eq(nairaDeposits.userId, userId)));
+    return row ?? null;
+  }
+
   /** Puts it aside so another can start. We keep watching it, because a transfer may already be on its way. */
   async cancel(userId: string, id: string): Promise<void> {
     const updated = await this.db

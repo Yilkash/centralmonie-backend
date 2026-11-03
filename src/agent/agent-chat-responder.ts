@@ -36,7 +36,8 @@ export class AgentChatResponder extends ChatResponder {
     let contactId: string | undefined;
     let scheduleGroupId: string | undefined;
     let cancelScheduleId: string | undefined;
-    const cards = () => ({ planId, contactId, scheduleGroupId, cancelScheduleId });
+    let depositId: string | undefined;
+    const cards = () => ({ planId, contactId, scheduleGroupId, cancelScheduleId, depositId });
 
     try {
       for (let call = 0; call < MAX_MODEL_CALLS; call += 1) {
@@ -59,6 +60,7 @@ export class AgentChatResponder extends ChatResponder {
           contactId = outcome.contactId ?? contactId;
           scheduleGroupId = outcome.scheduleGroupId ?? scheduleGroupId;
           cancelScheduleId = outcome.cancelScheduleId ?? cancelScheduleId;
+          depositId = outcome.depositId ?? depositId;
           results.push({ type: 'tool_result', tool_use_id: block.id, content: outcome.result, is_error: outcome.isError ?? false });
         }
         messages.push({ role: 'user', content: results });

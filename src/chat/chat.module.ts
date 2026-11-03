@@ -1,3 +1,4 @@
+import { DepositsModule } from '../deposits/deposits.module';
 import { Module } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { AgentChatResponder } from '../agent/agent-chat-responder';
@@ -14,7 +15,7 @@ import { ChatService } from './chat.service';
 import { PlaceholderChatResponder } from './placeholder-chat-responder';
 
 @Module({
-  imports: [AuthModule, AgentModule, ContactsModule, PlansModule, SchedulesModule],
+  imports: [AuthModule, AgentModule, ContactsModule, DepositsModule, PlansModule, SchedulesModule],
   controllers: [ChatController],
   providers: [
     ChatService,

@@ -11,6 +11,7 @@ import { NairaDepositsService } from './deposits.service';
   imports: [AuthModule, OpsModule, PaymentsModule, ProvidersModule],
   controllers: [NairaDepositsController],
   providers: [NairaDepositsService],
+  exports: [NairaDepositsService],
 })
 export class DepositsModule implements OnModuleInit {
   constructor(

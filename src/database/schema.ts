@@ -31,6 +31,7 @@ export const chatMessages = pgTable(
     contactId: uuid('contact_id'),
     scheduleGroupId: uuid('schedule_group_id'),
     cancelScheduleId: uuid('cancel_schedule_id'),
+    depositId: uuid('deposit_id'),
     // The blockchain transaction a notice is about, so the chat can link to it.
     txHash: text('tx_hash'),
     // An automatic notice from the app, such as a scheduled payment going out. The AI did not write it.

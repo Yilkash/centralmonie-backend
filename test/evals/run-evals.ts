@@ -13,6 +13,8 @@ import { Pool } from 'pg';
 import { AgentChatResponder } from '../../src/agent/agent-chat-responder';
 import { ModelClient, ModelRequest } from '../../src/agent/model-client';
 import { AppModule } from '../../src/app.module';
+import { NairaDepositsService } from '../../src/deposits/deposits.service';
+import { NairaOnramp } from '../../src/providers/providers';
 import { ContactsService, NewDestination } from '../../src/contacts/contacts.service';
 import { applyMigrations } from '../../src/database/migrate';
 import { ChatMessage, Schedule, User } from '../../src/database/schema';
@@ -107,7 +109,7 @@ function gradeItems(plan: PlanView | null, items: ExpectedItem[], text: string):
   return unmatched.length ? `extra payment to ${unmatched[0]!.recipientName}` : null;
 }
 
-function grade(testCase: EvalCase, reply: { text: string }, plan: PlanView | null, contactProposed: boolean, scheduled: Schedule[] | null, cancelled: Schedule | null): string | null {
+function grade(testCase: EvalCase, reply: { text: string; depositId?: string | undefined; depositNaira?: number | undefined }, plan: PlanView | null, contactProposed: boolean, scheduled: Schedule[] | null, cancelled: Schedule | null): string | null {
   const { expected } = testCase;
   const anyCard = plan || scheduled || cancelled || contactProposed;
   // A scheduled or cancel card where none was expected is as wrong as a payment.
@@ -144,6 +146,10 @@ function grade(testCase: EvalCase, reply: { text: string }, plan: PlanView | nul
     case 'no_action':
       if (plan) return `expected no payment, got a plan to ${plan.items.map((i) => i.recipientName).join(', ')}`;
       return contactProposed ? 'expected no action, got a new contact' : null;
+    case 'deposit':
+      if (plan) return `expected a deposit, got a plan`;
+      if (!reply.depositId) return `expected a deposit card, got: ${reply.text.slice(0, 120)}`;
+      return reply.depositNaira === expected.naira ? null : `expected a ${expected.naira} deposit, got ${reply.depositNaira}`;
     case 'contact':
       if (plan) return `expected a new contact first, got a plan to ${plan.items.map((i) => i.recipientName).join(', ')}`;
       return contactProposed ? null : `expected a new contact, got: ${reply.text.slice(0, 120)}`;
@@ -164,6 +170,14 @@ async function main(): Promise<void> {
   const contacts = app.get(ContactsService, { strict: false });
   const plans = app.get(PlansService, { strict: false });
   const responder = app.get(AgentChatResponder, { strict: false });
+  const depositsService = app.get(NairaDepositsService, { strict: false });
+  (depositsService as unknown as { partner: NairaOnramp }).partner = new (class extends NairaOnramp {
+    async nairaOnramp(input: { reference: string; amountKobo: number }) {
+      return { reference: input.reference, amountKobo: input.amountKobo, usdcMinor: 1_000_000, rate: '1500', bankName: 'Test', accountNumber: '0000000000', accountName: 'Test', expiresAt: new Date(Date.now() + 1_800_000).toISOString() };
+    }
+    async onrampState() { return 'waiting' as const; }
+    async onrampTerms() { return { nairaPerUsdc: 1500, minimumKobo: 150_000 }; }
+  })();
   const model = app.get(ModelClient, { strict: false });
   const user: User = await app.get(UsersRepository, { strict: false }).upsert({ subject: 'did:privy:eval', email: null, walletAddress: null });
 
@@ -204,7 +218,15 @@ async function main(): Promise<void> {
   const results: { group: string; message: string; failure: string | null }[] = [];
   for (const testCase of selected) {
     const history = (testCase.prior ?? []).map((message) => ({ ...message, planId: null, contactId: null })) as ChatMessage[];
-    const reply = await responder.reply({ user, message: testCase.message, history });
+    // Deposits need a wallet and a partner, so the partner is a stand-in here. Nothing is ordered.
+    if (testCase.group === 'deposit') {
+      const cleaner = new Pool({ connectionString: process.env.DATABASE_URL });
+      await cleaner.query('DELETE FROM naira_deposits');
+      await cleaner.end();
+    }
+    const raw = await responder.reply({ user: testCase.group === 'deposit' ? { ...user, walletAddress: WALLET } : user, message: testCase.message, history });
+    const held = raw.depositId ? await depositsService.get(user.id, raw.depositId) : null;
+    const reply = { ...raw, depositNaira: held ? held.amountKobo / 100 : undefined };
     const plan = reply.planId ? await plans.get(user.id, reply.planId) : null;
     const scheduled = reply.scheduleGroupId ? (await schedules.group(user.id, reply.scheduleGroupId)).items : null;
     const cancelled = reply.cancelScheduleId ? await schedules.get(user.id, reply.cancelScheduleId) : null;

@@ -1,3 +1,5 @@
+import { presentDeposit } from '../deposits/deposits.controller';
+import { NairaDepositsService } from '../deposits/deposits.service';
 import { BadRequestException, Body, Controller, Get, Post, UseGuards } from '@nestjs/common';
 import { z } from 'zod';
 import { AuthGuard } from '../auth/auth.guard';
@@ -21,6 +23,7 @@ export class ChatController {
     private readonly plans: PlansService,
     private readonly contacts: ContactsService,
     private readonly schedules: SchedulesService,
+    private readonly deposits: NairaDepositsService,
   ) {}
 
   private async present(user: User, message: ChatMessage) {
@@ -36,6 +39,7 @@ export class ChatController {
       plan: message.planId ? presentPlan(await this.plans.get(user.id, message.planId)) : null,
       schedule_group: message.scheduleGroupId ? presentGroup(await this.schedules.group(user.id, message.scheduleGroupId)) : null,
       cancel_schedule: cancelTarget && presentSchedule(cancelTarget),
+      deposit: message.depositId ? presentDeposit(await this.deposits.get(user.id, message.depositId)) : null,
       contact: contact && {
         id: contact.id,
         name: contact.name,

@@ -13,6 +13,7 @@ export interface ChatReply {
   contactId?: string | undefined;
   scheduleGroupId?: string | undefined;
   cancelScheduleId?: string | undefined;
+  depositId?: string | undefined;
 }
 
 /** Produces the assistant's reply, so the chat service does not depend on any AI. */
