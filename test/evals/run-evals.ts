@@ -230,7 +230,7 @@ async function main(): Promise<void> {
     const plan = reply.planId ? await plans.get(user.id, reply.planId) : null;
     const scheduled = reply.scheduleGroupId ? (await schedules.group(user.id, reply.scheduleGroupId)).items : null;
     const cancelled = reply.cancelScheduleId ? await schedules.get(user.id, reply.cancelScheduleId) : null;
-    const failure = grade(testCase, reply, plan, Boolean(reply.contactId), scheduled, cancelled);
+    const failure = /\bcards?\b/i.test(reply.text) ? `said the word card: ${reply.text.slice(0, 120)}` : grade(testCase, reply, plan, Boolean(reply.contactId), scheduled, cancelled);
     results.push({ group: testCase.group, message: testCase.message, failure });
     console.log(`${failure ? 'FAIL' : 'pass'}  [${testCase.group}] ${testCase.message}${failure ? `\n      ${failure}` : ''}`);
   }

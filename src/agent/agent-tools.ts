@@ -51,7 +51,7 @@ export const AGENT_TOOLS: Anthropic.Tool[] = [
   {
     name: 'propose_plan',
     description:
-      'Shows the user an approval card for one or more payments. Moves no money. amount_naira is for airtime and bank; amount_usdc is a decimal string for usdc, or for bank when the user named a USDC amount and amount_naira is then null; data_plan_id is for data. Set the others to null.',
+      'Shows the user an approval request for one or more payments. Moves no money. amount_naira is for airtime and bank; amount_usdc is a decimal string for usdc, or for bank when the user named a USDC amount and amount_naira is then null; data_plan_id is for data. Set the others to null.',
     strict: true,
     input_schema: {
       type: 'object',
@@ -84,7 +84,7 @@ export const AGENT_TOOLS: Anthropic.Tool[] = [
   {
     name: 'propose_schedule',
     description:
-      'Shows the user an approval card for payments that happen later: at a set time, after a delay, or repeating. Moves no money, and nothing runs until they approve. Every item needs its own when. Fields you do not need are null.',
+      'Shows the user an approval request for payments that happen later: at a set time, after a delay, or repeating. Moves no money, and nothing runs until they approve. Every item needs its own when. Fields you do not need are null.',
     // Not strict: the API allows 16 optional fields across strict tools, and this one alone has more. The code below checks every field.
     input_schema: {
       type: 'object',
@@ -135,7 +135,7 @@ export const AGENT_TOOLS: Anthropic.Tool[] = [
   },
   {
     name: 'propose_cancel',
-    description: 'Shows the user a card to confirm stopping one scheduled payment. It keeps running until they confirm.',
+    description: 'Shows the user a request to confirm stopping one scheduled payment. It keeps running until they confirm.',
     strict: true,
     input_schema: {
       type: 'object',
@@ -147,7 +147,7 @@ export const AGENT_TOOLS: Anthropic.Tool[] = [
   {
     name: 'propose_contact',
     description:
-      'Checks a new recipient and shows the user a card to confirm them. Fill only the fields for kind: phone, or bank_name and account_number, or wallet_address. Set the others to null.',
+      'Checks a new recipient and shows the user a request to confirm them. Fill only the fields for kind: phone, or bank_name and account_number, or wallet_address. Set the others to null.',
     strict: true,
     input_schema: {
       type: 'object',
@@ -167,7 +167,7 @@ export const AGENT_TOOLS: Anthropic.Tool[] = [
   {
     name: 'start_deposit',
     description:
-      'Gets a bank account the user can transfer naira into, to receive USDC in their wallet, and shows it on a card with a countdown. Moves no money: the user makes the transfer themselves from their bank.',
+      'Gets a bank account the user can transfer naira into, to receive USDC in their wallet, and shows it on the screen with a countdown. Moves no money: the user makes the transfer themselves from their bank.',
     strict: true,
     input_schema: {
       type: 'object',
@@ -370,7 +370,7 @@ export class AgentToolbox {
       throw error;
     }
     return {
-      result: `The approval card is showing ${plan.items.length} payment(s), total ${formatNaira(plan.totalKobo)}. Nothing has moved.`,
+      result: `The details for approval are showing below for ${plan.items.length} payment(s), total ${formatNaira(plan.totalKobo)}. Nothing has moved.`,
       planId: plan.id,
     };
   }
@@ -389,7 +389,7 @@ export class AgentToolbox {
       })),
     );
     return {
-      result: `The approval card is showing: ${group.items.map((item) => `${item.recipientName}: ${whenOf(item)}`).join('; ')}. Nothing runs until they approve.`,
+      result: `The details for approval are showing below: ${group.items.map((item) => `${item.recipientName}: ${whenOf(item)}`).join('; ')}. Nothing runs until they approve.`,
       scheduleGroupId: group.groupId,
     };
   }
@@ -401,8 +401,8 @@ export class AgentToolbox {
     return {
       result:
         deposit.amountKobo === naira * 100
-          ? `The deposit card is showing the bank account, the exact amount of ${amount} and a countdown. No money has arrived yet.`
-          : `The user already has a ${amount} deposit waiting, so the card shows that one. To change the amount they cancel it on the card and ask again.`,
+          ? `The bank account, the exact amount of ${amount} and a countdown are showing below. No money has arrived yet.`
+          : `The user already has a ${amount} deposit waiting, so that one is showing below. To change the amount they cancel it and ask again.`,
       depositId: deposit.id,
     };
   }
@@ -411,14 +411,14 @@ export class AgentToolbox {
     const { schedule_id: id } = z.object({ schedule_id: z.string().uuid() }).parse(input);
     const schedule = await this.schedules.get(user.id, id);
     if (!schedule || schedule.status !== 'active') return { result: 'That is not one of the active scheduled payments.', isError: true };
-    return { result: `The card to stop ${schedule.recipientName}'s payment is showing. It keeps running until they confirm.`, cancelScheduleId: schedule.id };
+    return { result: `The request to stop ${schedule.recipientName}'s payment is showing below. It keeps running until they confirm.`, cancelScheduleId: schedule.id };
   }
 
   private async proposeContact(user: User, input: unknown): Promise<ToolOutcome> {
     const details = contactInput.parse(input);
     const contact = await this.contacts.propose(user.id, details.name, details.aliases, this.destination(details));
     return {
-      result: `The confirmation card is showing: ${describeDestination(contact.destinations[0]!)}. Wait for the user to confirm.`,
+      result: `The details to confirm are showing below: ${describeDestination(contact.destinations[0]!)}. Wait for the user to confirm.`,
       contactId: contact.id,
     };
   }

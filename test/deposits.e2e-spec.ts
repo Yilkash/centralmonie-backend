@@ -140,7 +140,8 @@ describe('naira deposits', () => {
     partner.state = 'completed';
     await service.reconcile();
     expect((await call('GET', '/v1/wallet', 'alice')).json().deposit_on_the_way).toBeNull();
-  });
+    // The wallet summary also reads the balance from a public test network, which can be slow.
+  }, 60000);
 
   it('needs a wallet, and stops when paused', async () => {
     await call('GET', '/v1/me', 'bob');
