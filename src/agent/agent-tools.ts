@@ -4,7 +4,8 @@ import { z } from 'zod';
 import { ContactRefused, ContactsService, describeDestination, NewDestination } from '../contacts/contacts.service';
 import { User } from '../database/schema';
 import { formatNaira } from '../money/money';
-import { PlanRefused, PlansService } from '../plans/plans.service';
+import { ProposedItem } from '../plans/plan.types';
+import { PlanRefused, PlansService, PlanView } from '../plans/plans.service';
 import { DataPlans } from '../providers/providers';
 import { presentSchedule } from '../schedules/schedules.controller';
 import { SchedulesService, whenOf } from '../schedules/schedules.service';
@@ -59,12 +60,14 @@ export const AGENT_TOOLS: Anthropic.Tool[] = [
             type: 'object',
             properties: {
               route: { type: 'string', enum: ['airtime', 'data', 'bank', 'usdc'] },
-              destination_id: { type: 'string', description: 'A destination ID from list_contacts' },
+              destination_id: { type: ['string', 'null'], description: 'A destination ID from list_contacts, or null for airtime to a new phone number' },
               amount_naira: nullable('integer'),
               amount_usdc: nullable('string'),
               data_plan_id: nullable('string'),
+              new_phone_number: { type: ['string', 'null'], description: 'Only for airtime to a phone not in list_contacts. Otherwise null.' },
+              new_contact_name: { type: ['string', 'null'], description: 'The name given for that new phone number, or null if none was given.' },
             },
-            required: ['route', 'destination_id', 'amount_naira', 'amount_usdc', 'data_plan_id'],
+            required: ['route', 'destination_id', 'amount_naira', 'amount_usdc', 'data_plan_id', 'new_phone_number', 'new_contact_name'],
             additionalProperties: false,
           },
         },
@@ -162,10 +165,12 @@ const planInput = z.object({
   items: z.array(
     z.object({
       route: z.enum(['airtime', 'data', 'bank', 'usdc']),
-      destination_id: z.string().uuid(),
+      destination_id: z.string().uuid().nullable(),
       amount_naira: z.number().nullable(),
       amount_usdc: z.string().nullable(),
       data_plan_id: z.string().nullable(),
+      new_phone_number: z.string().nullish(),
+      new_contact_name: z.string().nullish(),
     }),
   ),
 });
@@ -301,16 +306,35 @@ export class AgentToolbox {
 
   private async proposePlan(user: User, input: unknown): Promise<ToolOutcome> {
     const { items } = planInput.parse(input);
-    const plan = await this.plans.propose(
-      user.id,
-      items.map((item) => ({
-        route: item.route,
-        destinationId: item.destination_id,
-        amountNaira: item.amount_naira,
-        amountUsdc: item.amount_usdc,
-        dataPlanId: item.data_plan_id,
-      })),
-    );
+    const created: string[] = [];
+    const resolved: ProposedItem[] = [];
+    let plan: PlanView;
+    try {
+      for (const item of items) {
+        let destinationId = item.destination_id;
+        const isNew = destinationId === null;
+        if (isNew) {
+          if (item.route !== 'airtime' || !item.new_phone_number) return { result: 'That payment needs a saved recipient first.', isError: true };
+          // Stored unconfirmed. Approving this plan is what saves it, and the card shows the number.
+          const contact = await this.contacts.propose(user.id, item.new_contact_name?.trim() || item.new_phone_number, [], { kind: 'phone', phone: item.new_phone_number });
+          created.push(contact.id);
+          destinationId = contact.destinations[0]!.id;
+        }
+        resolved.push({
+          route: item.route,
+          destinationId: destinationId!,
+          amountNaira: item.amount_naira,
+          amountUsdc: item.amount_usdc,
+          dataPlanId: item.data_plan_id,
+          newPhone: isNew,
+        });
+      }
+      plan = await this.plans.propose(user.id, resolved);
+    } catch (error) {
+      // Nothing to approve, so nothing should be left waiting.
+      await Promise.all(created.map((id) => this.contacts.discard(user.id, id).catch(() => undefined)));
+      throw error;
+    }
     return {
       result: `The approval card is showing ${plan.items.length} payment(s), total ${formatNaira(plan.totalKobo)}. Nothing has moved.`,
       planId: plan.id,

@@ -103,6 +103,16 @@ export class ContactsService {
     return row ?? null;
   }
 
+  /** A phone the user gave just now for a plan, which approving that plan will save. */
+  async newPhoneDestination(userId: string, destinationId: string): Promise<{ contact: Contact; destination: ContactDestination } | null> {
+    const [row] = await this.db
+      .select({ contact: contacts, destination: contactDestinations })
+      .from(contactDestinations)
+      .innerJoin(contacts, eq(contactDestinations.contactId, contacts.id))
+      .where(and(eq(contactDestinations.id, destinationId), eq(contacts.userId, userId), eq(contacts.status, 'proposed'), eq(contactDestinations.kind, 'phone')));
+    return row ?? null;
+  }
+
   private async withDestinations(rows: Contact[]): Promise<ContactWithDestinations[]> {
     if (rows.length === 0) return [];
     const destinations = await this.db

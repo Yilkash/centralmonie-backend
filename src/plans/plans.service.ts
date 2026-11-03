@@ -1,6 +1,6 @@
 import { ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { and, asc, eq, sql } from 'drizzle-orm';
+import { and, asc, eq, inArray, sql } from 'drizzle-orm';
 import { WalletCall } from '../chain/chain';
 import { Chain, usdcTransferCall } from '../chain/chain.service';
 import { Env } from '../config/env';
@@ -10,7 +10,7 @@ import { LimitsService } from '../payments/limits.service';
 import { PaymentEngine } from '../payments/payment-engine.service';
 import { AuditService } from '../ops/audit.service';
 import { GuardsService } from '../ops/guards.service';
-import { Plan, PlanItem, Payment, payments, planItems, plans, User } from '../database/schema';
+import { contacts, Plan, PlanItem, Payment, payments, planItems, plans, User } from '../database/schema';
 import { DAILY_LIMIT_KOBO, formatNaira, formatUsdc, koboToUsdcMinor, nairaToKobo, parseUsdc, usdcMinorToKobo } from '../money/money';
 import { DataPlans, ExchangeRates, PaymentProvider, PaymentRequest } from '../providers/providers';
 import { PlanRefused } from './plan-refused';
@@ -78,7 +78,10 @@ export class PlansService {
   }
 
   async priced(userId: string, item: ProposedItem, nairaPerUsdc: number) {
-    const usable = await this.contacts.usableDestination(userId, item.destinationId);
+    const usable =
+      item.newPhone && item.route === 'airtime'
+        ? await this.contacts.newPhoneDestination(userId, item.destinationId)
+        : await this.contacts.usableDestination(userId, item.destinationId);
     if (!usable) throw new PlanRefused('That recipient is not one of the saved contacts.');
     const { contact, destination } = usable;
 
@@ -223,6 +226,11 @@ export class PlansService {
         )
         .returning();
       await tx.update(plans).set({ status: 'approved', decidedAt: new Date() }).where(eq(plans.id, planId));
+      // Approving a payment to a new number also saves that number, so one tap does both.
+      const contactIds = [...new Set(items.map((item) => (item.destination as { contactId?: string }).contactId).filter((id): id is string => Boolean(id)))];
+      if (contactIds.length > 0) {
+        await tx.update(contacts).set({ status: 'confirmed' }).where(and(inArray(contacts.id, contactIds), eq(contacts.userId, userId), eq(contacts.status, 'proposed')));
+      }
       return { rows, items };
     });
     if (!created) throw new PlanRefused('This quote has expired. Please ask again for a new one.');
