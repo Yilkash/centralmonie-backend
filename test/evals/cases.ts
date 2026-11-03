@@ -312,7 +312,8 @@ export const CASES: EvalCase[] = [
   ]),
   c('memory', 'yes', none, [
     { role: 'user', content: 'send N500 airtime to Kc' },
-    { role: 'assistant', content: 'Please check and approve.' },
+    // How the real app shows it: a card that is still waiting is marked in the history.
+    { role: 'assistant', content: 'Please check and approve.\n[Approval card shown earlier. Its status now: proposed. Payments: Kc not paid]' },
   ]),
   // Conversation memory: 6
   c('memory', 'Tunde', plan(bank('Tunde', 100000)), [
