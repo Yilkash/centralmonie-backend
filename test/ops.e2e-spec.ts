@@ -154,6 +154,16 @@ describe('hardening', () => {
       expect((await call('POST', `/v1/plans/${id}/approve`, 'alice', { pin: '5930' })).statusCode).toBe(200);
     });
 
+    it('guesses sent together cannot get past the five-try limit', async () => {
+      await call('POST', '/v1/pin', 'alice', { pin: '4829' });
+      const id = await planId();
+      await Promise.all(Array.from({ length: 12 }, () => call('POST', `/v1/plans/${id}/approve`, 'alice', { pin: '0001' })));
+      const locked = await call('POST', `/v1/plans/${id}/approve`, 'alice', { pin: '4829' });
+      expect(locked.json().message).toMatch(/Too many/);
+      const { rows } = await pool.query("select count(*)::int as tries from audit_log where action in ('pin.wrong', 'pin.locked')");
+      expect(rows[0].tries).toBeLessThanOrEqual(5);
+    });
+
     it('needs the current PIN to change it', async () => {
       await call('POST', '/v1/pin', 'alice', { pin: '4829' });
       expect((await call('POST', '/v1/pin', 'alice', { pin: '5930' })).statusCode).toBe(403);
@@ -169,6 +179,14 @@ describe('hardening', () => {
       expect(response.json().message).toMatch(/set a PIN/);
       required.mockRestore();
     });
+  });
+
+  it('never replaces a saved wallet', async () => {
+    const users = app.get(UsersRepository, { strict: false });
+    const after = await users.upsert({ subject: 'did:privy:alice', email: null, walletAddress: '0x000000000000000000000000000000000000dEaD' });
+    expect(after.walletAddress).toBe(alice.walletAddress);
+    const kept = await users.upsert({ subject: 'did:privy:alice', email: null, walletAddress: null });
+    expect(kept.walletAddress).toBe(alice.walletAddress);
   });
 
   it('limits how fast one account can chat', async () => {

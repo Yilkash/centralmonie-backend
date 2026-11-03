@@ -175,6 +175,39 @@ describe('scheduled payments on a fork of Base Sepolia', () => {
     expect(await usdcBalance(RECIPIENT)).toBe(2_000_000n);
   });
 
+  it('a transaction with an unknown outcome is never sent again', async () => {
+    const group = await live([usdcItem('2', monthly)]);
+    const id = group.items[0]!.id;
+    const due = (await schedules.get(user.id, id))!.nextRunAt!;
+    const spend = chain.spendAndForward.bind(chain);
+    jest.spyOn(chain, 'spendAndForward').mockImplementationOnce(async (...args) => {
+      await spend(...args); // it really goes out, then the wait for the result fails
+      throw new Error('receipt timed out');
+    });
+    const when = new Date(due.getTime() + 60000);
+    await scheduler.tick(when);
+    expect((await paymentRows())[0]!.status).toBe('needs_support');
+    expect(await usdcBalance(RECIPIENT)).toBe(2_000_000n);
+    expect((await texts()).at(-1)).toMatch(/could not confirm/);
+
+    await scheduler.tick(new Date(when.getTime() + 1000));
+    expect(await usdcBalance(RECIPIENT)).toBe(2_000_000n);
+    expect(await paymentRows()).toHaveLength(1);
+  });
+
+  it('a permission for limited runs ends soon after the last one', async () => {
+    const group = await live([usdcItem('1', { ...monthly, occurrences: 2 } as Timing)]);
+    const permission = group.items[0]!.permission as { start: number; end: number };
+    expect(permission.end - permission.start).toBe(2 * 28 * 86400 + 7 * 86400);
+  });
+
+  it('a finished schedule still offers a way to remove its permission', async () => {
+    const group = await live([usdcItem('1', inMinutes(5))]);
+    await scheduler.tick(new Date(Date.now() + 6 * 60000));
+    const { calls } = await schedules.cancel(user.id, group.items[0]!.id);
+    expect(calls).toHaveLength(1);
+  });
+
   it('an expired permission asks the user to set it up again rather than failing silently', async () => {
     const group = await live([usdcItem('1', inMinutes(5))]);
     await pool.query("update schedules set permission = jsonb_set(permission, '{end}', '1') where id = $1", [group.items[0]!.id]);

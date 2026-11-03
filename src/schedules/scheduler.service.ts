@@ -2,7 +2,7 @@ import { Inject, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { and, eq, gt, inArray, isNull, lte, ne, or, sql } from 'drizzle-orm';
 import { SpendPermission } from '../chain/chain';
-import { Chain } from '../chain/chain.service';
+import { Chain, SpendRefused } from '../chain/chain.service';
 import { Env } from '../config/env';
 import { DATABASE, Database } from '../database/database.module';
 import { Payment, payments, Schedule, scheduleRuns, schedules, users } from '../database/schema';
@@ -92,8 +92,16 @@ export class SchedulerService {
     const dueAt = schedule.nextRunAt!;
     const [run] = await this.db.insert(scheduleRuns).values({ scheduleId: schedule.id, dueAt }).onConflictDoNothing().returning();
     if (!run) return this.recover(schedule, dueAt, now);
+    await this.finishRun(schedule, run.id, now);
+  }
 
-    const attempt = await this.attempt(schedule, run.id, now);
+  private async finishRun(schedule: Schedule, runId: string, now: Date): Promise<void> {
+    // Anything unexpected before money moved, such as a partner hiccup, counts as a failed try and not a lost payment.
+    const attempt = await this.attempt(schedule, runId).catch((error: Error): Attempt => {
+      this.logger.error(`Schedule ${schedule.id} attempt failed: ${error.name}`);
+      return { ok: false, reason: 'Temporary problem', notify: '' };
+    });
+    const run = { id: runId };
     if (attempt.ok) {
       await this.db.update(scheduleRuns).set({ status: 'succeeded' }).where(eq(scheduleRuns.id, run.id));
       await this.advance(schedule, now);
@@ -113,17 +121,23 @@ export class SchedulerService {
       .from(scheduleRuns)
       .leftJoin(payments, eq(payments.scheduleRunId, scheduleRuns.id))
       .where(and(eq(scheduleRuns.scheduleId, schedule.id), eq(scheduleRuns.dueAt, dueAt)));
-    if (row?.payment?.status === 'funding') {
+    if (!row) return;
+    // No payment row means no money moved, and the unique run id means repeating this cannot pay twice.
+    if (!row.payment) return this.finishRun(schedule, row.run.id, now);
+    if (row.payment.status === 'failed') {
+      return this.fail(schedule, { ok: false, reason: row.payment.failureReason ?? 'Failed', notify: '' }, now);
+    }
+    if (row.payment.status === 'funding') {
       await this.db
         .update(payments)
         .set({ status: 'needs_support', failureReason: 'The server stopped during this payment. Check the chain before sending again.' })
-        .where(eq(payments.id, row.payment.id));
+        .where(and(eq(payments.id, row.payment.id), eq(payments.status, 'funding')));
       this.logger.error(`Schedule ${schedule.id} needs a person to check payment ${row.payment.id}`);
     }
     await this.advance(schedule, now);
   }
 
-  private async attempt(schedule: Schedule, runId: string, now: Date): Promise<Attempt> {
+  private async attempt(schedule: Schedule, runId: string): Promise<Attempt> {
     const [owner] = await this.db.select().from(users).where(eq(users.id, schedule.userId));
     if (!owner) return { ok: false, reason: 'No such user', notify: '' };
     const nairaPerUsdc = await this.rates.nairaPerUsdc();
@@ -140,7 +154,8 @@ export class SchedulerService {
         return { ok: false, reason: 'Rate past the approved limit', notify: `${label} did not go out: the exchange rate moved past the limit you approved. You can cancel this and set it up again.` };
       }
       if (Date.now() / 1000 > permission.end) return { ok: false, reason: 'Permission ended', notify: `${label} did not go out: your approval has ended. Please set it up again.` };
-      const balance = await this.chain.usdcBalance(owner.walletAddress ?? '').catch(() => null);
+      // The wallet the permission spends from, which is the one that must hold the money.
+      const balance = await this.chain.usdcBalance(permission.account).catch(() => null);
       if (balance === null) return { ok: false, reason: 'Could not read balance', notify: '' };
       if (balance < BigInt(usdcMinor)) {
         return { ok: false, reason: 'Not enough USDC', notify: `${label} did not go out: it needs ${formatUsdc(usdcMinor)} and your wallet has ${formatUsdc(Number(balance))}.` };
@@ -164,6 +179,9 @@ export class SchedulerService {
     // The limit and the payment row commit together under the same lock approvals use.
     const payment = await this.db.transaction(async (tx) => {
       await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${schedule.userId}, 0))`);
+      // Read again under a row lock: the user may have cancelled since this run was claimed.
+      const [current] = await tx.select({ status: schedules.status }).from(schedules).where(eq(schedules.id, schedule.id)).for('update');
+      if (current?.status !== 'active') return 'cancelled' as const;
       const left = await this.limits.leftTodayKobo(schedule.userId, tx);
       if (schedule.amountKobo > left) return null;
       const [row] = await tx
@@ -183,6 +201,7 @@ export class SchedulerService {
         .returning();
       return row!;
     });
+    if (payment === 'cancelled') return { ok: false, reason: 'Cancelled', notify: '' };
     if (!payment) {
       return { ok: false, reason: 'Over the daily limit', notify: `${label} did not go out: it would pass your ${formatNaira(DAILY_LIMIT_KOBO)} daily limit.` };
     }
@@ -196,12 +215,23 @@ export class SchedulerService {
 
     let hash: string;
     try {
-      hash = await this.chain.spendAndForward(schedule.permission as SpendPermission, usdcMinor, fundingAddress!);
+      hash = await this.chain.spendAndForward(schedule.permission as SpendPermission, usdcMinor, fundingAddress!, async (sent) => {
+        await this.db.update(payments).set({ fundingTxHash: sent }).where(eq(payments.id, payment.id));
+      });
     } catch (error) {
-      // The batch is all or nothing, and a reverted or unsent transaction moved nothing.
-      this.logger.warn(`Spend failed for schedule ${schedule.id}: ${(error as Error).name}`);
-      await this.db.update(payments).set({ status: 'failed', failureReason: 'The wallet permission refused it.' }).where(eq(payments.id, payment.id));
-      return { ok: false, reason: 'Spend refused', notify: `${label} did not go out: the blockchain transaction did not go through.` };
+      if (error instanceof SpendRefused) {
+        this.logger.warn(`Spend refused for schedule ${schedule.id}`);
+        await this.db.update(payments).set({ status: 'failed', failureReason: 'The wallet permission refused it.' }).where(eq(payments.id, payment.id));
+        return { ok: false, reason: 'Spend refused', notify: `${label} did not go out: the blockchain transaction did not go through.` };
+      }
+      // It may have gone out, so sending again could pay twice. A person checks the chain instead.
+      this.logger.error(`Spend outcome unknown for schedule ${schedule.id}, payment ${payment.id}: ${(error as Error).name}`);
+      await this.db
+        .update(payments)
+        .set({ status: 'needs_support', failureReason: 'We could not confirm this transaction. Check the chain before sending again.' })
+        .where(eq(payments.id, payment.id));
+      await this.notifications.notify(schedule.userId, `${label}: we could not confirm it went through. Our team is checking, and it will not be sent again until then.`);
+      return { ok: true, payment };
     }
     await this.db.update(payments).set({ status: 'funded', fundingTxHash: hash }).where(eq(payments.id, payment.id));
     await this.engine.deliver(payment.id);
@@ -236,6 +266,7 @@ export class SchedulerService {
 
   /** Not sent: tell the user, and try again tomorrow. After three retries, wait for the next date. */
   private async fail(schedule: Schedule, attempt: Extract<Attempt, { ok: false }>, now: Date): Promise<void> {
+    if (attempt.reason === 'Cancelled') return;
     const attempts = schedule.attempts + 1;
     const scheduledFor = schedule.scheduledFor ?? schedule.nextRunAt!;
     const timing = schedule.timing as Timing;
@@ -251,7 +282,7 @@ export class SchedulerService {
             ? { scheduledFor: regular, nextRunAt: regular, attempts: 0, lastError: attempt.reason, leaseUntil: null }
             : { status: 'failed', nextRunAt: null, attempts, lastError: attempt.reason, leaseUntil: null },
         )
-        .where(eq(schedules.id, schedule.id));
+        .where(and(eq(schedules.id, schedule.id), eq(schedules.status, 'active')));
       await this.notifications.notify(
         schedule.userId,
         regular ? `I tried ${label} several times and it did not go out. I will try again on ${describeMoment(regular)}.` : `I tried ${label} several times and it did not go out, so I have stopped.`,
@@ -263,7 +294,7 @@ export class SchedulerService {
     await this.db
       .update(schedules)
       .set({ nextRunAt: retryAt, attempts, lastError: attempt.reason, leaseUntil: null })
-      .where(eq(schedules.id, schedule.id));
+      .where(and(eq(schedules.id, schedule.id), eq(schedules.status, 'active')));
     if (attempt.notify) await this.notifications.notify(schedule.userId, `${attempt.notify} I will try again on ${describeMoment(retryAt)}.`);
   }
 

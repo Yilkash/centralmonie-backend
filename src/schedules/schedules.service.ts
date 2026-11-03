@@ -166,7 +166,7 @@ export class SchedulesService {
           if (error instanceof TimingRefused) throw new PlanRefused(error.message);
           throw error;
         }
-        await tx
+        const claimed = await tx
           .update(schedules)
           .set({
             status: this.onChain ? 'awaiting_signature' : 'active',
@@ -175,7 +175,10 @@ export class SchedulesService {
             approvedAt: now,
             permission: this.onChain ? this.permissionFor(user.walletAddress!, spender!, item, timing, runAt, now, nairaPerUsdc) : null,
           })
-          .where(eq(schedules.id, item.id));
+          // Only from proposed, so a slow approve cannot undo a reject or replace a signed permission.
+          .where(and(eq(schedules.id, item.id), eq(schedules.status, 'proposed')))
+          .returning({ id: schedules.id });
+        if (claimed.length === 0) throw new ConflictException('This has already been decided.');
       }
     });
     await this.audit.record(user.id, 'schedule.approved', groupId);
@@ -194,7 +197,11 @@ export class SchedulesService {
       allowance: String(usdc),
       period,
       start,
-      end: timing.kind === 'once' ? start + period : start + PERMISSION_LIFETIME_S,
+      // No longer than it needs: limited runs end with their last payment, plus a week for retries.
+      end:
+        timing.kind === 'once'
+          ? start + period
+          : start + Math.min(PERMISSION_LIFETIME_S, timing.occurrences ? period * timing.occurrences + 7 * 86400 : PERMISSION_LIFETIME_S),
       salt: BigInt(`0x${randomBytes(16).toString('hex')}`).toString(),
       extraData: '0x',
     };
@@ -253,8 +260,8 @@ export class SchedulesService {
     if (!schedule) {
       const [existing] = await this.db.select().from(schedules).where(and(eq(schedules.id, scheduleId), eq(schedules.userId, userId)));
       if (!existing) throw new NotFoundException('Schedule not found');
-      if (existing.status === 'cancelled') return { schedule: existing, calls: this.revokeCalls(existing) };
-      throw new ConflictException('This is no longer active.');
+      // Finished or expired, the payments have stopped, but the wallet may still hold the permission.
+      return { schedule: existing, calls: this.revokeCalls(existing) };
     }
     await this.audit.record(userId, 'schedule.cancelled', scheduleId);
     return { schedule, calls: this.revokeCalls(schedule) };

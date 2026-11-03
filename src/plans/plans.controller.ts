@@ -79,6 +79,14 @@ export class PlansController {
     return presentPlan(await this.plans.get(user.id, id));
   }
 
+  /** Before signing again: finds a transaction that already went out, so the user cannot pay twice. */
+  @Post(':id/recheck')
+  @HttpCode(200)
+  async recheck(@CurrentUser() user: User, @Param('id', ParseUUIDPipe) id: string) {
+    await this.funding_.recheck(user.id, id);
+    return presentPlan(await this.plans.get(user.id, id));
+  }
+
   /** The user closed the wallet prompt without signing. */
   @Post(':id/abandon')
   @HttpCode(200)

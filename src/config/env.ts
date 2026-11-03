@@ -70,8 +70,15 @@ export function validateEnv(raw: Record<string, unknown>): Env {
   if (result.data.PAYMENTS_MODE === 'simulated' && (result.data.PAYSCRIBE_SECRET_KEY || result.data.SWITCH_API_KEY)) {
     throw new Error('Partner keys need PAYMENTS_MODE=chain');
   }
-  if (result.data.CHAIN_ID === 8453 && !result.data.REQUIRE_PIN) {
-    throw new Error('Real money needs REQUIRE_PIN=true');
+  if (result.data.CHAIN_ID === 8453) {
+    // With real money, a missing setting must stop the app, not quietly fall back to something simulated.
+    const missing = (
+      ['PAYSCRIBE_SECRET_KEY', 'PAYSCRIBE_BASE_URL', 'SWITCH_API_KEY', 'SWITCH_BASE_URL', 'SWITCH_REFUND_ADDRESS', 'SERVER_OWNER_KEY', 'COLLECTION_KEY', 'ADMIN_TOKEN'] as const
+    ).filter((name) => !result.data[name]);
+    if (missing.length) throw new Error(`Real money needs: ${missing.join(', ')}`);
+    if (!result.data.REQUIRE_PIN) throw new Error('Real money needs REQUIRE_PIN=true');
+    if (result.data.PAYMENTS_MODE !== 'chain') throw new Error('Real money needs PAYMENTS_MODE=chain');
+    if (result.data.IDENTITY_PROVIDER !== 'privy') throw new Error('Real money needs the real sign-in');
   }
   if (result.data.PAYMENTS_MODE === 'chain' && !result.data.COLLECTION_ADDRESS) {
     throw new Error('PAYMENTS_MODE=chain needs COLLECTION_ADDRESS');

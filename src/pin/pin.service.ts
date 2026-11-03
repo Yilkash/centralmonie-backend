@@ -1,6 +1,6 @@
 import { ForbiddenException, Inject, Injectable, UnprocessableEntityException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { eq } from 'drizzle-orm';
+import { and, eq, isNull, lte, or, sql } from 'drizzle-orm';
 import { Env } from '../config/env';
 import { DATABASE, Database } from '../database/database.module';
 import { User, users } from '../database/schema';
@@ -8,7 +8,6 @@ import { AuditService } from '../ops/audit.service';
 import { hashPin, pinMatches, weakPin } from './pin';
 
 const MAX_FAILURES = 5;
-const LOCK_MS = 30 * 60 * 1000;
 
 @Injectable()
 export class PinService {
@@ -37,21 +36,22 @@ export class PinService {
       if (this.required) throw new ForbiddenException('Please set a PIN first.');
       return;
     }
-    // Read fresh: the guard's copy could be from before another request failed.
-    const [fresh] = await this.db.select().from(users).where(eq(users.id, user.id));
-    if (fresh!.pinLockedUntil && fresh!.pinLockedUntil > new Date()) {
-      throw new ForbiddenException('Too many wrong PINs. Please try again in 30 minutes.');
-    }
-    if (pin && (await pinMatches(pin, fresh!.pinHash!))) {
-      if (fresh!.pinFailures > 0) await this.db.update(users).set({ pinFailures: 0, pinLockedUntil: null }).where(eq(users.id, user.id));
+    // A try is counted before the PIN is checked, in one step, so guesses sent together cannot share a count.
+    const [counted] = await this.db
+      .update(users)
+      .set({
+        pinFailures: sql`${users.pinFailures} + 1`,
+        pinLockedUntil: sql`case when ${users.pinFailures} + 1 >= ${MAX_FAILURES} then now() + interval '30 minutes' else null end`,
+      })
+      .where(and(eq(users.id, user.id), or(isNull(users.pinLockedUntil), lte(users.pinLockedUntil, sql`now()`))))
+      .returning();
+    if (!counted) throw new ForbiddenException('Too many wrong PINs. Please try again in 30 minutes.');
+
+    if (pin && (await pinMatches(pin, counted.pinHash!))) {
+      await this.db.update(users).set({ pinFailures: 0, pinLockedUntil: null }).where(eq(users.id, user.id));
       return;
     }
-    const failures = fresh!.pinFailures + 1;
-    const locked = failures >= MAX_FAILURES;
-    await this.db
-      .update(users)
-      .set({ pinFailures: locked ? 0 : failures, pinLockedUntil: locked ? new Date(Date.now() + LOCK_MS) : null })
-      .where(eq(users.id, user.id));
+    const locked = counted.pinFailures >= MAX_FAILURES;
     await this.audit.record(user.id, locked ? 'pin.locked' : 'pin.wrong');
     throw new ForbiddenException(locked ? 'Too many wrong PINs. Please try again in 30 minutes.' : 'That PIN is not right. Nothing was sent.');
   }

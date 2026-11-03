@@ -1,5 +1,5 @@
 import { sql } from 'drizzle-orm';
-import { bigint, boolean, index, integer, jsonb, pgEnum, pgTable, text, timestamp, uniqueIndex, uuid } from 'drizzle-orm/pg-core';
+import { bigint, boolean, index, integer, jsonb, pgEnum, pgTable, primaryKey, text, timestamp, uniqueIndex, uuid } from 'drizzle-orm/pg-core';
 
 export const users = pgTable('users', {
   id: uuid('id').primaryKey().defaultRandom(),
@@ -194,11 +194,16 @@ export const scheduleRuns = pgTable(
 );
 
 /** A funding transaction can back one plan only, so the same transaction can never buy twice. */
-export const fundingTransactions = pgTable('funding_transactions', {
-  txHash: text('tx_hash').primaryKey(),
-  ownerId: uuid('owner_id').notNull(),
-  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-});
+export const fundingTransactions = pgTable(
+  'funding_transactions',
+  {
+    txHash: text('tx_hash').notNull(),
+    wallet: text('wallet').notNull(),
+    ownerId: uuid('owner_id').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [primaryKey({ columns: [table.txHash, table.wallet] })],
+);
 
 /** USDC that arrived in a user's wallet, recorded once and announced in their chat. */
 export const deposits = pgTable(

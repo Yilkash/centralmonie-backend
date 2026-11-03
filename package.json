@@ -16,7 +16,8 @@
     "db:up": "docker compose up -d --wait db",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "ts-node --transpile-only src/database/migrate-cli.ts",
-    "eval": "ts-node --transpile-only test/evals/run-evals.ts"
+    "eval": "ts-node --transpile-only test/evals/run-evals.ts",
+    "setup:test-wallets": "node scripts/setup-test-wallets.mjs"
   },
   "jest": {
     "rootDir": "src",

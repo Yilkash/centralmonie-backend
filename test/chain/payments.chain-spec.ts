@@ -133,6 +133,64 @@ describe('USDC payments on a fork of Base Sepolia', () => {
     expect(await usdcBalance(COLLECTION)).toBe(1_000_000n);
   });
 
+  it("cannot use up another person's transaction from a plan of one's own", async () => {
+    const kc = await saved('Kc', { kind: 'phone', phone: '08031234567' });
+    const victim = await plans.approve(user, (await plans.propose(user.id, [airtimeItem(kc.id, 1500)])).id);
+    const hash = await walletSend(KEYS.user, wallet, victim.calls);
+
+    const attacker = await app.get(UsersRepository, { strict: false }).upsert({ subject: 'did:fork:attacker', email: null, walletAddress: address(KEYS.attacker) });
+    const contact = await contacts.propose(attacker.id, 'Kc', [], { kind: 'phone', phone: '08031234567' });
+    await contacts.confirm(attacker.id, contact.id);
+    const item = airtimeItem(contact.destinations[0]!.id, 1500);
+    // With a rejected plan, and with a waiting plan of the same amount.
+    const rejected = await plans.propose(attacker.id, [item]);
+    await plans.reject(attacker.id, rejected.id);
+    await funding.confirm(attacker.id, rejected.id, hash).catch(() => undefined);
+    await dealUsdc(address(KEYS.attacker), 5_000_000n);
+    const waiting = await plans.approve({ ...attacker }, (await plans.propose(attacker.id, [item])).id);
+    await expect(funding.confirm(attacker.id, waiting.id, hash)).rejects.toThrow(/does not match/);
+
+    await funding.confirm(user.id, victim.id, hash);
+    expect((await plans.get(user.id, victim.id)).items[0]!.payment!.status).toBe('completed');
+  });
+
+  it('confirming from many requests at once delivers and refunds only once', async () => {
+    const failing = await saved('Bad', { kind: 'bank', bankName: 'GTBank', accountNumber: '1234560000' });
+    const plan = await plans.approve(user, (await plans.propose(user.id, [bankItem(failing.id, 3000)])).id);
+    const hash = await walletSend(KEYS.user, wallet, plan.calls);
+    await Promise.allSettled(Array.from({ length: 6 }, () => funding.confirm(user.id, plan.id, hash)));
+    await funding.reconcile();
+    expect((await plans.get(user.id, plan.id)).items[0]!.payment!.status).toBe('returned');
+    expect(await usdcBalance(wallet)).toBe(50_000_000n);
+    expect(await usdcBalance(COLLECTION)).toBe(0n);
+  });
+
+  it('declining cannot lose money that actually went out', async () => {
+    const halima = await saved('Halima', { kind: 'wallet', walletAddress: RECIPIENT });
+    const plan = await plans.approve(user, (await plans.propose(user.id, [usdcItem(halima.id, '3')])).id);
+    await walletSend(KEYS.user, wallet, plan.calls);
+    await funding.abandon(user.id, plan.id); // the wallet reported an error after it had really sent
+    expect((await plans.get(user.id, plan.id)).items[0]!.payment!.status).toBe('completed');
+  });
+
+  it('a recheck before signing again finds the first send, so there is nothing to sign', async () => {
+    const halima = await saved('Halima', { kind: 'wallet', walletAddress: RECIPIENT });
+    const plan = await plans.approve(user, (await plans.propose(user.id, [usdcItem(halima.id, '3')])).id);
+    await walletSend(KEYS.user, wallet, plan.calls);
+    await funding.recheck(user.id, plan.id);
+    expect((await plans.get(user.id, plan.id)).calls).toHaveLength(0);
+  });
+
+  it('a made-up hash cannot hold a payment open for ever', async () => {
+    const halima = await saved('Halima', { kind: 'wallet', walletAddress: RECIPIENT });
+    const plan = await plans.approve(user, (await plans.propose(user.id, [usdcItem(halima.id, '3')])).id);
+    await funding.confirm(user.id, plan.id, `0x${'ab'.repeat(32)}`);
+    expect((await plans.get(user.id, plan.id)).items[0]!.payment!.status).toBe('funding');
+    await pool.query("update payments set created_at = now() - interval '20 minutes'");
+    await funding.reconcile();
+    expect((await plans.get(user.id, plan.id)).items[0]!.payment!.status).toBe('failed');
+  });
+
   it("refuses another person's transaction with the same amount and address", async () => {
     const kc = await saved('Kc', { kind: 'phone', phone: '08031234567' });
     const plan = await plans.approve(user, (await plans.propose(user.id, [airtimeItem(kc.id, 1500)])).id);

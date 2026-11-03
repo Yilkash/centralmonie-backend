@@ -15,6 +15,9 @@ import { privateKeyToAccount } from 'viem/accounts';
 import { Env } from '../config/env';
 import { erc20Abi, managerAbi, smartWalletAbi, SpendPermission, SPEND_PERMISSION_MANAGER, Transfer, TxOutcome, WalletCall } from './chain';
 
+/** The contract refused the spend in a dry run, so no transaction was sent and nothing moved. */
+export class SpendRefused extends Error {}
+
 /** Everything the app reads from or sends to the blockchain, so tests and later networks can replace it. */
 export abstract class Chain {
   abstract usdcBalance(address: string): Promise<bigint>;
@@ -28,8 +31,12 @@ export abstract class Chain {
   abstract permissionActive(permission: SpendPermission): Promise<boolean>;
   /** The address that spends permissions, or null if no server key is set. */
   abstract spender(): Promise<string | null>;
-  /** One transaction: take from the user's wallet and pass it on. If either fails, neither happens. */
-  abstract spendAndForward(permission: SpendPermission, usdcMinor: number, to: string): Promise<string>;
+  /**
+   * One transaction: take from the user's wallet and pass it on. If either fails, neither happens.
+   * SpendRefused means nothing was sent. Any other error means it may have gone out, so never retry on that.
+   * onSent runs as soon as the hash is known, before waiting for the result.
+   */
+  abstract spendAndForward(permission: SpendPermission, usdcMinor: number, to: string, onSent?: (hash: string) => Promise<void>): Promise<string>;
   abstract usdcAddress(): string;
 }
 
@@ -113,7 +120,8 @@ export class ViemChain extends Chain {
     if (!this.collectionKey) return null;
     const wallet = this.wallet(this.collectionKey);
     const hash = await wallet.writeContract({ address: this.usdc, abi: erc20Abi, functionName: 'transfer', args: [to as Address, BigInt(usdcMinor)] });
-    await this.client.waitForTransactionReceipt({ hash, timeout: 60000 });
+    const receipt = await this.client.waitForTransactionReceipt({ hash, timeout: 60000 });
+    if (receipt.status !== 'success') throw new Error('The refund reverted');
     return hash;
   }
 
@@ -161,12 +169,12 @@ export class ViemChain extends Chain {
     return account.address;
   }
 
-  async spendAndForward(permission: SpendPermission, usdcMinor: number, to: string): Promise<string> {
+  async spendAndForward(permission: SpendPermission, usdcMinor: number, to: string, onSent?: (hash: string) => Promise<void>): Promise<string> {
     if (!this.serverKey) throw new Error('No server key is set');
     const account = await this.ensureServerAccount();
     const value = BigInt(usdcMinor);
     // The owner key calls the account directly and pays gas in ETH. Both steps run in one transaction.
-    const hash = await this.wallet(this.serverKey).writeContract({
+    const request = {
       address: account,
       abi: smartWalletAbi,
       functionName: 'executeBatch',
@@ -184,9 +192,19 @@ export class ViemChain extends Chain {
           },
         ],
       ],
-    });
+    } as const;
+    // A dry run first, because a refusal here is certain to have moved nothing. After this, doubt means stop.
+    const owner = privateKeyToAccount(this.serverKey as Hex);
+    try {
+      await this.client.simulateContract({ ...request, account: owner });
+    } catch (error) {
+      if ((error as Error).name === 'ContractFunctionExecutionError') throw new SpendRefused('The wallet permission refused it');
+      throw error;
+    }
+    const hash = await this.wallet(this.serverKey).writeContract(request);
+    await onSent?.(hash);
     const receipt = await this.client.waitForTransactionReceipt({ hash, timeout: 60000 });
-    if (receipt.status !== 'success') throw new Error('The spend transaction reverted');
+    if (receipt.status !== 'success') throw new SpendRefused('The spend transaction reverted');
     return hash;
   }
 }

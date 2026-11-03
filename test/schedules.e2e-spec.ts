@@ -8,6 +8,7 @@ import { applyMigrations } from '../src/database/migrate';
 import { User } from '../src/database/schema';
 import { IdentityProvider, InvalidIdentityError } from '../src/identity/identity-provider';
 import { SwitchesService } from '../src/ops/switches.service';
+import { ExchangeRates } from '../src/providers/providers';
 import { PlanRefused } from '../src/plans/plan-refused';
 import { SchedulerService } from '../src/schedules/scheduler.service';
 import { ProposedSchedule, SchedulesService } from '../src/schedules/schedules.service';
@@ -223,6 +224,56 @@ describe('scheduled payments', () => {
     await scheduler.tick(when);
     expect(await paymentRows(alice)).toHaveLength(1);
     expect((await schedules.get(alice.id, id))!.nextRunAt!.getTime()).toBeGreaterThan(due.getTime());
+  });
+
+  it('cancelling after a run was claimed still stops the payment', async () => {
+    const group = await schedules.propose(alice.id, [item(await bankTo(), 1000, inMinutes(1))]);
+    const id = (await schedules.approve(alice, group.groupId)).items[0]!.id;
+    const claim = schedules.claimDue.bind(schedules);
+    jest.spyOn(schedules, 'claimDue').mockImplementationOnce(async (...args) => {
+      const claimed = await claim(...args);
+      await schedules.cancel(alice.id, id);
+      return claimed;
+    });
+    await scheduler.tick(later(5 * MINUTE));
+    expect(await paymentRows(alice)).toHaveLength(0);
+    expect((await schedules.get(alice.id, id))!.status).toBe('cancelled');
+  });
+
+  it('a temporary problem is a failed try that gets retried, not a lost payment', async () => {
+    const rates = app.get(ExchangeRates, { strict: false });
+    const group = await schedules.propose(alice.id, [item(await bankTo(), 1000, inMinutes(1))]);
+    const id = (await schedules.approve(alice, group.groupId)).items[0]!.id;
+    jest.spyOn(rates, 'nairaPerUsdc').mockRejectedValueOnce(new Error('partner down'));
+    const due = later(2 * MINUTE);
+    await scheduler.tick(due);
+    const after = (await schedules.get(alice.id, id))!;
+    expect(after.status).toBe('active');
+    expect(after.attempts).toBe(1);
+    await scheduler.tick(new Date(due.getTime() + DAY + MINUTE));
+    expect(await paymentRows(alice)).toHaveLength(1);
+    expect((await schedules.get(alice.id, id))!.status).toBe('completed');
+  });
+
+  it('a crash before any payment row retries the same run, and still pays only once', async () => {
+    const group = await schedules.propose(alice.id, [item(await bankTo(), 1000, inMinutes(1))]);
+    const id = (await schedules.approve(alice, group.groupId)).items[0]!.id;
+    const due = (await schedules.get(alice.id, id))!.nextRunAt!;
+    await pool.query('insert into schedule_runs (schedule_id, due_at) values ($1, $2)', [id, due]);
+    await scheduler.tick(later(5 * MINUTE));
+    expect(await paymentRows(alice)).toHaveLength(1);
+    expect((await schedules.get(alice.id, id))!.status).toBe('completed');
+  });
+
+  it('a slow approve cannot undo a rejection', async () => {
+    const group = await schedules.propose(alice.id, [item(await bankTo(), 1000, inMinutes(1))]);
+    const results = await Promise.allSettled([schedules.approve(alice, group.groupId), schedules.reject(alice.id, group.groupId), schedules.approve(alice, group.groupId)]);
+    const status = (await schedules.group(alice.id, group.groupId)).status;
+    expect(results.some((result) => result.status === 'fulfilled')).toBe(true);
+    if (status === 'rejected') {
+      await scheduler.tick(later(DAY));
+      expect(await paymentRows(alice)).toHaveLength(0);
+    }
   });
 
   it('reminds a day before a long-planned payment, once', async () => {

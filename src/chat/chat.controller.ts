@@ -38,7 +38,8 @@ export class ChatController {
         id: contact.id,
         name: contact.name,
         status: contact.status,
-        detail: describeDestination(contact.destinations[0]!),
+        // The whole address, because this card is the user's one chance to catch a wrong character.
+        detail: contact.destinations[0]!.walletAddress ?? describeDestination(contact.destinations[0]!),
       },
     };
   }

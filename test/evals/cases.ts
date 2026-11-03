@@ -302,6 +302,18 @@ export const CASES: EvalCase[] = [
   c('unplanned', 'did Tunde receive the money?', none),
   c('unplanned', 'thank you, you do well', none),
 
+  c('memory', 'ok', none, [
+    { role: 'user', content: 'send 5k to Ada' },
+    { role: 'assistant', content: 'Please check and approve.' },
+  ]),
+  c('memory', 'alright thank you', none, [
+    { role: 'user', content: 'send Tunde 2k and Ada 3k' },
+    { role: 'assistant', content: 'Please check and approve.\n[Approval card shown earlier. Its status now: approved. Payments: Tunde completed, Ada completed]' },
+  ]),
+  c('memory', 'yes', none, [
+    { role: 'user', content: 'send N500 airtime to Kc' },
+    { role: 'assistant', content: 'Please check and approve.' },
+  ]),
   // Conversation memory: 6
   c('memory', 'Tunde', plan(bank('Tunde', 100000)), [
     { role: 'user', content: 'send 100k to my friend' },

@@ -18,7 +18,10 @@ export class GuardsService {
     private readonly config: ConfigService<Env, true>,
   ) {}
 
-  /** Why these payments cannot go ahead right now, or null if they can. */
+  /**
+   * Why these payments cannot go ahead right now, or null if they can. Payments with no USDC behind them
+   * yet are left out of the company cap, or a few accounts could use it up with nothing at stake.
+   */
   async refusal(routes: readonly PaymentRoute[], addedKobo: number, db: Pick<Database, 'select'> = this.db): Promise<string | null> {
     const switches = await this.switches.all();
     if (switches.payments) return 'Payments are paused for the moment. Nothing was sent. Please try again later.';
@@ -28,7 +31,7 @@ export class GuardsService {
     const [row] = await db
       .select({ used: sql<string>`coalesce(sum(${payments.amountKobo}), 0)` })
       .from(payments)
-      .where(sql`${notInArray(payments.status, ['failed', 'returned'])} and ${payments.createdAt} >= ${startOfLagosDay}`);
+      .where(sql`${notInArray(payments.status, ['failed', 'returned', 'awaiting_signature', 'funding'])} and ${payments.createdAt} >= ${startOfLagosDay}`);
     if (Number(row!.used) + addedKobo > cap) return 'Payments are busy right now. Nothing was sent. Please try again later.';
     return null;
   }
