@@ -6,6 +6,8 @@ import { describeDestination, ContactsService } from '../contacts/contacts.servi
 import { ChatMessage, User } from '../database/schema';
 import { presentPlan } from '../plans/plans.controller';
 import { PlansService } from '../plans/plans.service';
+import { presentGroup, presentSchedule } from '../schedules/schedules.controller';
+import { SchedulesService } from '../schedules/schedules.service';
 import { ChatService } from './chat.service';
 
 const sendMessage = z.object({ content: z.string().trim().min(1).max(2000) });
@@ -18,16 +20,20 @@ export class ChatController {
     private readonly chat: ChatService,
     private readonly plans: PlansService,
     private readonly contacts: ContactsService,
+    private readonly schedules: SchedulesService,
   ) {}
 
   private async present(user: User, message: ChatMessage) {
     const contact = message.contactId ? await this.contacts.get(user.id, message.contactId) : null;
+    const cancelTarget = message.cancelScheduleId ? await this.schedules.get(user.id, message.cancelScheduleId) : null;
     return {
       id: message.id,
       role: message.role,
       content: message.content,
       created_at: message.createdAt,
       plan: message.planId ? presentPlan(await this.plans.get(user.id, message.planId)) : null,
+      schedule_group: message.scheduleGroupId ? presentGroup(await this.schedules.group(user.id, message.scheduleGroupId)) : null,
+      cancel_schedule: cancelTarget && presentSchedule(cancelTarget),
       contact: contact && {
         id: contact.id,
         name: contact.name,

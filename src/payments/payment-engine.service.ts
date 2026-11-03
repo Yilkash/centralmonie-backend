@@ -8,9 +8,11 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { PaymentProvider, PaymentRequest } from '../providers/providers';
 
 const STUCK_AFTER_MS = 10 * 60 * 1000;
+const PENDING_LIMIT_MS = 24 * 60 * 60 * 1000;
 
 const requestFor = (payment: Payment): PaymentRequest => ({
-  reference: payment.id,
+  // The same reference the partner saw when it gave the funding address.
+  reference: payment.planItemId ?? payment.scheduleRunId ?? payment.id,
   route: payment.route,
   destination: payment.destination,
   amountKobo: payment.amountKobo,
@@ -125,12 +127,16 @@ export class PaymentEngine {
   }
 
   private async checkPartner(payment: Payment): Promise<void> {
-    const state = await this.provider.status(payment.id, payment.providerReference!);
+    const state = await this.provider.status(requestFor(payment).reference, payment.providerReference!, payment.route);
     if (state.state === 'completed') {
       await this.finish(payment.id, { status: 'completed' });
       await this.notifications.notify(payment.userId, `Your payment to ${payment.recipientName ?? 'the recipient'} has been delivered.`);
     } else if (state.state === 'failed') {
       await this.giveBack(payment, state.reason);
+    } else if (payment.createdAt.getTime() < Date.now() - PENDING_LIMIT_MS) {
+      // Refunding here could pay twice if the partner delivers late, so a person decides.
+      await this.finish(payment.id, { status: 'needs_support', failureReason: 'The partner has not settled this after a day.' });
+      this.logger.error(`Payment ${payment.id} has been pending for over a day`);
     }
   }
 }

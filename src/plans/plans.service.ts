@@ -70,7 +70,7 @@ export class PlansService {
     return this.get(userId, plan.id);
   }
 
-  private async priced(userId: string, item: ProposedItem, nairaPerUsdc: number) {
+  async priced(userId: string, item: ProposedItem, nairaPerUsdc: number) {
     const usable = await this.contacts.usableDestination(userId, item.destinationId);
     if (!usable) throw new PlanRefused('That recipient is not one of the saved contacts.');
     const { contact, destination } = usable;
@@ -83,6 +83,7 @@ export class PlansService {
     let amountKobo: number;
     let usdcMinor: number;
     let dataPlan: string | null = null;
+    let dataPlanId: string | null = null;
 
     if (item.route === 'usdc') {
       const parsed = item.amountUsdc === null ? null : parseUsdc(item.amountUsdc);
@@ -97,6 +98,7 @@ export class PlansService {
         }
         amountKobo = plan.priceKobo;
         dataPlan = plan.label;
+        dataPlanId = plan.id;
       } else {
         if (!Number.isInteger(item.amountNaira) || item.amountNaira! <= 0) {
           throw new PlanRefused('A naira payment needs a positive whole naira amount.');
@@ -113,7 +115,8 @@ export class PlansService {
       route: item.route,
       recipientName: contact.name,
       recipientDetail: describeDestination(destination),
-      destination,
+      // The partner needs the plan's own id to deliver it.
+      destination: dataPlanId ? { ...destination, dataPlanId } : destination,
       dataPlan,
       amountKobo,
       usdcMinor,
@@ -226,10 +229,19 @@ export class PlansService {
         addresses.set(item.id, { address: (item.destination as { walletAddress: string }).walletAddress, refundable: false });
         continue;
       }
-      const request: PaymentRequest = { reference: item.id, route: item.route, destination: item.destination, amountKobo: item.amountKobo, usdcMinor: item.usdcMinor };
-      const refusal = await this.provider.refusal(request);
+      const request: PaymentRequest = {
+        reference: item.id,
+        route: item.route,
+        // A deposit that reaches the partner too late is returned to the user's own wallet.
+        destination: { ...(item.destination as object), refundAddress: user.walletAddress },
+        amountKobo: item.amountKobo,
+        usdcMinor: item.usdcMinor,
+      };
+      const refusal = await this.provider.refusal(request).catch(() => 'This payment is not available right now. Please try again shortly.');
       if (refusal) throw new PlanRefused(refusal);
-      const partner = await this.provider.fundingAddress(request);
+      const partner = await this.provider.fundingAddress(request).catch(() => {
+        throw new PlanRefused('This payment is not available right now. Nothing was sent. Please try again shortly.');
+      });
       addresses.set(item.id, partner ? { address: partner, refundable: false } : { address: collection, refundable: true });
     }
     return { addresses, block: await this.chain.latestBlock() };

@@ -6,6 +6,9 @@ import { User } from '../database/schema';
 import { formatNaira } from '../money/money';
 import { PlanRefused, PlansService } from '../plans/plans.service';
 import { DataPlans } from '../providers/providers';
+import { presentSchedule } from '../schedules/schedules.controller';
+import { SchedulesService, whenOf } from '../schedules/schedules.service';
+import { Timing } from '../schedules/timing';
 import { WalletService } from '../wallet/wallet.service';
 
 const nullable = (type: string) => ({ type: [type, 'null'] });
@@ -71,6 +74,69 @@ export const AGENT_TOOLS: Anthropic.Tool[] = [
     },
   },
   {
+    name: 'propose_schedule',
+    description:
+      'Shows the user an approval card for payments that happen later: at a set time, after a delay, or repeating. Moves no money, and nothing runs until they approve. Every item needs its own when. Fields you do not need are null.',
+    strict: true,
+    input_schema: {
+      type: 'object',
+      properties: {
+        items: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              route: { type: 'string', enum: ['airtime', 'data', 'bank', 'usdc'] },
+              destination_id: { type: 'string', description: 'A destination ID from list_contacts' },
+              amount_naira: nullable('integer'),
+              amount_usdc: nullable('string'),
+              data_plan_id: nullable('string'),
+              when: {
+                type: 'object',
+                properties: {
+                  kind: { type: 'string', enum: ['once', 'recurring'] },
+                  delay_minutes: { ...nullable('integer'), description: 'once only: minutes from now. "in 4 hours" is 240.' },
+                  date: { ...nullable('string'), description: 'once only: YYYY-MM-DD. Leave null when using delay_minutes.' },
+                  time: { ...nullable('string'), description: '24-hour HH:MM in Nigeria. Null means 09:00.' },
+                  frequency: { type: ['string', 'null'], enum: ['daily', 'weekly', 'monthly', null], description: 'recurring only' },
+                  interval: { ...nullable('integer'), description: 'recurring only: every 2 weeks is weekly with interval 2. Null means 1.' },
+                  weekday: { ...nullable('integer'), description: 'weekly only: 0 is Sunday, 6 is Saturday' },
+                  day_of_month: { ...nullable('integer'), description: 'monthly only: 1 to 28. Null means the 28th.' },
+                  last_day_of_month: { ...nullable('boolean'), description: 'monthly only: true for the last day of every month' },
+                  occurrences: { ...nullable('integer'), description: 'recurring only: how many payments in total, if the user limited it' },
+                  start_date: { ...nullable('string'), description: 'recurring only: YYYY-MM-DD to begin from, if the user said so' },
+                },
+                required: ['kind', 'delay_minutes', 'date', 'time', 'frequency', 'interval', 'weekday', 'day_of_month', 'last_day_of_month', 'occurrences', 'start_date'],
+                additionalProperties: false,
+              },
+            },
+            required: ['route', 'destination_id', 'amount_naira', 'amount_usdc', 'data_plan_id', 'when'],
+            additionalProperties: false,
+          },
+        },
+      },
+      required: ['items'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'list_schedules',
+    description: "Lists the user's active scheduled and repeating payments, with an ID, recipient, amount and when each one runs next.",
+    strict: true,
+    input_schema: { type: 'object', properties: {}, required: [], additionalProperties: false },
+  },
+  {
+    name: 'propose_cancel',
+    description: 'Shows the user a card to confirm stopping one scheduled payment. It keeps running until they confirm.',
+    strict: true,
+    input_schema: {
+      type: 'object',
+      properties: { schedule_id: { type: 'string', description: 'An ID from list_schedules' } },
+      required: ['schedule_id'],
+      additionalProperties: false,
+    },
+  },
+  {
     name: 'propose_contact',
     description:
       'Checks a new recipient and shows the user a card to confirm them. Fill only the fields for kind: phone, or bank_name and account_number, or wallet_address. Set the others to null.',
@@ -104,6 +170,47 @@ const planInput = z.object({
   ),
 });
 
+const scheduleInput = z.object({
+  items: z.array(
+    z.object({
+      route: z.enum(['airtime', 'data', 'bank', 'usdc']),
+      destination_id: z.string().uuid(),
+      amount_naira: z.number().nullable(),
+      amount_usdc: z.string().nullable(),
+      data_plan_id: z.string().nullable(),
+      when: z.object({
+        kind: z.enum(['once', 'recurring']),
+        delay_minutes: z.number().nullable(),
+        date: z.string().nullable(),
+        time: z.string().nullable(),
+        frequency: z.enum(['daily', 'weekly', 'monthly']).nullable(),
+        interval: z.number().nullable(),
+        weekday: z.number().nullable(),
+        day_of_month: z.number().nullable(),
+        last_day_of_month: z.boolean().nullable(),
+        occurrences: z.number().nullable(),
+        start_date: z.string().nullable(),
+      }),
+    }),
+  ),
+});
+
+const toTiming = (when: z.infer<typeof scheduleInput>['items'][number]['when']): Timing => {
+  if (when.kind === 'once') return { kind: 'once', delayMinutes: when.delay_minutes, date: when.date, time: when.time };
+  if (!when.frequency) throw new PlanRefused('A repeating payment needs to say daily, weekly or monthly.');
+  return {
+    kind: 'recurring',
+    frequency: when.frequency,
+    interval: when.interval ?? 1,
+    weekday: when.weekday,
+    dayOfMonth: when.day_of_month,
+    lastDayOfMonth: when.last_day_of_month ?? false,
+    time: when.time,
+    occurrences: when.occurrences,
+    startDate: when.start_date,
+  };
+};
+
 const contactInput = z.object({
   name: z.string().trim().min(1).max(100),
   aliases: z.array(z.string().max(50)).max(10),
@@ -119,6 +226,8 @@ export interface ToolOutcome {
   isError?: boolean;
   planId?: string;
   contactId?: string;
+  scheduleGroupId?: string;
+  cancelScheduleId?: string;
 }
 
 @Injectable()
@@ -128,6 +237,7 @@ export class AgentToolbox {
     private readonly plans: PlansService,
     private readonly dataPlans: DataPlans,
     private readonly wallet: WalletService,
+    private readonly schedules: SchedulesService,
   ) {}
 
   /** The user comes from the signed-in session, never from the model, so it cannot act for anyone else. */
@@ -144,6 +254,12 @@ export class AgentToolbox {
           return { result: JSON.stringify(await this.wallet.activity(user.id)) };
         case 'propose_plan':
           return await this.proposePlan(user, input);
+        case 'propose_schedule':
+          return await this.proposeSchedule(user, input);
+        case 'list_schedules':
+          return { result: JSON.stringify((await this.schedules.list(user.id)).map(presentSchedule)) };
+        case 'propose_cancel':
+          return await this.proposeCancel(user, input);
         case 'propose_contact':
           return await this.proposeContact(user, input);
         default:
@@ -197,6 +313,32 @@ export class AgentToolbox {
       result: `The approval card is showing ${plan.items.length} payment(s), total ${formatNaira(plan.totalKobo)}. Nothing has moved.`,
       planId: plan.id,
     };
+  }
+
+  private async proposeSchedule(user: User, input: unknown): Promise<ToolOutcome> {
+    const { items } = scheduleInput.parse(input);
+    const group = await this.schedules.propose(
+      user.id,
+      items.map((item) => ({
+        route: item.route,
+        destinationId: item.destination_id,
+        amountNaira: item.amount_naira,
+        amountUsdc: item.amount_usdc,
+        dataPlanId: item.data_plan_id,
+        timing: toTiming(item.when),
+      })),
+    );
+    return {
+      result: `The approval card is showing: ${group.items.map((item) => `${item.recipientName}: ${whenOf(item)}`).join('; ')}. Nothing runs until they approve.`,
+      scheduleGroupId: group.groupId,
+    };
+  }
+
+  private async proposeCancel(user: User, input: unknown): Promise<ToolOutcome> {
+    const { schedule_id: id } = z.object({ schedule_id: z.string().uuid() }).parse(input);
+    const schedule = await this.schedules.get(user.id, id);
+    if (!schedule || schedule.status !== 'active') return { result: 'That is not one of the active scheduled payments.', isError: true };
+    return { result: `The card to stop ${schedule.recipientName}'s payment is showing. It keeps running until they confirm.`, cancelScheduleId: schedule.id };
   }
 
   private async proposeContact(user: User, input: unknown): Promise<ToolOutcome> {

@@ -9,6 +9,7 @@ import { ContactsModule } from './contacts/contacts.module';
 import { DatabaseModule } from './database/database.module';
 import { HealthController } from './health/health.controller';
 import { PlansModule } from './plans/plans.module';
+import { SchedulesModule } from './schedules/schedules.module';
 import { UsersModule } from './users/users.module';
 
 @Module({
@@ -23,6 +24,7 @@ import { UsersModule } from './users/users.module';
     ChatModule,
     ContactsModule,
     PlansModule,
+    SchedulesModule,
   ],
   controllers: [HealthController],
 })

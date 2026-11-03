@@ -25,6 +25,8 @@ export const chatMessages = pgTable(
     // A card shown with the message. Plain IDs: these tables are declared further down.
     planId: uuid('plan_id'),
     contactId: uuid('contact_id'),
+    scheduleGroupId: uuid('schedule_group_id'),
+    cancelScheduleId: uuid('cancel_schedule_id'),
     // Written by the app rather than typed by the user: the model reads it, the chat does not show it.
     hidden: boolean('hidden').notNull().default(false),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
@@ -122,9 +124,69 @@ export const payments = pgTable(
     fundingTxHash: text('funding_tx_hash'),
     fundingFromBlock: bigint('funding_from_block', { mode: 'number' }),
     refundTxHash: text('refund_tx_hash'),
+    // Set instead of plan_item_id for a scheduled payment. Unique, so a run can only ever pay once.
+    scheduleRunId: uuid('schedule_run_id').unique(),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [index('payments_user_created_idx').on(table.userId, table.createdAt)],
+);
+
+export const scheduleStatus = pgEnum('schedule_status', [
+  'proposed', 'awaiting_signature', 'active', 'completed', 'cancelled', 'failed', 'rejected', 'expired',
+]);
+export const scheduleRunStatus = pgEnum('schedule_run_status', ['started', 'succeeded', 'failed']);
+
+/** A payment for later, once or repeating. Recipient details are copied in, as with plan items. */
+export const schedules = pgTable(
+  'schedules',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+    // Schedules proposed together are approved together, on one card and with one signature.
+    groupId: uuid('group_id').notNull(),
+    status: scheduleStatus('status').notNull().default('proposed'),
+    timing: jsonb('timing').notNull(),
+    route: paymentRoute('route').notNull(),
+    recipientName: text('recipient_name').notNull(),
+    recipientDetail: text('recipient_detail').notNull(),
+    destination: jsonb('destination').notNull(),
+    dataPlan: text('data_plan'),
+    amountKobo: bigint('amount_kobo', { mode: 'number' }).notNull(),
+    // The amount for a USDC payment. Naira payments are priced in USDC on the day they run.
+    fixedUsdcMinor: bigint('fixed_usdc_minor', { mode: 'number' }),
+    // The moment this payment belongs to, which stays put through retries.
+    scheduledFor: timestamp('scheduled_for', { withTimezone: true }),
+    nextRunAt: timestamp('next_run_at', { withTimezone: true }),
+    leaseUntil: timestamp('lease_until', { withTimezone: true }),
+    runsLeft: integer('runs_left'),
+    attempts: integer('attempts').notNull().default(0),
+    lastError: text('last_error'),
+    remindedFor: timestamp('reminded_for', { withTimezone: true }),
+    permission: jsonb('permission'),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    approvedAt: timestamp('approved_at', { withTimezone: true }),
+    cancelledAt: timestamp('cancelled_at', { withTimezone: true }),
+  },
+  (table) => [
+    index('schedules_user_idx').on(table.userId),
+    index('schedules_group_idx').on(table.groupId),
+    index('schedules_due_idx').on(table.status, table.nextRunAt),
+  ],
+);
+
+/** One attempt. The unique pair stops one due moment from running twice, even after a crash. */
+export const scheduleRuns = pgTable(
+  'schedule_runs',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    scheduleId: uuid('schedule_id').notNull().references(() => schedules.id, { onDelete: 'cascade' }),
+    dueAt: timestamp('due_at', { withTimezone: true }).notNull(),
+    status: scheduleRunStatus('status').notNull().default('started'),
+    error: text('error'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [uniqueIndex('schedule_runs_due_idx').on(table.scheduleId, table.dueAt)],
 );
 
 /** A funding transaction can back one plan only, so the same transaction can never buy twice. */
@@ -149,12 +211,21 @@ export const deposits = pgTable(
   (table) => [uniqueIndex('deposits_tx_log_idx').on(table.txHash, table.logIndex), index('deposits_user_idx').on(table.userId)],
 );
 
+/** A pause switch for a route or the scheduler. No row means not paused. */
+export const opSwitches = pgTable('op_switches', {
+  name: text('name').primaryKey(),
+  paused: boolean('paused').notNull().default(false),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
 /** How far a chain watcher has read. */
 export const chainCursors = pgTable('chain_cursors', {
   name: text('name').primaryKey(),
   block: bigint('block', { mode: 'number' }).notNull(),
 });
 
+export type Schedule = typeof schedules.$inferSelect;
+export type ScheduleRun = typeof scheduleRuns.$inferSelect;
 export type Deposit = typeof deposits.$inferSelect;
 export type Contact = typeof contacts.$inferSelect;
 export type ContactDestination = typeof contactDestinations.$inferSelect;

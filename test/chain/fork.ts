@@ -75,3 +75,13 @@ export async function walletSend(ownerKey: Hex, wallet: Address, calls: readonly
   await client.waitForTransactionReceipt({ hash });
   return hash;
 }
+
+/** The pinned block is older than today, and permissions start from today, so the chain's clock must catch up. */
+export async function syncClock(): Promise<void> {
+  const block = await test.getBlock();
+  const now = BigInt(Math.floor(Date.now() / 1000));
+  if (block.timestamp < now) {
+    await test.setNextBlockTimestamp({ timestamp: now });
+    await test.mine({ blocks: 1 });
+  }
+}

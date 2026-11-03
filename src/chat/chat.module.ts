@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { AgentChatResponder } from '../agent/agent-chat-responder';
 import { AgentModule } from '../agent/agent.module';
+import { SchedulesModule } from '../schedules/schedules.module';
 import { AuthModule } from '../auth/auth.module';
 import { Env } from '../config/env';
 import { ContactsModule } from '../contacts/contacts.module';
@@ -13,7 +14,7 @@ import { ChatService } from './chat.service';
 import { PlaceholderChatResponder } from './placeholder-chat-responder';
 
 @Module({
-  imports: [AuthModule, AgentModule, ContactsModule, PlansModule],
+  imports: [AuthModule, AgentModule, ContactsModule, PlansModule, SchedulesModule],
   controllers: [ChatController],
   providers: [
     ChatService,

@@ -29,6 +29,15 @@ const envSchema = z.object({
   COLLECTION_KEY: z.string().optional(),
   // Owner key of the server smart account that runs scheduled payments.
   SERVER_OWNER_KEY: z.string().optional(),
+  // A partner goes live for its route when its key is set. Sandbox URLs until Phase 6.
+  PAYSCRIBE_BASE_URL: z.string().url().optional(),
+  PAYSCRIBE_SECRET_KEY: z.string().min(1).optional(),
+  SWITCH_BASE_URL: z.string().url().optional(),
+  SWITCH_API_KEY: z.string().min(1).optional(),
+  SWITCH_WEBHOOK_SECRET: z.string().min(1).optional(),
+  SWITCH_CALLBACK_URL: z.string().url().optional(),
+  SWITCH_ONRAMP_CALLBACK_URL: z.string().url().optional(),
+  SWITCH_REFUND_ADDRESS: z.string().optional(),
   // Timers for deposits, reconciliation and schedules. Off in unit tests.
   WORKER_ENABLED: z.enum(['true', 'false']).default('true').transform((value) => value === 'true'),
   WORKER_INTERVAL_MS: z.coerce.number().int().positive().default(15000),
@@ -48,6 +57,10 @@ export function validateEnv(raw: Record<string, unknown>): Env {
   }
   if (result.data.CHAIN_ID !== 84532 && result.data.CHAIN_ID !== 31337 && result.data.ALLOW_REAL_MONEY !== 'I understand this moves real money') {
     throw new Error('CHAIN_ID is not a test network. Real money needs ALLOW_REAL_MONEY set');
+  }
+  // In simulated mode no USDC is collected, so a real partner would be paying out for free.
+  if (result.data.PAYMENTS_MODE === 'simulated' && (result.data.PAYSCRIBE_SECRET_KEY || result.data.SWITCH_API_KEY)) {
+    throw new Error('Partner keys need PAYMENTS_MODE=chain');
   }
   if (result.data.PAYMENTS_MODE === 'chain' && !result.data.COLLECTION_ADDRESS) {
     throw new Error('PAYMENTS_MODE=chain needs COLLECTION_ADDRESS');

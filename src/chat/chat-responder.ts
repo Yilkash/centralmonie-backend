@@ -11,6 +11,8 @@ export interface ChatReply {
   /** A plan or new contact for the user to act on, shown as a card with the message. */
   planId?: string | undefined;
   contactId?: string | undefined;
+  scheduleGroupId?: string | undefined;
+  cancelScheduleId?: string | undefined;
 }
 
 /** Produces the assistant's reply, so the chat service does not depend on any AI. */

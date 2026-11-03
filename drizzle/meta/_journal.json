@@ -29,6 +29,13 @@
       "when": 1793659724515,
       "tag": "0003_handy_magneto",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1793689218285,
+      "tag": "0004_lowly_power_pack",
+      "breakpoints": true
     }
   ]
 }

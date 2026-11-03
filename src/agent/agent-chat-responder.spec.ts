@@ -3,6 +3,7 @@ import { ChatTurn } from '../chat/chat-responder';
 import { ChatMessage, User } from '../database/schema';
 import { PlansService } from '../plans/plans.service';
 import { AgentChatResponder } from './agent-chat-responder';
+import { SchedulesService } from '../schedules/schedules.service';
 import { AGENT_TOOLS, AgentToolbox, ToolOutcome } from './agent-tools';
 import { ModelClient, ModelRequest, ModelResponse } from './model-client';
 
@@ -34,14 +35,14 @@ function setUp(responses: (ModelResponse | Error)[], outcome: ToolOutcome = { re
   };
   const run = jest.fn(async () => outcome);
   const plans = { get: jest.fn(async () => ({ status: 'approved', items: [{ recipientName: 'Mother', payment: { status: 'completed' } }] })) };
-  const responder = new AgentChatResponder(model, { run } as unknown as AgentToolbox, plans as unknown as PlansService);
+  const responder = new AgentChatResponder(model, { run } as unknown as AgentToolbox, plans as unknown as PlansService, {} as SchedulesService);
   return { responder, requests, run };
 }
 
 describe('AgentChatResponder', () => {
   it('offers no tool that can approve or send', () => {
     const names = AGENT_TOOLS.map((tool) => tool.name);
-    expect(names).toEqual(['list_contacts', 'list_data_plans', 'get_balance', 'list_activity', 'propose_plan', 'propose_contact']);
+    expect(names).toEqual(['list_contacts', 'list_data_plans', 'get_balance', 'list_activity', 'propose_plan', 'propose_schedule', 'list_schedules', 'propose_cancel', 'propose_contact']);
     expect(names.some((name) => /approve|send|pay|execute|transfer/.test(name))).toBe(false);
   });
 
