@@ -7,3 +7,5 @@ process.env.PRIVY_APP_ID = 'test';
 process.env.PRIVY_APP_SECRET = 'test';
 process.env.PRIVY_VERIFICATION_KEY = 'test';
 delete process.env.ANTHROPIC_API_KEY;
+process.env.WORKER_ENABLED = 'false';
+process.env.PAYMENTS_MODE = 'simulated';

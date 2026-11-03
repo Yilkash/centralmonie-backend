@@ -1,5 +1,5 @@
 import { sql } from 'drizzle-orm';
-import { bigint, boolean, index, integer, jsonb, pgEnum, pgTable, text, timestamp, uuid } from 'drizzle-orm/pg-core';
+import { bigint, boolean, index, integer, jsonb, pgEnum, pgTable, text, timestamp, uniqueIndex, uuid } from 'drizzle-orm/pg-core';
 
 export const users = pgTable('users', {
   id: uuid('id').primaryKey().defaultRandom(),
@@ -39,7 +39,11 @@ export const contactStatus = pgEnum('contact_status', ['proposed', 'confirmed'])
 export const destinationKind = pgEnum('destination_kind', ['phone', 'bank', 'wallet']);
 export const paymentRoute = pgEnum('payment_route', ['airtime', 'data', 'bank', 'usdc']);
 export const planStatus = pgEnum('plan_status', ['proposed', 'approved', 'rejected', 'expired']);
-export const paymentStatus = pgEnum('payment_status', ['pending', 'completed', 'failed']);
+// awaiting_signature -> funding -> funded -> paying -> completed
+// Anything after funded that fails -> returning -> returned, or needs_support if it cannot return by itself.
+export const paymentStatus = pgEnum('payment_status', [
+  'pending', 'completed', 'failed', 'awaiting_signature', 'funding', 'funded', 'paying', 'returning', 'returned', 'needs_support',
+]);
 
 export const contacts = pgTable(
   'contacts',
@@ -102,18 +106,56 @@ export const payments = pgTable(
     id: uuid('id').primaryKey().defaultRandom(),
     userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
     // One payment per approved item, so approving twice can never pay twice.
-    planItemId: uuid('plan_item_id').notNull().unique().references(() => planItems.id),
+    planItemId: uuid('plan_item_id').unique().references(() => planItems.id),
     route: paymentRoute('route').notNull(),
     amountKobo: bigint('amount_kobo', { mode: 'number' }).notNull(),
     usdcMinor: bigint('usdc_minor', { mode: 'number' }).notNull(),
     status: paymentStatus('status').notNull().default('pending'),
     providerReference: text('provider_reference'),
     failureReason: text('failure_reason'),
+    recipientName: text('recipient_name'),
+    destination: jsonb('destination'),
+    // Where the user's USDC goes first: the recipient for USDC, otherwise the collection or partner address.
+    fundingAddress: text('funding_address'),
+    // True when the money sits at our own collection address, so we can return it ourselves.
+    refundable: boolean('refundable').notNull().default(false),
+    fundingTxHash: text('funding_tx_hash'),
+    fundingFromBlock: bigint('funding_from_block', { mode: 'number' }),
+    refundTxHash: text('refund_tx_hash'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [index('payments_user_created_idx').on(table.userId, table.createdAt)],
 );
 
+/** A funding transaction can back one plan only, so the same transaction can never buy twice. */
+export const fundingTransactions = pgTable('funding_transactions', {
+  txHash: text('tx_hash').primaryKey(),
+  ownerId: uuid('owner_id').notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+/** USDC that arrived in a user's wallet, recorded once and announced in their chat. */
+export const deposits = pgTable(
+  'deposits',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+    txHash: text('tx_hash').notNull(),
+    logIndex: integer('log_index').notNull(),
+    fromAddress: text('from_address').notNull(),
+    usdcMinor: bigint('usdc_minor', { mode: 'number' }).notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [uniqueIndex('deposits_tx_log_idx').on(table.txHash, table.logIndex), index('deposits_user_idx').on(table.userId)],
+);
+
+/** How far a chain watcher has read. */
+export const chainCursors = pgTable('chain_cursors', {
+  name: text('name').primaryKey(),
+  block: bigint('block', { mode: 'number' }).notNull(),
+});
+
+export type Deposit = typeof deposits.$inferSelect;
 export type Contact = typeof contacts.$inferSelect;
 export type ContactDestination = typeof contactDestinations.$inferSelect;
 export type Plan = typeof plans.$inferSelect;

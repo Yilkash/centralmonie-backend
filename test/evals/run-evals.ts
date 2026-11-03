@@ -3,6 +3,8 @@
 import 'reflect-metadata';
 import { config as loadDotenv } from 'dotenv';
 loadDotenv();
+process.env.WORKER_ENABLED = 'false';
+process.env.PAYMENTS_MODE = 'simulated';
 process.env.DATABASE_URL = process.env.TEST_DATABASE_URL ?? 'postgres://tenkobo:localdev@localhost:54445/tenkobo_test';
 
 import { writeFileSync } from 'node:fs';

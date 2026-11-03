@@ -1,27 +1,32 @@
 import { ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { and, asc, eq, ne, sql } from 'drizzle-orm';
+import { ConfigService } from '@nestjs/config';
+import { and, asc, eq, sql } from 'drizzle-orm';
+import { WalletCall } from '../chain/chain';
+import { Chain, usdcTransferCall } from '../chain/chain.service';
+import { Env } from '../config/env';
 import { describeDestination, ContactsService } from '../contacts/contacts.service';
 import { DATABASE, Database } from '../database/database.module';
-import { Plan, PlanItem, Payment, payments, planItems, plans } from '../database/schema';
-import { DAILY_LIMIT_KOBO, formatNaira, koboToUsdcMinor, nairaToKobo, parseUsdc, usdcMinorToKobo } from '../money/money';
-import { DataPlans, ExchangeRates, PaymentProvider } from '../providers/providers';
+import { LimitsService } from '../payments/limits.service';
+import { PaymentEngine } from '../payments/payment-engine.service';
+import { Plan, PlanItem, Payment, payments, planItems, plans, User } from '../database/schema';
+import { DAILY_LIMIT_KOBO, formatNaira, formatUsdc, koboToUsdcMinor, nairaToKobo, parseUsdc, usdcMinorToKobo } from '../money/money';
+import { DataPlans, ExchangeRates, PaymentProvider, PaymentRequest } from '../providers/providers';
+import { PlanRefused } from './plan-refused';
 import { ProposedItem } from './plan.types';
+
+export { PlanRefused };
 
 const QUOTE_LIFETIME_MS = 10 * 60 * 1000;
 const MAX_ITEMS = 10;
 const AIRTIME_MIN_NAIRA = 50;
 
-/** A plan that cannot go ahead. The message is safe to show the user or give to the agent. */
-export class PlanRefused extends Error {}
-
 export interface PlanView extends Plan {
   items: (PlanItem & { payment: Payment | null })[];
   totalKobo: number;
   totalUsdcMinor: number;
+  /** What the wallet must send when payments are waiting for the user's signature. */
+  calls: WalletCall[];
 }
-
-// The start of today in Nigeria, whatever time zone the server runs in.
-const startOfLagosDay = sql`(date_trunc('day', now() at time zone 'Africa/Lagos') at time zone 'Africa/Lagos')`;
 
 @Injectable()
 export class PlansService {
@@ -31,7 +36,15 @@ export class PlansService {
     private readonly rates: ExchangeRates,
     private readonly dataPlans: DataPlans,
     private readonly provider: PaymentProvider,
+    private readonly limits: LimitsService,
+    private readonly engine: PaymentEngine,
+    private readonly chain: Chain,
+    private readonly config: ConfigService<Env, true>,
   ) {}
+
+  private get onChain(): boolean {
+    return this.config.get('PAYMENTS_MODE', { infer: true }) === 'chain';
+  }
 
   /** Re-checks everything the agent proposed. Nothing the agent says is taken on trust. */
   async propose(userId: string, proposed: ProposedItem[]): Promise<PlanView> {
@@ -108,11 +121,7 @@ export class PlansService {
   }
 
   private async assertWithinDailyLimit(db: Pick<Database, 'select'>, userId: string, addedKobo: number): Promise<void> {
-    const [row] = await db
-      .select({ used: sql<string>`coalesce(sum(${payments.amountKobo}), 0)` })
-      .from(payments)
-      .where(and(eq(payments.userId, userId), ne(payments.status, 'failed'), sql`${payments.createdAt} >= ${startOfLagosDay}`));
-    const used = Number(row!.used);
+    const used = await this.limits.usedTodayKobo(userId, db);
     if (used + addedKobo > DAILY_LIMIT_KOBO) {
       throw new PlanRefused(
         `This would go over the ${formatNaira(DAILY_LIMIT_KOBO)} daily limit. ${formatNaira(Math.max(DAILY_LIMIT_KOBO - used, 0))} is left today.`,
@@ -133,6 +142,9 @@ export class PlansService {
     return {
       ...plan,
       items,
+      calls: items.flatMap(({ payment }) =>
+        payment?.status === 'awaiting_signature' ? [usdcTransferCall(this.chain.usdcAddress(), payment.fundingAddress!, payment.usdcMinor)] : [],
+      ),
       totalKobo: items.reduce((sum, item) => sum + item.amountKobo, 0),
       totalUsdcMinor: items.reduce((sum, item) => sum + item.usdcMinor, 0),
     };
@@ -152,7 +164,10 @@ export class PlansService {
    * The only way money moves. Approval, the limit check and the payment rows commit
    * together under a per-user lock, so concurrent approvals cannot pass the limit or pay twice.
    */
-  async approve(userId: string, planId: string): Promise<PlanView> {
+  async approve(user: User, planId: string): Promise<PlanView> {
+    const userId = user.id;
+    // Partner calls happen outside the lock, and only for a plan that can still be approved.
+    const preparation = this.onChain ? await this.prepareFunding(user, planId) : null;
     const created = await this.db.transaction(async (tx) => {
       await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${userId}, 0))`);
       const [plan] = await tx.select().from(plans).where(and(eq(plans.id, planId), eq(plans.userId, userId)));
@@ -166,24 +181,58 @@ export class PlansService {
       await this.assertWithinDailyLimit(tx, userId, items.reduce((sum, item) => sum + item.amountKobo, 0));
       const rows = await tx
         .insert(payments)
-        .values(items.map((item) => ({ userId, planItemId: item.id, route: item.route, amountKobo: item.amountKobo, usdcMinor: item.usdcMinor })))
+        .values(
+          items.map((item) => ({
+            userId,
+            planItemId: item.id,
+            route: item.route,
+            amountKobo: item.amountKobo,
+            usdcMinor: item.usdcMinor,
+            recipientName: item.recipientName,
+            destination: item.destination,
+            ...(preparation
+              ? {
+                  status: 'awaiting_signature' as const,
+                  fundingAddress: preparation.addresses.get(item.id)!.address,
+                  refundable: preparation.addresses.get(item.id)!.refundable,
+                  fundingFromBlock: preparation.block,
+                }
+              : {}),
+          })),
+        )
         .returning();
       await tx.update(plans).set({ status: 'approved', decidedAt: new Date() }).where(eq(plans.id, planId));
       return { rows, items };
     });
     if (!created) throw new PlanRefused('This quote has expired. Please ask again for a new one.');
 
-    for (const payment of created.rows) {
-      const item = created.items.find((candidate) => candidate.id === payment.planItemId)!;
-      const result = await this.provider
-        .pay({ reference: payment.id, route: payment.route, destination: item.destination, amountKobo: payment.amountKobo, usdcMinor: payment.usdcMinor })
-        .catch((error: Error) => ({ ok: false as const, reason: error.message }));
-      await this.db
-        .update(payments)
-        .set(result.ok ? { status: 'completed', providerReference: result.providerReference } : { status: 'failed', failureReason: result.reason })
-        .where(eq(payments.id, payment.id));
-    }
+    if (!preparation) for (const payment of created.rows) await this.engine.paySimulated(payment);
     return this.get(userId, planId);
+  }
+
+  /** Before anything is recorded: is there enough USDC and can partners take it, and where must the USDC go? */
+  private async prepareFunding(user: User, planId: string) {
+    const plan = await this.get(user.id, planId);
+    if (plan.status !== 'proposed') throw new ConflictException('This plan has already been decided.');
+    if (!user.walletAddress) throw new PlanRefused('Your wallet is still being set up. Please try again in a moment.');
+    const balance = await this.chain.usdcBalance(user.walletAddress);
+    if (balance < BigInt(plan.totalUsdcMinor)) {
+      throw new PlanRefused(`You need ${formatUsdc(plan.totalUsdcMinor)} but your wallet has ${formatUsdc(Number(balance))}. Nothing was sent.`);
+    }
+    const collection = this.config.get('COLLECTION_ADDRESS', { infer: true })!;
+    const addresses = new Map<string, { address: string; refundable: boolean }>();
+    for (const item of plan.items) {
+      if (item.route === 'usdc') {
+        addresses.set(item.id, { address: (item.destination as { walletAddress: string }).walletAddress, refundable: false });
+        continue;
+      }
+      const request: PaymentRequest = { reference: item.id, route: item.route, destination: item.destination, amountKobo: item.amountKobo, usdcMinor: item.usdcMinor };
+      const refusal = await this.provider.refusal(request);
+      if (refusal) throw new PlanRefused(refusal);
+      const partner = await this.provider.fundingAddress(request);
+      addresses.set(item.id, partner ? { address: partner, refundable: false } : { address: collection, refundable: true });
+    }
+    return { addresses, block: await this.chain.latestBlock() };
   }
 
   private async refuseDecision(userId: string, planId: string): Promise<never> {

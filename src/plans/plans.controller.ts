@@ -1,9 +1,13 @@
-import { Controller, Get, HttpCode, Param, ParseUUIDPipe, Post, UnprocessableEntityException, UseGuards } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Get, HttpCode, Param, ParseUUIDPipe, Post, UnprocessableEntityException, UseGuards } from '@nestjs/common';
+import { z } from 'zod';
+import { FundingService } from '../payments/funding.service';
 import { AuthGuard } from '../auth/auth.guard';
 import { CurrentUser } from '../auth/current-user.decorator';
 import { User } from '../database/schema';
 import { formatNaira, formatUsdc } from '../money/money';
 import { PlanRefused, PlansService, PlanView } from './plans.service';
+
+const fundingBody = z.object({ tx_hash: z.string() });
 
 export const presentPlan = (plan: PlanView) => ({
   id: plan.id,
@@ -11,6 +15,7 @@ export const presentPlan = (plan: PlanView) => ({
   quote_expires_at: plan.quoteExpiresAt,
   total_naira: formatNaira(plan.totalKobo),
   total_usdc: formatUsdc(plan.totalUsdcMinor),
+  calls: plan.calls,
   items: plan.items.map((item) => ({
     id: item.id,
     route: item.route,
@@ -21,13 +26,19 @@ export const presentPlan = (plan: PlanView) => ({
     amount_usdc: formatUsdc(item.usdcMinor),
     payment_status: item.payment?.status ?? null,
     failure_reason: item.payment?.failureReason ?? null,
+    tx_hash: item.payment?.fundingTxHash ?? null,
+    refund_tx_hash: item.payment?.refundTxHash ?? null,
+    simulated: !item.payment || (item.payment.providerReference?.startsWith('simulated-') ?? false),
   })),
 });
 
 @Controller('v1/plans')
 @UseGuards(AuthGuard)
 export class PlansController {
-  constructor(private readonly plans: PlansService) {}
+  constructor(
+    private readonly plans: PlansService,
+    private readonly funding_: FundingService,
+  ) {}
 
   @Get(':id')
   async get(@CurrentUser() user: User, @Param('id', ParseUUIDPipe) id: string) {
@@ -38,11 +49,34 @@ export class PlansController {
   @HttpCode(200)
   async approve(@CurrentUser() user: User, @Param('id', ParseUUIDPipe) id: string) {
     try {
-      return presentPlan(await this.plans.approve(user.id, id));
+      return presentPlan(await this.plans.approve(user, id));
     } catch (error) {
       if (error instanceof PlanRefused) throw new UnprocessableEntityException(error.message);
       throw error;
     }
+  }
+
+  /** The wallet has sent the transaction. The chain is checked before anything is delivered. */
+  @Post(':id/funding')
+  @HttpCode(200)
+  async funding(@CurrentUser() user: User, @Param('id', ParseUUIDPipe) id: string, @Body() body: unknown) {
+    const parsed = fundingBody.safeParse(body);
+    if (!parsed.success) throw new BadRequestException('A transaction hash is required');
+    try {
+      await this.funding_.confirm(user.id, id, parsed.data.tx_hash);
+    } catch (error) {
+      if (error instanceof PlanRefused) throw new UnprocessableEntityException(error.message);
+      throw error;
+    }
+    return presentPlan(await this.plans.get(user.id, id));
+  }
+
+  /** The user closed the wallet prompt without signing. */
+  @Post(':id/abandon')
+  @HttpCode(200)
+  async abandon(@CurrentUser() user: User, @Param('id', ParseUUIDPipe) id: string) {
+    await this.funding_.abandon(user.id, id);
+    return presentPlan(await this.plans.get(user.id, id));
   }
 
   @Post(':id/reject')

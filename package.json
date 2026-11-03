@@ -12,6 +12,7 @@
     "typecheck": "tsc --noEmit",
     "test": "jest",
     "test:e2e": "jest --config test/jest-e2e.json --runInBand",
+    "test:chain": "jest --config test/jest-chain.json --runInBand",
     "db:up": "docker compose up -d --wait db",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "ts-node --transpile-only src/database/migrate-cli.ts",

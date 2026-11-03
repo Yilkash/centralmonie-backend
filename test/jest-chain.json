@@ -1,0 +1,10 @@
+{
+  "moduleFileExtensions": ["js", "json", "ts"],
+  "rootDir": ".",
+  "testRegex": "chain/.*\\.chain-spec\\.ts$",
+  "transform": { "^.+\\.ts$": ["ts-jest", { "diagnostics": false }] },
+  "transformIgnorePatterns": ["node_modules/(?!viem)"],
+  "testEnvironment": "node",
+  "setupFiles": ["<rootDir>/chain/setup.ts"],
+  "testTimeout": 180000
+}

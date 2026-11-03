@@ -6,6 +6,7 @@ import { User } from '../database/schema';
 import { formatNaira } from '../money/money';
 import { PlanRefused, PlansService } from '../plans/plans.service';
 import { DataPlans } from '../providers/providers';
+import { WalletService } from '../wallet/wallet.service';
 
 const nullable = (type: string) => ({ type: [type, 'null'] });
 
@@ -27,6 +28,19 @@ export const AGENT_TOOLS: Anthropic.Tool[] = [
       required: ['network'],
       additionalProperties: false,
     },
+  },
+  {
+    name: 'get_balance',
+    description:
+      "Reads the user's USDC balance with its naira value, how much of the daily payment limit is used and left, and the current naira per USDC rate. Moves no money.",
+    strict: true,
+    input_schema: { type: 'object', properties: {}, required: [], additionalProperties: false },
+  },
+  {
+    name: 'list_activity',
+    description: "Lists the user's recent payments and money received, newest first, with dates and status. Use it for questions about past payments, and for requests like 'the same as last time'.",
+    strict: true,
+    input_schema: { type: 'object', properties: {}, required: [], additionalProperties: false },
   },
   {
     name: 'propose_plan',
@@ -113,6 +127,7 @@ export class AgentToolbox {
     private readonly contacts: ContactsService,
     private readonly plans: PlansService,
     private readonly dataPlans: DataPlans,
+    private readonly wallet: WalletService,
   ) {}
 
   /** The user comes from the signed-in session, never from the model, so it cannot act for anyone else. */
@@ -123,6 +138,10 @@ export class AgentToolbox {
           return { result: JSON.stringify(await this.listContacts(user)) };
         case 'list_data_plans':
           return { result: await this.listDataPlans(input) };
+        case 'get_balance':
+          return { result: JSON.stringify(await this.wallet.summary(user)) };
+        case 'list_activity':
+          return { result: JSON.stringify(await this.wallet.activity(user.id)) };
         case 'propose_plan':
           return await this.proposePlan(user, input);
         case 'propose_contact':

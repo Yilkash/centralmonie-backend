@@ -8,6 +8,7 @@ import { applyMigrations } from '../src/database/migrate';
 import { IdentityProvider, InvalidIdentityError } from '../src/identity/identity-provider';
 import { ProposedItem } from '../src/plans/plan.types';
 import { PlanRefused, PlansService } from '../src/plans/plans.service';
+import { User } from '../src/database/schema';
 import { UsersRepository } from '../src/users/users.repository';
 
 const DATABASE_URL = process.env.DATABASE_URL!;
@@ -137,14 +138,14 @@ describe('plans and contacts', () => {
   describe('approving', () => {
     it('pays each item once and records the result', async () => {
       const plan = await plans.propose(alice, [bank(5000, (await mother()).id)]);
-      const approved = await plans.approve(alice, plan.id);
+      const approved = await plans.approve({ id: alice, walletAddress: null } as User, plan.id);
       expect(approved.status).toBe('approved');
       expect(approved.items[0]!.payment).toMatchObject({ status: 'completed', amountKobo: 500000 });
     });
 
     it('cannot pay twice, even when approved at the same moment', async () => {
       const plan = await plans.propose(alice, [bank(5000, (await mother()).id)]);
-      const results = await Promise.allSettled([plans.approve(alice, plan.id), plans.approve(alice, plan.id)]);
+      const results = await Promise.allSettled([plans.approve({ id: alice, walletAddress: null } as User, plan.id), plans.approve({ id: alice, walletAddress: null } as User, plan.id)]);
       expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
       expect((await pool.query('SELECT count(*) FROM payments')).rows[0].count).toBe('1');
     });
@@ -172,7 +173,7 @@ describe('plans and contacts', () => {
     it('records a failed payment without stopping the others', async () => {
       const bad = await saved(alice, 'Bad', { kind: 'bank', bankName: 'Access', accountNumber: '0123450000' });
       const plan = await plans.propose(alice, [bank(100, bad.id), bank(200, (await mother()).id)]);
-      const approved = await plans.approve(alice, plan.id);
+      const approved = await plans.approve({ id: alice, walletAddress: null } as User, plan.id);
       expect(approved.items.map((item) => item.payment?.status)).toEqual(['failed', 'completed']);
       expect(approved.items[0]!.payment?.failureReason).toContain('Simulated failure');
     });
@@ -181,7 +182,7 @@ describe('plans and contacts', () => {
   describe('the N500,000 daily limit', () => {
     it('allows exactly N500,000', async () => {
       const plan = await plans.propose(alice, [bank(500_000, (await mother()).id)]);
-      await expect(plans.approve(alice, plan.id)).resolves.toMatchObject({ status: 'approved' });
+      await expect(plans.approve({ id: alice, walletAddress: null } as User, plan.id)).resolves.toMatchObject({ status: 'approved' });
     });
 
     it('refuses N500,001 at proposal', async () => {
@@ -191,7 +192,7 @@ describe('plans and contacts', () => {
     it('adds up every route, counting USDC at its naira value', async () => {
       const account = await mother();
       const wallet = await saved(alice, 'Halima', { kind: 'wallet', walletAddress: '0x393eA6fbd50b821CdE7EdC1b936c567dbb15c26d' });
-      await plans.approve(alice, (await plans.propose(alice, [bank(400_000, account.id)])).id);
+      await plans.approve({ id: alice, walletAddress: null } as User, (await plans.propose(alice, [bank(400_000, account.id)])).id);
       const usdc = (amount: string): ProposedItem => ({ route: 'usdc', destinationId: wallet.id, amountNaira: null, amountUsdc: amount, dataPlanId: null });
       await expect(plans.propose(alice, [usdc('67')])).rejects.toThrow('daily limit');
       await expect(plans.propose(alice, [usdc('66')])).resolves.toBeDefined();
@@ -201,19 +202,19 @@ describe('plans and contacts', () => {
       const account = await mother();
       const first = await plans.propose(alice, [bank(300_000, account.id)]);
       const second = await plans.propose(alice, [bank(300_000, account.id)]);
-      const results = await Promise.allSettled([plans.approve(alice, first.id), plans.approve(alice, second.id)]);
+      const results = await Promise.allSettled([plans.approve({ id: alice, walletAddress: null } as User, first.id), plans.approve({ id: alice, walletAddress: null } as User, second.id)]);
       expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
       expect((await pool.query('SELECT sum(amount_kobo)::text AS total FROM payments')).rows[0].total).toBe('30000000');
     });
 
     it('does not count failed payments', async () => {
       const bad = await saved(alice, 'Bad', { kind: 'bank', bankName: 'Access', accountNumber: '0123450000' });
-      await plans.approve(alice, (await plans.propose(alice, [bank(400_000, bad.id)])).id);
+      await plans.approve({ id: alice, walletAddress: null } as User, (await plans.propose(alice, [bank(400_000, bad.id)])).id);
       await expect(plans.propose(alice, [bank(400_000, (await mother()).id)])).resolves.toBeDefined();
     });
 
     it('is separate for each user', async () => {
-      await plans.approve(alice, (await plans.propose(alice, [bank(500_000, (await mother()).id)])).id);
+      await plans.approve({ id: alice, walletAddress: null } as User, (await plans.propose(alice, [bank(500_000, (await mother()).id)])).id);
       await expect(plans.propose(bob, [bank(500_000, (await mother(bob)).id)])).resolves.toBeDefined();
     });
   });
