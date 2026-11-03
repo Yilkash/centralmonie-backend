@@ -35,6 +35,7 @@ const SWITCH = Symbol('switch');
               apiKey,
               baseUrl,
               refundAddress,
+              sandbox: config.get('SWITCH_SANDBOX', { infer: true }) === 'true',
               webhookSecret: config.get('SWITCH_WEBHOOK_SECRET', { infer: true }),
               callbackUrl: config.get('SWITCH_CALLBACK_URL', { infer: true }),
               onrampCallbackUrl: config.get('SWITCH_ONRAMP_CALLBACK_URL', { infer: true }),

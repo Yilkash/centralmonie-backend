@@ -38,6 +38,8 @@ const envSchema = z.object({
   SWITCH_CALLBACK_URL: z.string().url().optional(),
   SWITCH_ONRAMP_CALLBACK_URL: z.string().url().optional(),
   SWITCH_REFUND_ADDRESS: z.string().optional(),
+  // Sandbox and live share one address and differ only by key, so the operator must say which key this is.
+  SWITCH_SANDBOX: z.enum(['true', 'false']).optional(),
   // Asks for the user's PIN on every approval and new recipient. Turn on before real money.
   REQUIRE_PIN: z.enum(['true', 'false']).default('false').transform((value) => value === 'true'),
   // All users together, per day. A bug or an attack cannot move more than this.
@@ -65,6 +67,15 @@ export function validateEnv(raw: Record<string, unknown>): Env {
   }
   if (result.data.CHAIN_ID !== 84532 && result.data.CHAIN_ID !== 31337 && result.data.ALLOW_REAL_MONEY !== 'I understand this moves real money') {
     throw new Error('CHAIN_ID is not a test network. Real money needs ALLOW_REAL_MONEY set');
+  }
+  const onTestNetwork = result.data.CHAIN_ID !== 8453;
+  if (result.data.SWITCH_API_KEY) {
+    // A live partner paying out against test USDC loses real naira. A sandbox partner on mainnet takes real USDC and pays nothing.
+    if (onTestNetwork && result.data.SWITCH_SANDBOX !== 'true') throw new Error('SWITCH_SANDBOX must be true on a test network, with a sandbox key');
+    if (!onTestNetwork && result.data.SWITCH_SANDBOX !== 'false') throw new Error('SWITCH_SANDBOX must be false on mainnet');
+  }
+  if (result.data.PAYSCRIBE_SECRET_KEY && onTestNetwork && !result.data.PAYSCRIBE_BASE_URL?.includes('sandbox')) {
+    throw new Error('PAYSCRIBE_BASE_URL must be the sandbox on a test network');
   }
   // In simulated mode no USDC is collected, so a real partner would be paying out for free.
   if (result.data.PAYMENTS_MODE === 'simulated' && (result.data.PAYSCRIBE_SECRET_KEY || result.data.SWITCH_API_KEY)) {

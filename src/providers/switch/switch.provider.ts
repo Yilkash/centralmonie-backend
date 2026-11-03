@@ -13,6 +13,11 @@ import { echoesAmount, fromSwitchNumber, KOBO_DECIMALS, switchNumberToMinor, toS
 // payment or pay twice, because nothing here is an instruction to pay.
 
 export interface SwitchConfig {
+  /**
+   * The sandbox answers with a placeholder deposit address that nothing can be sent to. With this on,
+   * that answer is accepted and the test USDC goes to the platform's collection address instead.
+   */
+  sandbox?: boolean;
   /** Tokkenly uses https://api.onswitch.xyz. Sandbox and live share it and differ only by key. */
   baseUrl: string;
   apiKey: string;
@@ -129,7 +134,8 @@ const CURRENCY = 'NGN';
 const CHANNEL = 'BANK';
 const HOLDER_TYPE = 'INDIVIDUAL';
 
-const TIMEOUT_MS = 10_000;
+// The bank name lookup was seen taking 14 seconds in the sandbox.
+const TIMEOUT_MS = 30_000;
 const RATE_TTL_MS = 30_000;
 const BANKS_TTL_MS = 60 * 60_000;
 const MAX_REFERENCE_BYTES = 64;
@@ -164,12 +170,14 @@ export class SwitchProvider implements PaymentProvider, ExchangeRates, BankLooku
   private readonly now: () => number;
   private rateCache: { until: number; rate: number } | null = null;
   private banksCache: { until: number; banks: SwitchBank[] } | null = null;
+  private readonly sandbox: boolean;
   private readonly deposits = new Map<string, Promise<SwitchDeposit>>();
 
   constructor(config: SwitchConfig) {
     if (!config.baseUrl || !config.apiKey) throw new Error('SwitchProvider needs a baseUrl and an apiKey');
     if (!isAddress(config.refundAddress)) throw new Error('SwitchProvider needs a valid refundAddress');
     this.baseUrl = config.baseUrl.replace(/\/+$/, '');
+    this.sandbox = config.sandbox ?? false;
     this.apiKey = config.apiKey;
     this.refundAddress = config.refundAddress;
     this.callbackUrl = config.callbackUrl;
@@ -201,8 +209,9 @@ export class SwitchProvider implements PaymentProvider, ExchangeRates, BankLooku
   }
 
   /** Never null for a bank payment, because the platform's collection address would not pay the bank. */
-  async fundingAddress(request: PaymentRequest): Promise<string> {
-    return (await this.deposit(request)).address;
+  async fundingAddress(request: PaymentRequest): Promise<string | null> {
+    const { address } = await this.deposit(request);
+    return this.sandbox && isSandboxPlaceholder(address) ? null : address;
   }
 
   /**
@@ -385,13 +394,14 @@ export class SwitchProvider implements PaymentProvider, ExchangeRates, BankLooku
     const amountsAgree =
       echoesAmount(payment.source?.amount, request.usdcMinor, USDC_DECIMALS) &&
       (depositAmount === undefined || echoesAmount(depositAmount, request.usdcMinor, USDC_DECIMALS));
-    if (typeof address !== 'string' || !isAddress(address, { strict: false }) || !amountsAgree) {
+    const usable = typeof address === 'string' && (isAddress(address, { strict: false }) || (this.sandbox && isSandboxPlaceholder(address)));
+    if (!usable || !amountsAgree) {
       this.logger.error(`offramp ${request.reference}: the answer named no usable deposit address or a different amount`);
       throw new Error(BANK_UNAVAILABLE);
     }
     try {
       return {
-        address,
+        address: address as string,
         expiresAt: payment.deposit?.expires_at ?? null,
         usdcMinor: request.usdcMinor,
         destinationKobo: switchNumberToMinor(payment.destination?.amount, KOBO_DECIMALS),
@@ -405,11 +415,12 @@ export class SwitchProvider implements PaymentProvider, ExchangeRates, BankLooku
   }
 
   /**
-   * Exact names only, ignoring case and punctuation. A loose match could pay the wrong bank, so
-   * "GTBank" does not find "Guaranty Trust Bank", and two banks with one name find neither.
+   * Exact names only, ignoring case and punctuation, plus the short names people really use. A loose
+   * match could pay the wrong bank, and the account name check still has to pass afterwards.
    */
   private async bankCode(bankName: string): Promise<string | null> {
-    const wanted = comparableName(bankName);
+    const typed = comparableName(bankName);
+    const wanted = BANK_ALIASES[typed] ?? typed;
     if (wanted === '') return null;
     const matches = (await this.banks()).filter((bank) => comparableName(bank.name) === wanted);
     return matches.length === 1 ? matches[0]!.code : null;
@@ -518,10 +529,44 @@ function validMinor(value: number): boolean {
 /** Tokkenly's switchRefusal: a fault is ours or theirs, and any other 4xx is about the amount. */
 function refusedSentence(err: SwitchError, unavailable: string, action: string): string {
   if (err.retryable || err.authFault) return unavailable;
+  // Switch's sentence about names also says "at least one letter", so this is checked first.
+  if (/^name /i.test(err.message)) return 'The bank details for this person need to be saved again. Nothing was sent.';
   return /minimum|at least|below|too small|less than/i.test(err.message)
     ? `That is below the smallest amount you can ${action}. Try a larger amount.`
     : 'We could not price that amount. Try a different amount.';
 }
+
+const isSandboxPlaceholder = (address: unknown): boolean => typeof address === 'string' && /sandbox/i.test(address);
+
+/** Everyday names for banks, each checked against the list Switch returned on 3 November 2026. */
+const BANK_ALIASES: Record<string, string> = {
+  gtbank: 'guaranty trust bank',
+  gtb: 'guaranty trust bank',
+  gt: 'guaranty trust bank',
+  'gt bank': 'guaranty trust bank',
+  guaranty: 'guaranty trust bank',
+  firstbank: 'first bank',
+  fbn: 'first bank',
+  uba: 'united bank for africa plc',
+  access: 'access bank',
+  zenith: 'zenith bank',
+  fcmb: 'first city monument bank plc',
+  stanbic: 'stanbic ibtc bank ltd',
+  'stanbic ibtc': 'stanbic ibtc bank ltd',
+  ecobank: 'ecobank nigeria plc',
+  kuda: 'kuda microfinance bank',
+  'kuda bank': 'kuda microfinance bank',
+  moniepoint: 'moniepoint microfinance bank',
+  wema: 'wema bank',
+  fidelity: 'fidelity bank',
+  sterling: 'sterling bank',
+  union: 'union bank',
+  polaris: 'polaris bank',
+  keystone: 'keystone bank',
+  providus: 'providus bank',
+  unity: 'unity bank plc',
+  'unity bank': 'unity bank plc',
+};
 
 function comparableName(name: string): string {
   return name.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();

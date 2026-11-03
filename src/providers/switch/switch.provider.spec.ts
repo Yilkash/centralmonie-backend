@@ -166,7 +166,7 @@ describe('accountName', () => {
 
   it('will not guess a bank from a near match', async () => {
     const fake = partner({ 'GET /institution': banksRoute });
-    await expect(provider(fake.fetch).accountName('GTBank', ACCOUNT)).resolves.toBeNull();
+    await expect(provider(fake.fetch).accountName('No Such Bank', ACCOUNT)).resolves.toBeNull();
     await expect(provider(fake.fetch).accountName('Guaranty', ACCOUNT)).resolves.toBeNull();
     expect(fake.count('POST /institution/lookup')).toBe(0);
   });
@@ -338,7 +338,7 @@ describe('fundingAddress and deposit', () => {
 
   it('refuses an unknown bank before creating anything', async () => {
     const fake = partner({ 'GET /institution': banksRoute });
-    await expect(provider(fake.fetch).fundingAddress(bank({ destination: { bankName: 'GTBank', accountNumber: ACCOUNT, accountName: 'A' } }))).rejects.toThrow('find that bank');
+    await expect(provider(fake.fetch).fundingAddress(bank({ destination: { bankName: 'No Such Bank', accountNumber: ACCOUNT, accountName: 'A' } }))).rejects.toThrow('find that bank');
     expect(fake.count('POST /offramp/initiate')).toBe(0);
   });
 
@@ -351,6 +351,38 @@ describe('fundingAddress and deposit', () => {
     expect(logged).toContain('[number]');
     expect(logged).not.toContain(ACCOUNT);
     expect(logged).not.toContain(KEY);
+  });
+});
+
+describe('what the real sandbox answered on 3 November 2026', () => {
+  const PLACEHOLDER = '0x000000000000000000000000000000000sandbox';
+  const answer = () => ok(offramp({ deposit: { amount: 20, address: PLACEHOLDER } }));
+
+  it('in the sandbox, takes the placeholder as no address, so USDC goes to the collection address', async () => {
+    const fake = partner({ 'GET /institution': banksRoute, 'POST /offramp/initiate': answer });
+    await expect(provider(fake.fetch, { sandbox: true }).fundingAddress(bank())).resolves.toBeNull();
+  });
+
+  it('with a live key, refuses the placeholder, so nothing is ever sent to it', async () => {
+    const fake = partner({ 'GET /institution': banksRoute, 'POST /offramp/initiate': answer });
+    await expect(provider(fake.fetch).fundingAddress(bank())).rejects.toThrow(/unavailable/);
+  });
+
+  it('in the sandbox, still uses a real address if one comes back', async () => {
+    const fake = partner({ 'GET /institution': banksRoute, 'POST /offramp/initiate': () => ok(offramp()) });
+    await expect(provider(fake.fetch, { sandbox: true }).fundingAddress(bank())).resolves.toBe(DEPOSIT);
+  });
+
+  it('says a refused name needs saving again, not that the amount is too small', async () => {
+    const message = 'Name can only contain alphanumeric characters, must contain at least one letter, should not contain crypto related terms.';
+    const fake = partner({ 'GET /institution': banksRoute, 'POST /offramp/initiate': () => refused(400, message) });
+    await expect(provider(fake.fetch).fundingAddress(bank())).rejects.toThrow(/saved again/);
+  });
+
+  it('understands the bank names people use', async () => {
+    const fake = partner({ 'GET /institution': banksRoute, 'POST /institution/lookup': () => ok({ account_name: 'ADA BELLO' }) });
+    await expect(provider(fake.fetch).accountName('GTBank', ACCOUNT)).resolves.toBe('ADA BELLO');
+    expect(fake.last('POST /institution/lookup').body).toMatchObject({ beneficiary: { bank_code: '058' } });
   });
 });
 

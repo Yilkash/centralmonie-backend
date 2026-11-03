@@ -50,7 +50,9 @@ export class ContactsService {
       }
       case 'bank': {
         if (!/^\d{10}$/.test(destination.accountNumber)) throw new ContactRefused('A bank account number has 10 digits.');
-        const accountName = await this.banks.accountName(destination.bankName, destination.accountNumber);
+        const accountName = await this.banks.accountName(destination.bankName, destination.accountNumber).catch(() => {
+          throw new ContactRefused('I could not check that account with the bank just now. Please try again in a moment.');
+        });
         if (!accountName) throw new ContactRefused('I could not find that account. Please check the number and bank.');
         return { kind: 'bank' as const, bankName: destination.bankName, accountNumber: destination.accountNumber, accountName };
       }
