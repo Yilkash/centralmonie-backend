@@ -1,14 +1,16 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { desc, eq } from 'drizzle-orm';
+import { and, desc, eq, gte, inArray, isNotNull, or } from 'drizzle-orm';
 import { Chain } from '../chain/chain.service';
 import { DATABASE, Database } from '../database/database.module';
-import { deposits, payments, User } from '../database/schema';
+import { deposits, nairaDeposits, payments, User } from '../database/schema';
 import { DAILY_LIMIT_KOBO, formatNaira, formatUsdc, usdcMinorToKobo } from '../money/money';
 import { LimitsService } from '../payments/limits.service';
 import { ExchangeRates } from '../providers/providers';
 
 export interface WalletSummary {
   address: string | null;
+  /** A naira deposit that is on its way, such as ₦2,000, or null. */
+  deposit_on_the_way: string | null;
   /** Null when the chain could not be read, which is different from a balance of zero. */
   balance_usdc: string | null;
   balance_naira: string | null;
@@ -50,7 +52,25 @@ export class WalletService {
       limit_used: formatNaira(used),
       limit_left: formatNaira(Math.max(DAILY_LIMIT_KOBO - used, 0)),
       naira_per_usdc: rate,
+      deposit_on_the_way: await this.depositOnTheWay(user.id),
     };
+  }
+
+  /** Naira the partner has, or that the user says they have sent. Reads our own records, so it is never a balance. */
+  private async depositOnTheWay(userId: string): Promise<string | null> {
+    const [row] = await this.db
+      .select({ amountKobo: nairaDeposits.amountKobo })
+      .from(nairaDeposits)
+      .where(
+        and(
+          eq(nairaDeposits.userId, userId),
+          gte(nairaDeposits.createdAt, new Date(Date.now() - 24 * 60 * 60 * 1000)),
+          or(eq(nairaDeposits.status, 'processing'), and(inArray(nairaDeposits.status, ['waiting', 'expired']), isNotNull(nairaDeposits.userSentAt))),
+        ),
+      )
+      .orderBy(desc(nairaDeposits.createdAt))
+      .limit(1);
+    return row ? formatNaira(row.amountKobo) : null;
   }
 
   async activity(userId: string, limit = 30): Promise<ActivityEntry[]> {

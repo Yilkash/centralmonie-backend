@@ -20,6 +20,7 @@ export const presentDeposit = (deposit: NairaDeposit | null) =>
     account_number: deposit.accountNumber,
     account_name: deposit.accountName,
     expires_at: deposit.expiresAt,
+    user_sent: deposit.userSentAt !== null,
   };
 
 @Controller('v1/deposits')
@@ -49,6 +50,13 @@ export class NairaDepositsController {
     const parsed = startBody.safeParse(body);
     if (!parsed.success) throw new BadRequestException('Enter a whole naira amount.');
     return { deposit: presentDeposit(await this.deposits.start(user, parsed.data.amount_naira)) };
+  }
+
+  @Post(':id/sent')
+  @HttpCode(200)
+  async sent(@CurrentUser() user: User, @Param('id', ParseUUIDPipe) id: string) {
+    await this.deposits.markSent(user.id, id);
+    return { ok: true };
   }
 
   @Post(':id/close')

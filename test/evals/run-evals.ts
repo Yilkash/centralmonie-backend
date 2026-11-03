@@ -57,7 +57,7 @@ const arg = (name: string) => {
 };
 
 function sameItem(actual: PlanView['items'][number], want: ExpectedItem): boolean {
-  if (actual.route !== want.route || actual.recipientName !== want.to) return false;
+  if (actual.route !== want.route || actual.recipientName.toLowerCase() !== want.to.toLowerCase()) return false;
   if (want.usdc !== undefined) return actual.usdcMinor === Math.round(want.usdc * 1_000_000);
   return actual.amountKobo === want.naira! * 100;
 }
@@ -87,7 +87,7 @@ function gradeSchedule(items: Schedule[] | null, want: ScheduledItem[], text: st
     const index = left.findIndex(
       (item) =>
         item.route === expected.route &&
-        item.recipientName === expected.to &&
+        item.recipientName.toLowerCase() === expected.to.toLowerCase() &&
         (expected.usdc !== undefined ? item.fixedUsdcMinor === Math.round(expected.usdc * 1_000_000) : item.amountKobo === expected.naira! * 100),
     );
     if (index === -1) return `missing ${expected.route} to ${expected.to}: got ${items.map((i) => `${i.route}/${i.recipientName}/${i.amountKobo / 100}`).join(', ')}`;

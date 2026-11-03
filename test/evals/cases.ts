@@ -187,7 +187,13 @@ export const CASES: EvalCase[] = [
   c('unavailable', 'buy me bitcoin', none),
 
   // New recipients: 5
-  c('new_contact', 'send 5000 to my sister Grace, GTBank 0123456789', contact),
+  c('new_bank', 'send 5000 to my sister Grace, GTBank 0123456789', plan(bank('Grace', 5000))),
+  c('new_bank', 'send 2000 to chidi 8031234570 opay', plan(bank('chidi', 2000))),
+  c('new_bank', '8031234570 opay chidi', plan(bank('chidi', 2000)), [
+    { role: 'user', content: 'send 2000 to chidi' },
+    { role: 'assistant', content: 'I do not have chidi saved. What is their bank and account number?' },
+  ]),
+  c('new_bank', 'send 1.5 usdc to Bola, Kuda 0123456789', plan(usdcToBank('Bola', 1.5))),
   c('new_contact', 'save Musa as 08031234567', contact),
   c('new_contact', 'add my landlord Obi, Access bank, 0987654321', contact),
   c('new_contact', 'save this wallet for Sade 0x71C7656EC7ab88b098defB751B7401B5f6d8976F', contact),

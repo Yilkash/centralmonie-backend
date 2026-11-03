@@ -79,8 +79,8 @@ export class PlansService {
 
   async priced(userId: string, item: ProposedItem, nairaPerUsdc: number) {
     const usable =
-      item.newRecipient && (item.route === 'airtime' || item.route === 'usdc')
-        ? await this.contacts.newDestination(userId, item.destinationId, item.route === 'airtime' ? 'phone' : 'wallet')
+      item.newRecipient && item.route !== 'data'
+        ? await this.contacts.newDestination(userId, item.destinationId, ({ airtime: 'phone', usdc: 'wallet', bank: 'bank' } as const)[item.route])
         : await this.contacts.usableDestination(userId, item.destinationId);
     if (!usable) throw new PlanRefused('That recipient is not one of the saved contacts.');
     const { contact, destination } = usable;

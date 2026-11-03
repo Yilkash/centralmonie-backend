@@ -62,15 +62,17 @@ export const AGENT_TOOLS: Anthropic.Tool[] = [
             type: 'object',
             properties: {
               route: { type: 'string', enum: ['airtime', 'data', 'bank', 'usdc'] },
-              destination_id: { type: ['string', 'null'], description: 'A destination ID from list_contacts, or null for airtime to a new phone number or USDC to a new wallet' },
+              destination_id: { type: ['string', 'null'], description: 'A destination ID from list_contacts, or null for airtime, USDC or a bank transfer to someone new' },
               amount_naira: nullable('integer'),
               amount_usdc: nullable('string'),
               data_plan_id: nullable('string'),
               new_phone_number: { type: ['string', 'null'], description: 'Only for airtime to a phone not in list_contacts. Otherwise null.' },
               new_wallet_address: { type: ['string', 'null'], description: 'Only for USDC to a wallet address not in list_contacts. Otherwise null.' },
-              new_contact_name: { type: ['string', 'null'], description: 'The name given for that new phone number or wallet, or null if none was given.' },
+              new_bank_name: { type: ['string', 'null'], description: 'Only for a bank transfer to an account not in list_contacts. Otherwise null.' },
+              new_account_number: { type: ['string', 'null'], description: 'The 10-digit account number for that new bank account. Otherwise null.' },
+              new_contact_name: { type: ['string', 'null'], description: 'The name given for that new recipient, or null if none was given.' },
             },
-            required: ['route', 'destination_id', 'amount_naira', 'amount_usdc', 'data_plan_id', 'new_phone_number', 'new_wallet_address', 'new_contact_name'],
+            required: ['route', 'destination_id', 'amount_naira', 'amount_usdc', 'data_plan_id', 'new_phone_number', 'new_wallet_address', 'new_bank_name', 'new_account_number', 'new_contact_name'],
             additionalProperties: false,
           },
         },
@@ -186,6 +188,8 @@ const planInput = z.object({
       data_plan_id: z.string().nullable(),
       new_phone_number: z.string().nullish(),
       new_wallet_address: z.string().nullish(),
+      new_bank_name: z.string().nullish(),
+      new_account_number: z.string().nullish(),
       new_contact_name: z.string().nullish(),
     }),
   ),
@@ -337,13 +341,15 @@ export class AgentToolbox {
         if (isNew) {
           const phone = item.route === 'airtime' ? item.new_phone_number : null;
           const walletAddress = item.route === 'usdc' ? item.new_wallet_address : null;
-          if (!phone && !walletAddress) return { result: 'That payment needs a saved recipient first.', isError: true };
-          // Stored unconfirmed. Approving this plan is what saves it, and the card shows the details in full.
+          const bank = item.route === 'bank' && item.new_bank_name && item.new_account_number ? { bankName: item.new_bank_name, accountNumber: item.new_account_number } : null;
+          if (!phone && !walletAddress && !bank) return { result: 'That payment needs a saved recipient first.', isError: true };
+          // Stored unconfirmed. Approving this plan is what saves it, and the card shows the details,
+          // including the name the bank gives, so that one card is the user's check.
           const contact = await this.contacts.propose(
             user.id,
-            item.new_contact_name?.trim() || phone || walletAddress!,
+            item.new_contact_name?.trim() || phone || walletAddress || '',
             [],
-            phone ? { kind: 'phone', phone } : { kind: 'wallet', walletAddress: walletAddress! },
+            phone ? { kind: 'phone', phone } : walletAddress ? { kind: 'wallet', walletAddress } : { kind: 'bank', ...bank! },
           );
           created.push(contact.id);
           destinationId = contact.destinations[0]!.id;

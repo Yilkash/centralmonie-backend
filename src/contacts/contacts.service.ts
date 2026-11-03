@@ -33,7 +33,8 @@ export class ContactsService {
   async propose(userId: string, name: string, aliases: string[], destination: NewDestination): Promise<ContactWithDestinations> {
     const details = await this.checked(destination);
     return this.db.transaction(async (tx) => {
-      const [contact] = await tx.insert(contacts).values({ userId, name: name.trim(), aliases }).returning();
+      // With no name given, a bank account goes by the name the bank holds for it.
+      const [contact] = await tx.insert(contacts).values({ userId, name: name.trim() || details.accountName || '', aliases }).returning();
       const [saved] = await tx.insert(contactDestinations).values({ contactId: contact!.id, ...details }).returning();
       return { ...contact!, destinations: [saved!] };
     });
@@ -103,8 +104,8 @@ export class ContactsService {
     return row ?? null;
   }
 
-  /** A phone or wallet the user gave just now for a plan, which approving that plan will save. */
-  async newDestination(userId: string, destinationId: string, kind: 'phone' | 'wallet'): Promise<{ contact: Contact; destination: ContactDestination } | null> {
+  /** A phone, wallet or bank account the user gave just now for a plan, which approving that plan will save. */
+  async newDestination(userId: string, destinationId: string, kind: 'phone' | 'wallet' | 'bank'): Promise<{ contact: Contact; destination: ContactDestination } | null> {
     const [row] = await this.db
       .select({ contact: contacts, destination: contactDestinations })
       .from(contactDestinations)

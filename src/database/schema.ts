@@ -246,6 +246,8 @@ export const nairaDeposits = pgTable(
     status: nairaDepositStatus('status').notNull().default('waiting'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     completedAt: timestamp('completed_at', { withTimezone: true }),
+    /** The user says they have made the transfer. Only for showing progress: the partner decides what arrived. */
+    userSentAt: timestamp('user_sent_at', { withTimezone: true }),
   },
   (table) => [
     index('naira_deposits_user_idx').on(table.userId, table.createdAt),

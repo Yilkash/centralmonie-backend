@@ -1,0 +1,1 @@
+ALTER TABLE "naira_deposits" ADD COLUMN "user_sent_at" timestamp with time zone;

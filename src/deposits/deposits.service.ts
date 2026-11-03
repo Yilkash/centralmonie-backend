@@ -116,6 +116,15 @@ export class NairaDepositsService {
     return row ?? null;
   }
 
+  async markSent(userId: string, id: string): Promise<void> {
+    const updated = await this.db
+      .update(nairaDeposits)
+      .set({ userSentAt: new Date() })
+      .where(and(eq(nairaDeposits.id, id), eq(nairaDeposits.userId, userId), inArray(nairaDeposits.status, ['waiting', 'expired'])))
+      .returning({ id: nairaDeposits.id });
+    if (updated.length === 0) throw new NotFoundException('That deposit is not waiting for a transfer.');
+  }
+
   /** Puts it aside so another can start. We keep watching it, because a transfer may already be on its way. */
   async cancel(userId: string, id: string): Promise<void> {
     const updated = await this.db

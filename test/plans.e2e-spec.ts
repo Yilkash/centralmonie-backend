@@ -137,6 +137,15 @@ describe('plans and contacts', () => {
       expect((await contacts.listConfirmed(alice)).some((c) => c.id === contact.id)).toBe(true);
     });
 
+    it('pays and saves a new bank account with one approval, showing the name the bank gives', async () => {
+      const contact = await contacts.propose(alice, '', [], { kind: 'bank', bankName: 'OPay', accountNumber: '8031234570' });
+      expect(contact.name).toBe(contact.destinations[0]!.accountName);
+      const plan = await plans.propose(alice, [{ route: 'bank', destinationId: contact.destinations[0]!.id, amountNaira: 2000, amountUsdc: null, dataPlanId: null, newRecipient: true }]);
+      expect(plan.items[0]!.recipientDetail).toContain(contact.destinations[0]!.accountName!);
+      expect((await post(`/v1/plans/${plan.id}/approve`, 'alice')).statusCode).toBeLessThan(300);
+      expect((await contacts.listConfirmed(alice)).some((c) => c.id === contact.id)).toBe(true);
+    });
+
     it('does not save a new phone when the plan is rejected', async () => {
       const contact = await contacts.propose(alice, 'Tayo', [], { kind: 'phone', phone: '08031234567' });
       const plan = await plans.propose(alice, [{ route: 'airtime', destinationId: contact.destinations[0]!.id, amountNaira: 100, amountUsdc: null, dataPlanId: null, newRecipient: true }]);
@@ -147,7 +156,6 @@ describe('plans and contacts', () => {
     it('allows the new-phone shortcut only for airtime to a phone of your own', async () => {
       const account = await contacts.propose(alice, 'New', [], { kind: 'bank', bankName: 'Access', accountNumber: '0123454821' });
       const phone = await contacts.propose(bob, 'Theirs', [], { kind: 'phone', phone: '08031234567' });
-      await expect(plans.propose(alice, [{ route: 'bank', destinationId: account.destinations[0]!.id, amountNaira: 100, amountUsdc: null, dataPlanId: null, newRecipient: true }])).rejects.toBeInstanceOf(PlanRefused);
       await expect(plans.propose(alice, [{ route: 'airtime', destinationId: account.destinations[0]!.id, amountNaira: 100, amountUsdc: null, dataPlanId: null, newRecipient: true }])).rejects.toBeInstanceOf(PlanRefused);
       await expect(plans.propose(alice, [{ route: 'airtime', destinationId: phone.destinations[0]!.id, amountNaira: 100, amountUsdc: null, dataPlanId: null, newRecipient: true }])).rejects.toBeInstanceOf(PlanRefused);
       await expect(plans.propose(alice, [{ route: 'airtime', destinationId: phone.destinations[0]!.id, amountNaira: 100, amountUsdc: null, dataPlanId: null }])).rejects.toBeInstanceOf(PlanRefused);

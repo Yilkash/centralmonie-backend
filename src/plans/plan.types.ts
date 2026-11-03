@@ -7,6 +7,6 @@ export interface ProposedItem {
   amountNaira: number | null;
   amountUsdc: string | null;
   dataPlanId: string | null;
-  /** Set by our own code, never by the agent: a phone or wallet first saved when this plan is approved. */
+  /** Set by our own code, never by the agent: a phone, wallet or bank account first saved when this plan is approved. */
   newRecipient?: boolean;
 }

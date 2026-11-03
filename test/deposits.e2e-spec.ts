@@ -129,6 +129,19 @@ describe('naira deposits', () => {
     expect((await call('GET', `/v1/deposits/${id}`, 'bob')).json().deposit).toBeNull();
   });
 
+  it('remembers that the user has sent the money, and shows it as on its way', async () => {
+    const { id } = (await call('POST', '/v1/deposits', 'alice', { amount_naira: 2000 })).json().deposit;
+    expect((await call('GET', '/v1/deposits/current', 'alice')).json().deposit.user_sent).toBe(false);
+    expect((await call('GET', '/v1/wallet', 'alice')).json().deposit_on_the_way).toBeNull();
+    expect((await call('POST', `/v1/deposits/${id}/sent`, 'bob')).statusCode).toBe(404);
+    expect((await call('POST', `/v1/deposits/${id}/sent`, 'alice')).statusCode).toBe(200);
+    expect((await call('GET', '/v1/deposits/current', 'alice')).json().deposit.user_sent).toBe(true);
+    expect((await call('GET', '/v1/wallet', 'alice')).json().deposit_on_the_way).toBe('₦2,000');
+    partner.state = 'completed';
+    await service.reconcile();
+    expect((await call('GET', '/v1/wallet', 'alice')).json().deposit_on_the_way).toBeNull();
+  });
+
   it('needs a wallet, and stops when paused', async () => {
     await call('GET', '/v1/me', 'bob');
     expect((await call('POST', '/v1/deposits', 'bob', { amount_naira: 2000 })).statusCode).toBe(422);
