@@ -58,7 +58,12 @@ export class ContactsService {
         return { kind: 'bank' as const, bankName: destination.bankName, accountNumber: destination.accountNumber, accountName };
       }
       case 'wallet': {
-        if (!isAddress(destination.walletAddress)) throw new ContactRefused('That is not a valid wallet address.');
+        if (isAddress(destination.walletAddress, { strict: false }) && !isAddress(destination.walletAddress)) {
+          throw new ContactRefused('That address has a mistake in it: its capital letters do not match its checksum. Please copy it again.');
+        }
+        if (!isAddress(destination.walletAddress)) {
+          throw new ContactRefused('That is not a valid Base wallet address. It should start with 0x and have 42 characters. Addresses from networks such as Solana or Tron cannot be used.');
+        }
         return { kind: 'wallet' as const, walletAddress: getAddress(destination.walletAddress) };
       }
     }

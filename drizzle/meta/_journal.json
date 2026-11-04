@@ -92,6 +92,13 @@
       "when": 1793748488291,
       "tag": "0012_thin_steel_serpent",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1793787100003,
+      "tag": "0013_huge_nomad",
+      "breakpoints": true
     }
   ]
 }

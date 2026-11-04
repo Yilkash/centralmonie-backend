@@ -3,10 +3,12 @@ import { Test } from '@nestjs/testing';
 import { Pool } from 'pg';
 import { configureApp, createAdapter } from '../src/app';
 import { AppModule } from '../src/app.module';
+import { Chain } from '../src/chain/chain.service';
 import { ContactRefused, ContactsService } from '../src/contacts/contacts.service';
 import { applyMigrations } from '../src/database/migrate';
 import { IdentityProvider, InvalidIdentityError } from '../src/identity/identity-provider';
 import { ProposedItem } from '../src/plans/plan.types';
+import { presentPlan } from '../src/plans/plans.controller';
 import { PlanRefused, PlansService } from '../src/plans/plans.service';
 import { PaymentProvider } from '../src/providers/providers';
 import { User } from '../src/database/schema';
@@ -195,6 +197,34 @@ describe('plans and contacts', () => {
   });
 
   describe('proposing', () => {
+    it('names the network on a USDC payment, and shows the whole address', async () => {
+      const address = '0xe1a9cDb2907134c35E8d055DD72605331f4E642d';
+      const wallet = await saved(alice, 'Ada', { kind: 'wallet', walletAddress: address });
+      const plan = await plans.propose(alice, [{ route: 'usdc', destinationId: wallet.id, amountNaira: null, amountUsdc: '1', dataPlanId: null }]);
+      const shown = presentPlan(plan).items[0]!;
+      expect(shown.recipient_detail).toBe(address);
+      expect(shown.network).toMatch(/^Base/);
+    });
+
+    it('refuses USDC to the token contract and to the sender, whose addresses are never right', async () => {
+      const token = await saved(alice, 'Token', { kind: 'wallet', walletAddress: app.get(Chain, { strict: false }).usdcAddress() });
+      await expect(
+        plans.propose(alice, [{ route: 'usdc', destinationId: token.id, amountNaira: null, amountUsdc: '1', dataPlanId: null }]),
+      ).rejects.toThrow('USDC token contract');
+      const own = '0x393eA6fbd50b821CdE7EdC1b936c567dbb15c26d';
+      const sender = (await app.get(UsersRepository, { strict: false }).upsert({ subject: 'did:privy:own-wallet', email: null, walletAddress: own })).id;
+      const self = await saved(sender, 'Me', { kind: 'wallet', walletAddress: own });
+      await expect(
+        plans.propose(sender, [{ route: 'usdc', destinationId: self.id, amountNaira: null, amountUsdc: '1', dataPlanId: null }]),
+      ).rejects.toThrow('your own wallet');
+    });
+
+    it('says what is wrong with a mistyped wallet address', async () => {
+      const mistyped = '0xe1a9cdb2907134c35E8d055DD72605331f4E642d';
+      await expect(contacts.propose(alice, 'Typo', [], { kind: 'wallet', walletAddress: mistyped })).rejects.toThrow('mistake');
+      await expect(contacts.propose(alice, 'Solana', [], { kind: 'wallet', walletAddress: 'So11111111111111111111111111111111111111112' })).rejects.toThrow('Base wallet address');
+    });
+
     it('prices a mixed plan, taking the data price from the catalogue', async () => {
       const account = await mother();
       const phone = await saved(alice, 'Kc', { kind: 'phone', phone: '08031234567' });

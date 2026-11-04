@@ -18,6 +18,7 @@ export const presentSchedule = (schedule: Schedule) => ({
   route: schedule.route,
   recipient_name: schedule.recipientName,
   recipient_detail: schedule.recipientDetail,
+  address_check: schedule.addressCheck,
   data_plan: schedule.dataPlan,
   amount: schedule.fixedUsdcMinor !== null ? formatUsdc(schedule.fixedUsdcMinor) : formatNaira(schedule.amountKobo),
   when: whenOf(schedule),
@@ -30,6 +31,7 @@ export const presentSchedule = (schedule: Schedule) => ({
 export const presentGroup = (group: ScheduleGroupView) => ({
   group_id: group.groupId,
   status: group.status,
+  network: group.network,
   items: group.items.map(presentSchedule),
   calls: group.calls,
 });

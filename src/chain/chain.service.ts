@@ -18,6 +18,8 @@ import { blockRanges, erc20Abi, managerAbi, smartWalletAbi, SpendPermission, SPE
 /** The contract refused the spend in a dry run, so no transaction was sent and nothing moved. */
 export class SpendRefused extends Error {}
 
+const NETWORK_NAMES: Record<number, string> = { 8453: 'Base', 84532: 'Base Sepolia (test network)' };
+
 /** Everything the app reads from or sends to the blockchain, so tests and later networks can replace it. */
 export abstract class Chain {
   abstract usdcBalance(address: string): Promise<bigint>;
@@ -38,6 +40,10 @@ export abstract class Chain {
    */
   abstract spendAndForward(permission: SpendPermission, usdcMinor: number, to: string, onSent?: (hash: string) => Promise<void>): Promise<string>;
   abstract usdcAddress(): string;
+  /** The network's name as a person would say it. Taken from the chain the money really moves on. */
+  abstract networkName(): string;
+  /** Whether an address has any history on this network. Says nothing about who owns it. */
+  abstract addressActivity(address: string): Promise<'used' | 'contract' | 'new'>;
 }
 
 @Injectable()
@@ -70,6 +76,22 @@ export class ViemChain extends Chain {
 
   usdcAddress(): string {
     return this.usdc;
+  }
+
+  networkName(): string {
+    return NETWORK_NAMES[this.chainDef.id] ?? `Network ${this.chainDef.id}`;
+  }
+
+  async addressActivity(address: string): Promise<'used' | 'contract' | 'new'> {
+    const target = address as Address;
+    const [code, sent, eth, usdc] = await Promise.all([
+      this.client.getCode({ address: target }),
+      this.client.getTransactionCount({ address: target }),
+      this.client.getBalance({ address: target }),
+      this.usdcBalance(target),
+    ]);
+    if (code) return 'contract';
+    return sent > 0 || eth > 0n || usdc > 0n ? 'used' : 'new';
   }
 
   usdcBalance(address: string): Promise<bigint> {

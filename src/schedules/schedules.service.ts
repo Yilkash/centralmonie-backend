@@ -31,6 +31,8 @@ export interface ScheduleGroupView {
   status: Schedule['status'];
   items: Schedule[];
   calls: WalletCall[];
+  /** The network USDC moves on. */
+  network: string;
 }
 
 export const whenOf = (schedule: Schedule): string => {
@@ -83,6 +85,7 @@ export class SchedulesService {
             route: priced.route,
             recipientName: priced.recipientName,
             recipientDetail: priced.recipientDetail,
+            addressCheck: priced.addressCheck,
             destination: priced.destination,
             dataPlan: priced.dataPlan,
             amountKobo: priced.amountKobo,
@@ -110,7 +113,7 @@ export class SchedulesService {
       .where(and(eq(schedules.groupId, groupId), eq(schedules.userId, userId)))
       .orderBy(asc(schedules.createdAt), asc(schedules.id));
     if (items.length === 0) throw new NotFoundException('Schedule not found');
-    return { groupId, items, status: items[0]!.status, calls: await this.signatureCalls(items) };
+    return { groupId, items, status: items[0]!.status, calls: await this.signatureCalls(items), network: this.chain.networkName() };
   }
 
   private async signatureCalls(items: Schedule[]): Promise<WalletCall[]> {

@@ -2,6 +2,7 @@ import { ConflictException, Inject, Injectable, NotFoundException } from '@nestj
 import { ConfigService } from '@nestjs/config';
 import { and, asc, eq, inArray, sql } from 'drizzle-orm';
 import { WalletCall } from '../chain/chain';
+import { addressRefusal, checkAddress } from '../chain/address-check';
 import { Chain, usdcTransferCall } from '../chain/chain.service';
 import { Env } from '../config/env';
 import { describeDestination, ContactsService } from '../contacts/contacts.service';
@@ -10,7 +11,7 @@ import { LimitsService } from '../payments/limits.service';
 import { PaymentEngine } from '../payments/payment-engine.service';
 import { AuditService } from '../ops/audit.service';
 import { GuardsService } from '../ops/guards.service';
-import { contacts, Plan, PlanItem, Payment, payments, planItems, plans, User } from '../database/schema';
+import { contacts, Plan, PlanItem, Payment, payments, planItems, plans, User, users } from '../database/schema';
 import { DAILY_LIMIT_KOBO, formatNaira, formatUsdc, koboToUsdcMinor, nairaToKobo, parseUsdc, usdcMinorToKobo } from '../money/money';
 import { DataPlans, ExchangeRates, PaymentProvider, PaymentRequest } from '../providers/providers';
 import { PlanRefused } from './plan-refused';
@@ -24,6 +25,8 @@ const AIRTIME_MIN_NAIRA = 50;
 
 export interface PlanView extends Plan {
   items: (PlanItem & { payment: Payment | null })[];
+  /** The network USDC moves on. */
+  network: string;
   totalKobo: number;
   totalUsdcMinor: number;
   /** What the wallet must send when payments are waiting for the user's signature. */
@@ -129,11 +132,20 @@ export class PlansService {
       throw new PlanRefused(`The smallest bank transfer is ${formatUsdc(minimum)}, about ${smallest}.`);
     }
 
+    // Crypto sent to a wrong address cannot come back, so these are stopped and the whole address is always shown.
+    let addressCheck: string | null = null;
+    if (item.route === 'usdc' && destination.walletAddress) {
+      const [owner] = await this.db.select({ wallet: users.walletAddress }).from(users).where(eq(users.id, userId));
+      const refused = addressRefusal(destination.walletAddress, { usdc: this.chain.usdcAddress(), own: owner?.wallet ?? null });
+      if (refused) throw new PlanRefused(refused);
+      if (this.onChain) addressCheck = await checkAddress(this.chain, destination.walletAddress);
+    }
+
     return {
       route: item.route,
       recipientName: contact.name,
-      // Nobody has checked a new wallet yet, so its whole address is shown, not a shortened one.
-      recipientDetail: item.newRecipient && destination.walletAddress ? destination.walletAddress : describeDestination(destination),
+      recipientDetail: destination.walletAddress ?? describeDestination(destination),
+      addressCheck,
       // The partner needs the plan's own id to deliver it.
       destination: dataPlanId ? { ...destination, dataPlanId } : destination,
       dataPlan,
@@ -164,6 +176,7 @@ export class PlansService {
     return {
       ...plan,
       items,
+      network: this.chain.networkName(),
       calls: items.flatMap(({ payment }) =>
         payment?.status === 'awaiting_signature' ? [usdcTransferCall(this.chain.usdcAddress(), payment.fundingAddress!, payment.usdcMinor)] : [],
       ),

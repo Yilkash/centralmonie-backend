@@ -126,6 +126,8 @@ export const planItems = pgTable('plan_items', {
   // Naira value in kobo; for a USDC payment this is its value when quoted.
   amountKobo: bigint('amount_kobo', { mode: 'number' }).notNull(),
   usdcMinor: bigint('usdc_minor', { mode: 'number' }).notNull(),
+  // What the chain said about a wallet address when this was proposed. Null for other payments.
+  addressCheck: text('address_check'),
 });
 
 export const payments = pgTable(
@@ -175,6 +177,8 @@ export const schedules = pgTable(
     route: paymentRoute('route').notNull(),
     recipientName: text('recipient_name').notNull(),
     recipientDetail: text('recipient_detail').notNull(),
+    // What the chain said about a wallet address when this was proposed. Null for other payments.
+    addressCheck: text('address_check'),
     destination: jsonb('destination').notNull(),
     dataPlan: text('data_plan'),
     amountKobo: bigint('amount_kobo', { mode: 'number' }).notNull(),

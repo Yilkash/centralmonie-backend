@@ -30,6 +30,8 @@ export interface Receipt {
   title: string;
   recipient: string | null;
   recipient_detail: string | null;
+  /** The network the USDC moved on. Null when it ended as naira or airtime. */
+  network: string | null;
   amount: string;
   /** The other currency, marked approximate where the partner sets the final figure. */
   second_amount: string | null;
@@ -286,6 +288,7 @@ export class WalletService {
         title: 'Money received',
         recipient: null,
         recipient_detail: null,
+        network: this.chain.networkName(),
         amount: formatUsdc(deposit.usdcMinor),
         second_amount: null,
         note: null,
@@ -302,6 +305,7 @@ export class WalletService {
       title: 'Payment successful',
       recipient: payment.recipientName,
       recipient_detail: maskedDestination(payment.destination),
+      network: usdc ? this.chain.networkName() : null,
       amount: usdc ? formatUsdc(payment.usdcMinor) : formatNaira(payment.amountKobo),
       second_amount: usdc ? null : formatUsdc(payment.usdcMinor),
       // The partner sets the exact naira from the rate when it pays out, so the quote can differ by a little.

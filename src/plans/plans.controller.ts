@@ -27,6 +27,8 @@ export const presentPlan = (plan: PlanView) => ({
     route: item.route,
     recipient_name: item.recipientName,
     recipient_detail: item.recipientDetail,
+    network: item.route === 'usdc' ? plan.network : null,
+    address_check: item.addressCheck,
     data_plan: item.dataPlan,
     amount_naira: formatNaira(item.amountKobo),
     amount_usdc: formatUsdc(item.usdcMinor),
