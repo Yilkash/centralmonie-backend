@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, desc, eq, gte, inArray, isNotNull, or, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, ilike, inArray, isNotNull, lte, or, sql } from 'drizzle-orm';
 import { Chain } from '../chain/chain.service';
 import { DATABASE, Database } from '../database/database.module';
 import { deposits, nairaDeposits, payments, User } from '../database/schema';
@@ -11,6 +11,8 @@ export interface WalletSummary {
   address: string | null;
   /** A naira deposit that is on its way, such as ₦2,000, or null. */
   deposit_on_the_way: string | null;
+  /** The newest transaction, to show beside the balance. */
+  latest: ActivityEntry | null;
   /** Null when the chain could not be read, which is different from a balance of zero. */
   balance_usdc: string | null;
   balance_naira: string | null;
@@ -58,8 +60,14 @@ export interface ActivityEntry {
   /** Whether this finished for real, so a receipt can be made for it. */
   has_receipt: boolean;
   kind: 'payment' | 'deposit';
+  direction: 'in' | 'out';
+  /** bank, airtime, data, usdc or deposit. */
+  type: string;
+  type_label: string;
   created_at: Date;
   description: string;
+  /** Masked, so it is safe to show and to export. */
+  detail: string | null;
   route: string | null;
   recipient: string | null;
   amount_naira: string | null;
@@ -67,6 +75,34 @@ export interface ActivityEntry {
   status: string;
   tx_hash: string | null;
 }
+
+export interface ActivityFilters {
+  direction?: 'in' | 'out' | undefined;
+  type?: string | undefined;
+  search?: string | undefined;
+  /** Days in Nigerian time, such as 2026-11-03. */
+  from?: string | undefined;
+  to?: string | undefined;
+}
+
+const shortAddress = (address: string) => `${address.slice(0, 6)}…${address.slice(-4)}`;
+const shortenAddresses = (text: string) => text.replace(/0x[0-9a-fA-F]{40}/g, shortAddress);
+
+function describePayment(route: string, name: string | null): string {
+  const who = shortenAddresses(name ?? 'recipient');
+  if (route === 'airtime') return `Airtime for ${who}`;
+  if (route === 'data') return `Data for ${who}`;
+  if (route === 'usdc') return who.startsWith('0x') ? `Sent to wallet ${who}` : `Sent USDC to ${who}`;
+  return `Sent to ${who}`;
+}
+
+/** A value for a spreadsheet: quoted, and unable to run as a formula when someone opens the file. */
+function csvCell(value: string): string {
+  const safe = /^[=+\-@\t\r]/.test(value) ? `'${value}` : value;
+  return `"${safe.replace(/"/g, '""')}"`;
+}
+
+const CSV_LIMIT = 5000;
 
 /** Read-only: this service can tell you about money but cannot move any. */
 @Injectable()
@@ -90,6 +126,7 @@ export class WalletService {
       limit_left: formatNaira(Math.max(DAILY_LIMIT_KOBO - used, 0)),
       naira_per_usdc: rate,
       deposit_on_the_way: await this.depositOnTheWay(user.id),
+      latest: (await this.entries(user.id, {}, 1))[0] ?? null,
     };
   }
 
@@ -110,19 +147,132 @@ export class WalletService {
     return row ? formatNaira(row.amountKobo) : null;
   }
 
-  /** One page, newest first, across payments and money received. */
-  async activityPage(userId: string, page: number, perPage: number): Promise<ActivityPage> {
-    const [[paidCount], [receivedCount]] = await Promise.all([
-      this.db.select({ count: sql<number>`count(*)::int` }).from(payments).where(eq(payments.userId, userId)),
-      this.db.select({ count: sql<number>`count(*)::int` }).from(deposits).where(eq(deposits.userId, userId)),
+  private paymentConditions(userId: string, filters: ActivityFilters) {
+    const search = filters.search?.trim();
+    return and(
+      eq(payments.userId, userId),
+      filters.type && filters.type !== 'deposit' ? eq(payments.route, filters.type as 'bank' | 'airtime' | 'data' | 'usdc') : undefined,
+      search ? ilike(payments.recipientName, `%${search.replace(/[%_\\]/g, '\\$&')}%`) : undefined,
+      filters.from ? gte(payments.createdAt, new Date(`${filters.from}T00:00:00+01:00`)) : undefined,
+      filters.to ? lte(payments.createdAt, new Date(`${filters.to}T23:59:59.999+01:00`)) : undefined,
+    );
+  }
+
+  private depositConditions(userId: string, filters: ActivityFilters) {
+    const search = filters.search?.trim().toLowerCase();
+    // Words people would look for on these rows, or the wallet the money came from.
+    const byWord = search && ('received deposit deposited'.includes(search) ? undefined : ilike(deposits.fromAddress, `%${search.replace(/[%_\\]/g, '\\$&')}%`));
+    return and(
+      eq(deposits.userId, userId),
+      byWord || undefined,
+      filters.from ? gte(deposits.createdAt, new Date(`${filters.from}T00:00:00+01:00`)) : undefined,
+      filters.to ? lte(deposits.createdAt, new Date(`${filters.to}T23:59:59.999+01:00`)) : undefined,
+    );
+  }
+
+  private wants(filters: ActivityFilters) {
+    return {
+      payments: filters.direction !== 'in' && filters.type !== 'deposit',
+      deposits: filters.direction !== 'out' && (!filters.type || filters.type === 'deposit'),
+    };
+  }
+
+  /** Newest first, across payments and money received. */
+  private async entries(userId: string, filters: ActivityFilters, limit: number): Promise<ActivityEntry[]> {
+    const wanted = this.wants(filters);
+    const [paid, received, naira] = await Promise.all([
+      wanted.payments ? this.db.select().from(payments).where(this.paymentConditions(userId, filters)).orderBy(desc(payments.createdAt)).limit(limit) : [],
+      wanted.deposits ? this.db.select().from(deposits).where(this.depositConditions(userId, filters)).orderBy(desc(deposits.createdAt)).limit(limit) : [],
+      wanted.deposits ? this.db.select().from(nairaDeposits).where(and(eq(nairaDeposits.userId, userId), eq(nairaDeposits.status, 'completed'))).orderBy(desc(nairaDeposits.createdAt)).limit(200) : [],
     ]);
-    const entries = await this.activity(userId, page * perPage);
+    // A naira deposit reaches the wallet as a USDC transfer. Each is matched once, by amount and time.
+    const unmatched = [...naira];
+    const naming = new Map<string, string>();
+    for (const deposit of received) {
+      const index = unmatched.findIndex(
+        (row) => Math.abs(row.usdcMinor - deposit.usdcMinor) <= row.usdcMinor * 0.02 && Math.abs(deposit.createdAt.getTime() - (row.completedAt ?? row.createdAt).getTime()) < 86_400_000,
+      );
+      if (index >= 0) naming.set(deposit.id, formatNaira(unmatched.splice(index, 1)[0]!.amountKobo));
+    }
+    const entries: ActivityEntry[] = [
+      ...paid.map((payment) => ({
+        id: payment.id,
+        has_receipt: payment.status === 'completed' && !payment.providerReference?.startsWith('simulated-'),
+        kind: 'payment' as const,
+        direction: 'out' as const,
+        type: payment.route,
+        type_label: ROUTE_LABEL[payment.route] ?? 'Payment',
+        created_at: payment.createdAt,
+        description: describePayment(payment.route, payment.recipientName),
+        detail: maskedDestination(payment.destination),
+        route: payment.route,
+        recipient: payment.recipientName,
+        amount_naira: formatNaira(payment.amountKobo),
+        amount_usdc: formatUsdc(payment.usdcMinor),
+        status: payment.status,
+        tx_hash: payment.fundingTxHash,
+      })),
+      ...received.map((deposit) => {
+        const paidIn = naming.get(deposit.id);
+        return {
+          id: deposit.id,
+          has_receipt: true,
+          kind: 'deposit' as const,
+          direction: 'in' as const,
+          type: 'deposit',
+          type_label: paidIn ? 'Naira deposit' : 'USDC received',
+          created_at: deposit.createdAt,
+          description: paidIn ? `Deposited ${paidIn}` : `Received from ${shortAddress(deposit.fromAddress)}`,
+          detail: paidIn ? null : `From ${shortAddress(deposit.fromAddress)}`,
+          route: null,
+          recipient: null,
+          amount_naira: null,
+          amount_usdc: formatUsdc(deposit.usdcMinor),
+          status: 'completed',
+          tx_hash: deposit.txHash,
+        };
+      }),
+    ];
+    return entries.sort((a, b) => b.created_at.getTime() - a.created_at.getTime()).slice(0, limit);
+  }
+
+  /** One page of what matches the filters. */
+  async activityPage(userId: string, page: number, perPage: number, filters: ActivityFilters = {}): Promise<ActivityPage> {
+    const wanted = this.wants(filters);
+    const count = sql<number>`count(*)::int`;
+    const [[paidCount], [receivedCount]] = await Promise.all([
+      wanted.payments ? this.db.select({ count }).from(payments).where(this.paymentConditions(userId, filters)) : [{ count: 0 }],
+      wanted.deposits ? this.db.select({ count }).from(deposits).where(this.depositConditions(userId, filters)) : [{ count: 0 }],
+    ]);
+    const entries = await this.entries(userId, filters, page * perPage);
     return {
       activity: entries.slice((page - 1) * perPage, page * perPage),
       page,
       per_page: perPage,
       total: (paidCount?.count ?? 0) + (receivedCount?.count ?? 0),
     };
+  }
+
+  /** What matches the filters, as a spreadsheet file. */
+  async activityCsv(userId: string, filters: ActivityFilters = {}): Promise<string> {
+    const rows = await this.entries(userId, filters, CSV_LIMIT);
+    const header = ['Date', 'Description', 'Type', 'Details', 'Status', 'Direction', 'Naira', 'USDC', 'Transaction'];
+    const body = rows.map((row) =>
+      [
+        new Date(row.created_at.getTime() + 3_600_000).toISOString().slice(0, 16).replace('T', ' '),
+        row.description,
+        row.type_label,
+        row.detail ?? '',
+        row.status,
+        row.direction === 'in' ? 'Money in' : 'Money out',
+        row.amount_naira ?? '',
+        row.amount_usdc,
+        row.tx_hash ?? '',
+      ]
+        .map(csvCell)
+        .join(','),
+    );
+    return [header.join(','), ...body].join('\r\n') + '\r\n';
   }
 
   /** Only for the user's own finished transactions. Anything else is treated as not there. */
@@ -161,39 +311,8 @@ export class WalletService {
     };
   }
 
-  async activity(userId: string, limit = 30): Promise<ActivityEntry[]> {
-    const [paid, received] = await Promise.all([
-      this.db.select().from(payments).where(eq(payments.userId, userId)).orderBy(desc(payments.createdAt)).limit(limit),
-      this.db.select().from(deposits).where(eq(deposits.userId, userId)).orderBy(desc(deposits.createdAt)).limit(limit),
-    ]);
-    const entries: ActivityEntry[] = [
-      ...paid.map((payment) => ({
-        id: payment.id,
-        has_receipt: payment.status === 'completed' && !payment.providerReference?.startsWith('simulated-'),
-        kind: 'payment' as const,
-        created_at: payment.createdAt,
-        description: `${payment.route} to ${payment.recipientName ?? 'recipient'}`,
-        route: payment.route,
-        recipient: payment.recipientName,
-        amount_naira: formatNaira(payment.amountKobo),
-        amount_usdc: formatUsdc(payment.usdcMinor),
-        status: payment.status,
-        tx_hash: payment.fundingTxHash,
-      })),
-      ...received.map((deposit) => ({
-        id: deposit.id,
-        has_receipt: true,
-        kind: 'deposit' as const,
-        created_at: deposit.createdAt,
-        description: 'Received in your wallet',
-        route: null,
-        recipient: null,
-        amount_naira: null,
-        amount_usdc: formatUsdc(deposit.usdcMinor),
-        status: 'completed',
-        tx_hash: deposit.txHash,
-      })),
-    ];
-    return entries.sort((a, b) => b.created_at.getTime() - a.created_at.getTime()).slice(0, limit);
+  /** For the agent: the latest transactions, unfiltered. */
+  activity(userId: string, limit = 30): Promise<ActivityEntry[]> {
+    return this.entries(userId, {}, limit);
   }
 }

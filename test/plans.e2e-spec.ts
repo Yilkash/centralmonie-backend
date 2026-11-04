@@ -108,6 +108,53 @@ describe('plans and contacts', () => {
       expect((await get('/v1/activity?page=abc')).statusCode).toBe(400);
     });
 
+    it('filters by direction, type, search and date, and names things plainly', async () => {
+      await insert(alice, { when: '2026-11-01T10:00:00Z' });
+      await insert(alice, { route: 'airtime', when: '2026-11-03T10:00:00Z' });
+      await pool.query(`INSERT INTO deposits (user_id, tx_hash, log_index, from_address, usdc_minor, created_at) VALUES ($1, '0xdep', 0, '0xe1a9cDb2907134c35E8d055DD72605331f4E642d', 2000000, '2026-11-02T10:00:00Z')`, [alice]);
+      const list = async (query: string) => (await get(`/v1/activity?${query}`)).json();
+
+      const all = await list('');
+      expect(all.total).toBe(3);
+      expect(all.activity.map((e: { description: string }) => e.description)).toEqual(['Airtime for Halima', 'Received from 0xe1a9…642d', 'Sent to Halima']);
+      expect(all.activity[2]).toMatchObject({ direction: 'out', type: 'bank', detail: 'Ada Bello, OPay ****4568' });
+      expect(all.activity[1]).toMatchObject({ direction: 'in', type: 'deposit' });
+
+      expect((await list('direction=in')).activity).toHaveLength(1);
+      expect((await list('direction=out')).total).toBe(2);
+      expect((await list('type=airtime')).activity[0].type).toBe('airtime');
+      expect((await list('type=deposit')).total).toBe(1);
+      expect((await list('type=deposit&direction=out')).total).toBe(0);
+      expect((await list('search=hal')).total).toBe(2);
+      expect((await list('search=%25')).total).toBe(0);
+      expect((await list('search=received')).total).toBe(1);
+      expect((await list('from=2026-11-02&to=2026-11-02')).activity[0].kind).toBe('deposit');
+      expect((await get('/v1/activity?from=nope')).statusCode).toBe(400);
+      expect((await get('/v1/activity?type=stocks')).statusCode).toBe(400);
+    });
+
+    it('names a naira deposit by the naira that was paid in', async () => {
+      await pool.query(`INSERT INTO naira_deposits (id, user_id, amount_kobo, usdc_minor, rate, account_number, expires_at, status, completed_at) VALUES (gen_random_uuid(), $1, 200000, 1441161, '1387', '0', now(), 'completed', now())`, [alice]);
+      await pool.query(`INSERT INTO deposits (user_id, tx_hash, log_index, from_address, usdc_minor) VALUES ($1, '0xdep', 0, '0xf70da97812CB96acDF810712Aa562db8dfA3dbEF', 1441156)`, [alice]);
+      expect((await get('/v1/activity')).json().activity[0]).toMatchObject({ description: 'Deposited ₦2,000', type_label: 'Naira deposit' });
+    });
+
+    it('downloads the filtered list as a spreadsheet, masked and safe to open', async () => {
+      await insert(alice, { when: '2026-11-03T10:00:00Z' });
+      await pool.query(`UPDATE payments SET recipient_name = '=HYPERLINK("x")' WHERE user_id = $1`, [alice]);
+      await insert(alice, { route: 'airtime', when: '2026-11-03T11:00:00Z' });
+      await pool.query(`UPDATE payments SET recipient_name = 'Tunde' WHERE route = 'airtime' AND user_id = $1`, [alice]);
+      const file = await get('/v1/activity/export?type=bank');
+      expect(file.headers['content-type']).toContain('text/csv');
+      const lines = file.body.trim().split('\r\n');
+      expect(lines).toHaveLength(2);
+      expect(lines[0]).toContain('Date,Description');
+      expect(file.body).toContain('****4568');
+      expect(file.body).not.toContain('8031234568');
+      expect(file.body).not.toContain('Tunde');
+      expect((await get('/v1/activity/export', 'bob')).body.trim().split('\r\n')).toHaveLength(1);
+    });
+
     it('makes a receipt for a finished payment, with the account number masked', async () => {
       const { id } = (await insert(alice)).rows[0];
       const response = await get(`/v1/receipts/payment/${id}`);
