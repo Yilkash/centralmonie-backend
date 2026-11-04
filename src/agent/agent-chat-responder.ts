@@ -68,8 +68,9 @@ export class AgentChatResponder extends ChatResponder {
       this.logger.warn('Agent stopped after too many steps');
     } catch (error) {
       // The API's status and message describe the request and carry no keys or chat text.
-      const failure = error as Error & { status?: number };
-      this.logger.error(`Agent failed: ${failure.name} ${failure.status ?? ''} ${failure.status ? failure.message.slice(0, 300) : ''}`);
+      const failure = error as Error & { status?: number; cause?: { code?: string; name?: string } };
+      // With no status the request never got an answer, and the cause says why: usually the network.
+      this.logger.error(`Agent failed: ${failure.name} ${failure.status ?? ''} ${failure.status ? failure.message.slice(0, 300) : `${failure.constructor.name} ${failure.cause?.code ?? failure.cause?.name ?? ''}`}`);
     }
     return { text: FAILED, ...cards() };
   }
