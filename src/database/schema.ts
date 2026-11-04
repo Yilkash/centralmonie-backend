@@ -312,3 +312,48 @@ export type Plan = typeof plans.$inferSelect;
 export type PlanItem = typeof planItems.$inferSelect;
 export type Payment = typeof payments.$inferSelect;
 export type NairaDeposit = typeof nairaDeposits.$inferSelect;
+
+/** A customer's AI agent. Only the hash of its key is kept, so the key is shown once, when it is made. */
+export const agentKeys = pgTable('agent_keys', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  name: text('name').notNull(),
+  keyHash: text('key_hash').notNull().unique(),
+  dailyLimitKobo: bigint('daily_limit_kobo', { mode: 'number' }).notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  revokedAt: timestamp('revoked_at', { withTimezone: true }),
+});
+
+/**
+ * One naira payment asked for by an agent. Its id is also the partner's reference, so asking the
+ * partner twice gives the same payment. The USDC never passes through a wallet of ours.
+ */
+export const agentPayments = pgTable(
+  'agent_payments',
+  {
+    id: uuid('id').primaryKey(),
+    keyId: uuid('key_id').notNull().references(() => agentKeys.id, { onDelete: 'cascade' }),
+    status: text('status').notNull().default('quoted'),
+    amountKobo: bigint('amount_kobo', { mode: 'number' }).notNull(),
+    usdcMinor: bigint('usdc_minor', { mode: 'number' }).notNull(),
+    payInMinor: bigint('pay_in_minor', { mode: 'number' }).notNull(),
+    bankName: text('bank_name').notNull(),
+    accountNumber: text('account_number').notNull(),
+    accountName: text('account_name').notNull(),
+    payFrom: text('pay_from').notNull(),
+    refundTo: text('refund_to').notNull(),
+    quoteExpiresAt: timestamp('quote_expires_at', { withTimezone: true }).notNull(),
+    payoutAddress: text('payout_address'),
+    payoutKobo: bigint('payout_kobo', { mode: 'number' }),
+    depositAddress: text('deposit_address'),
+    depositDeadline: timestamp('deposit_deadline', { withTimezone: true }),
+    transactions: jsonb('transactions').$type<string[]>().notNull().default([]),
+    failureReason: text('failure_reason'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+    paidAt: timestamp('paid_at', { withTimezone: true }),
+  },
+  (table) => [index('agent_payments_key_idx').on(table.keyId, table.createdAt), index('agent_payments_status_idx').on(table.status)],
+);
+
+export type AgentKey = typeof agentKeys.$inferSelect;
+export type AgentPayment = typeof agentPayments.$inferSelect;

@@ -2,9 +2,9 @@ import { Module } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Env } from '../config/env';
 import { PayscribeProvider } from './payscribe/payscribe.provider';
-import { BankLookup, DataPlans, ExchangeRates, NairaOnramp, PaymentProvider } from './providers';
+import { AgentPayout, BankLookup, DataPlans, ExchangeRates, NairaOnramp, PaymentProvider } from './providers';
 import { RoutedPaymentProvider } from './routed-provider';
-import { SimulatedBankLookup, SimulatedDataPlans, SimulatedExchangeRates, SimulatedPaymentProvider } from './simulated-providers';
+import { SimulatedAgentPayout, SimulatedBankLookup, SimulatedDataPlans, SimulatedExchangeRates, SimulatedPaymentProvider } from './simulated-providers';
 import { SwitchProvider } from './switch/switch.provider';
 
 type Config = ConfigService<Env, true>;
@@ -56,11 +56,19 @@ const SWITCH = Symbol('switch');
         });
       },
     },
+    {
+      provide: AgentPayout,
+      inject: [SWITCH],
+      useFactory: (switch_: SwitchProvider | null): AgentPayout =>
+        switch_
+          ? { deposit: (request) => switch_.deposit(request), status: (reference) => switch_.status(reference, reference) }
+          : new SimulatedAgentPayout(),
+    },
     { provide: ExchangeRates, inject: [SWITCH], useFactory: (switch_: SwitchProvider | null) => switch_ ?? new SimulatedExchangeRates() },
     { provide: BankLookup, inject: [SWITCH], useFactory: (switch_: SwitchProvider | null) => switch_ ?? new SimulatedBankLookup() },
     { provide: NairaOnramp, inject: [SWITCH], useFactory: (switch_: SwitchProvider | null) => switch_ },
     { provide: DataPlans, inject: [PAYSCRIBE], useFactory: (payscribe: PayscribeProvider | null) => payscribe ?? new SimulatedDataPlans() },
   ],
-  exports: [PaymentProvider, ExchangeRates, BankLookup, DataPlans, NairaOnramp],
+  exports: [AgentPayout, PaymentProvider, ExchangeRates, BankLookup, DataPlans, NairaOnramp],
 })
 export class ProvidersModule {}

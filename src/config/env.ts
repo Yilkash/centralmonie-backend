@@ -48,6 +48,11 @@ const envSchema = z.object({
   ALLOW_NO_PIN: z.string().optional(),
   // All users together, per day. A bug or an attack cannot move more than this.
   COMPANY_DAILY_CAP_NAIRA: z.coerce.number().int().positive().default(5_000_000),
+  // Opens the Agent API when real money is on. In test mode it is always open, and moves nothing.
+  AGENT_API_ENABLED: z.enum(['true', 'false']).default('false').transform((value) => value === 'true'),
+  // NEAR Intents' 1Click API. The key lowers the fee and is not required.
+  ONECLICK_API_KEY: z.string().min(1).optional(),
+  ONECLICK_BASE_URL: z.string().url().default('https://1click.chaindefuser.com'),
   // Opens the admin API. Without it, the admin API refuses everyone.
   ADMIN_TOKEN: z.string().min(24).optional(),
   // Lets the web app's gas proxy ask whether a wallet belongs to one of our users.

@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
+import { AgentApiModule } from './agent-api/agent-api.module';
 import { ChainModule } from './chain/chain.module';
 import { ChatModule } from './chat/chat.module';
 import { NotificationsModule } from './notifications/notifications.module';
@@ -34,6 +35,7 @@ import { UsersModule } from './users/users.module';
     PinModule,
     AdminModule,
     SchedulesModule,
+    AgentApiModule,
   ],
   controllers: [HealthController],
 })

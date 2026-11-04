@@ -1,6 +1,6 @@
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { Injectable } from '@nestjs/common';
-import { BankLookup, DataPlan, DataPlans, ExchangeRates, PaymentProvider, PaymentRequest, PaymentResult, PaymentState } from './providers';
+import { AgentPayout, BankLookup, DataPlan, DataPlans, ExchangeRates, PaymentProvider, PaymentRequest, PaymentResult, PaymentState } from './providers';
 
 /** Moves nothing. An account number ending in 0000 fails, so failure paths can be exercised. */
 @Injectable()
@@ -63,5 +63,16 @@ export class SimulatedDataPlans extends DataPlans {
 
   async find(id: string): Promise<DataPlan | null> {
     return PLANS.find((plan) => plan.id === id) ?? null;
+  }
+}
+
+/** Test mode: pays nobody, and reports the payment as done. */
+export class SimulatedAgentPayout extends AgentPayout {
+  async deposit(request: PaymentRequest): Promise<{ address: string; usdcMinor: number; destinationKobo: number }> {
+    return { address: `0x${randomBytes(20).toString('hex')}`, usdcMinor: request.usdcMinor, destinationKobo: request.amountKobo };
+  }
+
+  async status(): Promise<PaymentState> {
+    return { state: 'completed' };
   }
 }

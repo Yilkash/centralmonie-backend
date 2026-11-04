@@ -67,6 +67,12 @@ export abstract class NairaOnramp {
   abstract onrampTerms(): Promise<{ nairaPerUsdc: number; minimumKobo: number }>;
 }
 
+/** Pays naira to a bank once USDC reaches an address that is made for that one payment. */
+export abstract class AgentPayout {
+  abstract deposit(request: PaymentRequest): Promise<{ address: string; usdcMinor: number; destinationKobo: number | null }>;
+  abstract status(reference: string): Promise<PaymentState>;
+}
+
 export abstract class ExchangeRates {
   abstract nairaPerUsdc(): Promise<number>;
 }

@@ -1,11 +1,14 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { notInArray, sql } from 'drizzle-orm';
+import { inArray, notInArray, sql } from 'drizzle-orm';
 import { Env } from '../config/env';
 import { DATABASE, Database } from '../database/database.module';
-import { payments } from '../database/schema';
+import { agentPayments, payments } from '../database/schema';
 import { PaymentRoute } from '../plans/plan.types';
 import { SwitchesService } from './switches.service';
+
+/** Agent payments that have taken, or may take, money out of the day's allowance. */
+export const AGENT_STATUSES_THAT_COUNT = ['creating', 'awaiting_deposit', 'processing', 'paying', 'paid', 'needs_support'] as const;
 
 const startOfLagosDay = sql`(date_trunc('day', now() at time zone 'Africa/Lagos') at time zone 'Africa/Lagos')`;
 
@@ -32,7 +35,11 @@ export class GuardsService {
       .select({ used: sql<string>`coalesce(sum(${payments.amountKobo}), 0)` })
       .from(payments)
       .where(sql`${notInArray(payments.status, ['failed', 'returned', 'awaiting_signature', 'funding'])} and ${payments.createdAt} >= ${startOfLagosDay}`);
-    if (Number(row!.used) + addedKobo > cap) return 'Payments are busy right now. Nothing was sent. Please try again later.';
+    const [agents] = await db
+      .select({ used: sql<string>`coalesce(sum(${agentPayments.amountKobo}), 0)` })
+      .from(agentPayments)
+      .where(sql`${inArray(agentPayments.status, [...AGENT_STATUSES_THAT_COUNT])} and ${agentPayments.createdAt} >= ${startOfLagosDay}`);
+    if (Number(row!.used) + Number(agents!.used) + addedKobo > cap) return 'Payments are busy right now. Nothing was sent. Please try again later.';
     return null;
   }
 }
