@@ -271,9 +271,16 @@ export class AgentApiService {
 
   private async bankName(input: QuoteInput): Promise<string> {
     // Last of the checks: this asks the bank, and tells the caller a name.
-    const accountName = await this.banks.accountName(input.bankName, input.accountNumber).catch(() => {
-      throw new AgentRefusal('bank_unavailable', 'We could not check that account just now. Nothing was sent. Please try again.', 503);
-    });
+    // One more try after a short wait, because a phone or home connection often drops for a moment.
+    const ask = () => this.banks.accountName(input.bankName, input.accountNumber);
+    const accountName = await ask()
+      .catch(async () => {
+        await new Promise((done) => setTimeout(done, 1500));
+        return ask();
+      })
+      .catch(() => {
+        throw new AgentRefusal('bank_unavailable', 'We could not check that account just now. Nothing was sent. Please try again.', 503);
+      });
     if (!accountName) throw new AgentRefusal('account_not_found', 'We could not find that account. Check the bank and the account number.', 404);
 
     return accountName;

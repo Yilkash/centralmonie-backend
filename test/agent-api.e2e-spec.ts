@@ -59,8 +59,11 @@ class FakePayout extends AgentPayout {
 
 class FakeBanks extends BankLookup {
   down = false;
+  /** Fails this many times, then works. */
+  blips = 0;
   async accountName(_bank: string, accountNumber: string) {
     if (this.down) throw new Error('bank down');
+    if (this.blips-- > 0) throw new Error('connection dropped');
     return accountNumber.endsWith('0000') ? null : 'Ada Bello';
   }
 }
@@ -128,6 +131,7 @@ describe('Agent API', () => {
     payout.destinationKobo = null;
     payout.expiresAt = null;
     banks.down = false;
+    banks.blips = 0;
     key = (await agents.createKey('Test agent', 20_000)).key;
   });
 
@@ -815,6 +819,12 @@ describe('Agent API', () => {
       expect((await open(link.id)).json().paid).toBe(true);
       await expect(links.cancel(user, link.id)).rejects.toThrow('has been paid');
       expect(presentOwnLink((await links.list(user))[0]!, 'u').status).toBe('paid');
+    });
+
+    it('rides out one dropped connection to the bank check', async () => {
+      const link = await links.create(user, { amountNaira: 5000, bankName: 'OPay', accountNumber: '8031234568' });
+      banks.blips = 1;
+      expect((await payLink(link.id)).json().payment).toMatchObject({ status: 'awaiting_deposit' });
     });
 
     it('says plainly when the NEAR refund account does not exist, and offers no address', async () => {
