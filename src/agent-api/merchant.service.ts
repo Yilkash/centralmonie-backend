@@ -210,7 +210,7 @@ export class MerchantService {
       .select({ event: merchantEvents, key: merchantKeys })
       .from(merchantEvents)
       .innerJoin(merchantKeys, eq(merchantEvents.keyId, merchantKeys.id))
-      .where(and(isNull(merchantEvents.deliveredAt), lte(merchantEvents.nextAttemptAt, new Date()), lt(merchantEvents.attempts, MAX_ATTEMPTS), isNull(merchantKeys.revokedAt)))
+      .where(and(isNull(merchantEvents.deliveredAt), lte(merchantEvents.nextAttemptAt, sql`now()`), lt(merchantEvents.attempts, MAX_ATTEMPTS), isNull(merchantKeys.revokedAt)))
       .limit(20);
     let delivered = 0;
     for (const { event, key } of due) {
