@@ -4,6 +4,7 @@
 //
 //   DOTENV_CONFIG_PATH=.env.mainnet node -r dotenv/config scripts/create-merchant-key.mjs \
 //     --email you@example.com --name "Mama Put Kitchen" --bank OPay --account 0123456789 \
+//     (or --wallet, --usdc-address 0x… or --near-account name.near instead of --bank and --account)
 //     --origin http://localhost:3010 --webhook http://localhost:3010/shop/api/notices --env-out ../10kobo-frontend/.env.mainnet
 import { appendFileSync, readFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
@@ -15,14 +16,17 @@ const { values } = parseArgs({
     bank: { type: 'string' },
     account: { type: 'string' },
     wallet: { type: 'boolean', default: false },
+    'usdc-address': { type: 'string' },
+    'near-account': { type: 'string' },
     origin: { type: 'string', multiple: true, default: [] },
     webhook: { type: 'string' },
     'env-out': { type: 'string' },
     api: { type: 'string', default: `http://localhost:${process.env.PORT ?? 4010}` },
   },
 });
-if (!values.email || !values.name || !values['env-out'] || (!values.wallet && (!values.bank || !values.account))) {
-  console.error('Needs --email, --name, --env-out, and --bank with --account or --wallet');
+const payouts = [values.wallet, values['usdc-address'], values['near-account'], values.bank && values.account].filter(Boolean).length;
+if (!values.email || !values.name || !values['env-out'] || payouts !== 1) {
+  console.error('Needs --email, --name, --env-out, and one payout: --bank with --account, --wallet, --usdc-address or --near-account');
   process.exit(1);
 }
 if (!process.env.ADMIN_TOKEN) {
@@ -41,7 +45,13 @@ const response = await fetch(`${values.api}/v1/admin/merchant-keys`, {
   body: JSON.stringify({
     user_email: values.email,
     name: values.name,
-    payout: values.wallet ? { to_my_wallet: true } : { bank_name: values.bank, account_number: values.account },
+    payout: values.wallet
+      ? { to_my_wallet: true }
+      : values['usdc-address']
+        ? { usdc_address: values['usdc-address'] }
+        : values['near-account']
+          ? { near_account: values['near-account'] }
+          : { bank_name: values.bank, account_number: values.account },
     return_origins: values.origin,
     webhook_url: values.webhook ?? null,
   }),

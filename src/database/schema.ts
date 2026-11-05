@@ -424,6 +424,9 @@ export const merchantKeys = pgTable('merchant_keys', {
   payoutBankName: text('payout_bank_name'),
   payoutAccountNumber: text('payout_account_number'),
   payoutToWallet: boolean('payout_to_wallet').notNull().default(false),
+  /** USDC on Base to this address, or on NEAR to this account, instead of naira to a bank. */
+  payoutUsdcAddress: text('payout_usdc_address'),
+  payoutNearAccount: text('payout_near_account'),
   /** Websites a payer may be sent back to, such as https://shop.example. */
   returnOrigins: jsonb('return_origins').$type<string[]>().notNull().default([]),
   webhookUrl: text('webhook_url'),

@@ -622,7 +622,7 @@ describe('Agent API', () => {
       expect((await shop('POST', '/v1/merchant/invoices', { ...ORDER, reference: 'y', return_url: 'http://shop.example/' })).json().message).toContain('https');
 
       const invoice = (await shop('POST', '/v1/merchant/invoices', ORDER)).json();
-      const other = await merchants.createKey({ userEmail: 'owner@shop.example', name: 'Other shop', payout: { toMyWallet: true } });
+      const other = await merchants.createKey({ userEmail: 'owner@shop.example', name: 'Other shop', payout: { nearAccount: 'other.near' } });
       expect((await shop('GET', `/v1/merchant/invoices/${invoice.id}`, undefined, other.key)).statusCode).toBe(404);
       expect((await shop('POST', `/v1/merchant/invoices/${invoice.id}/cancel`, undefined, other.key)).statusCode).toBe(404);
       await merchants.revokeKey(keyId);
@@ -679,11 +679,27 @@ describe('Agent API', () => {
       expect(JSON.parse(notices[0]!.body)).toMatchObject({ type: 'invoice.cancelled', data: { reference: 'order-1001' } });
     });
 
+    it('can pay a shop in USDC on Base or NEAR instead of a bank, set on the key', async () => {
+      const wallet = '0x70997970C51812dc3A010C7d01b50e0d17dc79C8';
+      const onBase = await merchants.createKey({ userEmail: 'owner@shop.example', name: 'USDC shop', payout: { usdcAddress: wallet } });
+      const base = (await shop('POST', '/v1/merchant/invoices', { reference: 'b-1', amount_naira: 2000 }, onBase.key)).json();
+      expect(base.receives).toBe('USDC on Base');
+      expect(base.to).toBe(wallet);
+      const onNear = await merchants.createKey({ userEmail: 'owner@shop.example', name: 'NEAR shop', payout: { nearAccount: 'shop.near' } });
+      expect((await shop('POST', '/v1/merchant/invoices', { reference: 'n-1', amount_naira: 2000 }, onNear.key)).json()).toMatchObject({ receives: 'USDC on NEAR', to: 'shop.near' });
+      await payLink(base.id);
+      expect(crossChain.quotes.at(-1)).toMatchObject({ recipient: wallet, toNear: false });
+      expect(payout.deposits).toHaveLength(0);
+      await expect(merchants.createKey({ userEmail: 'owner@shop.example', name: 'x', payout: { usdcAddress: '0x12' } })).rejects.toThrow('valid Base address');
+      await expect(merchants.createKey({ userEmail: 'owner@shop.example', name: 'x', payout: { toMyWallet: true } })).rejects.toThrow('no 10kobo wallet');
+    });
+
     it('refuses keys that would send payers or notices somewhere unsafe', async () => {
-      await expect(merchants.createKey({ userEmail: 'owner@shop.example', name: 'x', payout: { toMyWallet: true }, webhookUrl: 'http://shop.example/hook' })).rejects.toThrow('https');
-      await expect(merchants.createKey({ userEmail: 'owner@shop.example', name: 'x', payout: { toMyWallet: true }, returnOrigins: ['https://shop.example/path'] })).rejects.toThrow('start of an address');
-      await expect(merchants.createKey({ userEmail: 'nobody@shop.example', name: 'x', payout: { toMyWallet: true } })).rejects.toThrow('No 10kobo user');
-      await expect(merchants.createKey({ userEmail: 'owner@shop.example', name: 'x', payout: { toMyWallet: true }, webhookUrl: 'http://localhost:3010/hook' })).resolves.toMatchObject({ key: expect.stringMatching(/^mk_/) });
+      const bank = { bankName: 'OPay', accountNumber: '8031234568' };
+      await expect(merchants.createKey({ userEmail: 'owner@shop.example', name: 'x', payout: bank, webhookUrl: 'http://shop.example/hook' })).rejects.toThrow('https');
+      await expect(merchants.createKey({ userEmail: 'owner@shop.example', name: 'x', payout: bank, returnOrigins: ['https://shop.example/path'] })).rejects.toThrow('start of an address');
+      await expect(merchants.createKey({ userEmail: 'nobody@shop.example', name: 'x', payout: bank })).rejects.toThrow('No 10kobo user');
+      await expect(merchants.createKey({ userEmail: 'owner@shop.example', name: 'x', payout: bank, webhookUrl: 'http://localhost:3010/hook' })).resolves.toMatchObject({ key: expect.stringMatching(/^mk_/) });
     });
   });
 

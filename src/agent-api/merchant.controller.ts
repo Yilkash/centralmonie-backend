@@ -77,7 +77,12 @@ export class MerchantController {
 const keyBody = z.object({
   user_email: z.string().email(),
   name: z.string().trim().min(2).max(60),
-  payout: z.union([z.object({ bank_name: z.string().trim().min(2), account_number: z.string().regex(/^\d{10}$/) }), z.object({ to_my_wallet: z.literal(true) })]),
+  payout: z.union([
+    z.object({ bank_name: z.string().trim().min(2), account_number: z.string().regex(/^\d{10}$/) }),
+    z.object({ to_my_wallet: z.literal(true) }),
+    z.object({ usdc_address: z.string().trim().max(42) }),
+    z.object({ near_account: z.string().trim().min(2).max(70) }),
+  ]),
   return_origins: z.array(z.string()).max(10).optional(),
   webhook_url: z.string().max(500).nullish(),
   invoices_per_day: z.number().int().positive().max(5000).optional(),
@@ -99,7 +104,14 @@ export class MerchantKeysController {
     const made = await this.merchants.createKey({
       userEmail: user_email,
       name,
-      payout: 'to_my_wallet' in payout ? { toMyWallet: true } : { bankName: payout.bank_name, accountNumber: payout.account_number },
+      payout:
+        'to_my_wallet' in payout
+          ? { toMyWallet: true }
+          : 'usdc_address' in payout
+            ? { usdcAddress: payout.usdc_address }
+            : 'near_account' in payout
+              ? { nearAccount: payout.near_account }
+              : { bankName: payout.bank_name, accountNumber: payout.account_number },
       returnOrigins: return_origins ?? [],
       webhookUrl: webhook_url ?? null,
       ...(invoices_per_day ? { invoicesPerDay: invoices_per_day } : {}),

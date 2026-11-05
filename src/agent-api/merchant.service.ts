@@ -3,6 +3,8 @@ import { and, count, eq, gte, isNotNull, isNull, lt, lte, or, sql } from 'drizzl
 import { createHmac, randomBytes, randomUUID } from 'node:crypto';
 import { DATABASE, Database } from '../database/database.module';
 import { AgentPayment, agentPayments, MerchantKey, merchantEvents, merchantKeys, PayLink, payLinks, User, users } from '../database/schema';
+import { isAddress } from 'viem';
+import { isNearAccount } from '../chain/usdc-chains';
 import { AgentRefusal, hashKey } from './agent-api.service';
 import { LinkInput, PayLinksService, presentOwnLink } from './pay-links.service';
 
@@ -17,7 +19,8 @@ const NOTICE_TIMEOUT_MS = 5000;
 export interface NewMerchantKey {
   userEmail: string;
   name: string;
-  payout: { bankName: string; accountNumber: string } | { toMyWallet: true };
+  /** Where every invoice from this key pays out: naira to a bank, or USDC to the owner's wallet, a Base address or a NEAR account. */
+  payout: { bankName: string; accountNumber: string } | { toMyWallet: true } | { usdcAddress: string } | { nearAccount: string };
   returnOrigins?: string[];
   webhookUrl?: string | null;
   invoicesPerDay?: number;
@@ -72,8 +75,20 @@ export class MerchantService {
       return url.origin;
     });
     if (input.webhookUrl) webAddress(input.webhookUrl, 'notice address');
-    const payout = 'toMyWallet' in input.payout ? { payoutToWallet: true } : { payoutBankName: input.payout.bankName, payoutAccountNumber: input.payout.accountNumber };
-    if (!('toMyWallet' in input.payout) && !/^\d{10}$/.test(input.payout.accountNumber)) throw new AgentRefusal('invalid_request', 'A bank account number has 10 digits.', 400);
+    let payout: Partial<typeof merchantKeys.$inferInsert>;
+    if ('toMyWallet' in input.payout) {
+      if (!owner.walletAddress) throw new AgentRefusal('wallet_not_ready', 'That user has no 10kobo wallet yet.', 409);
+      payout = { payoutToWallet: true };
+    } else if ('usdcAddress' in input.payout) {
+      if (!isAddress(input.payout.usdcAddress)) throw new AgentRefusal('invalid_request', 'That is not a valid Base address.', 400);
+      payout = { payoutUsdcAddress: input.payout.usdcAddress };
+    } else if ('nearAccount' in input.payout) {
+      if (!isNearAccount(input.payout.nearAccount)) throw new AgentRefusal('invalid_request', 'That is not a valid NEAR account.', 400);
+      payout = { payoutNearAccount: input.payout.nearAccount };
+    } else {
+      if (!/^\d{10}$/.test(input.payout.accountNumber)) throw new AgentRefusal('invalid_request', 'A bank account number has 10 digits.', 400);
+      payout = { payoutBankName: input.payout.bankName, payoutAccountNumber: input.payout.accountNumber };
+    }
     const key = `mk_${randomBytes(32).toString('base64url')}`;
     const webhookSecret = input.webhookUrl ? `whsec_${randomBytes(32).toString('base64url')}` : null;
     const [row] = await this.db
@@ -111,7 +126,13 @@ export class MerchantService {
       .where(and(eq(payLinks.merchantKeyId, key.id), gte(payLinks.createdAt, sql`now() - interval '1 day'`)));
     if (made >= key.invoicesPerDay) throw new AgentRefusal('too_many_requests', 'This key has made its most invoices for today.', 429);
 
-    const payout = key.payoutToWallet ? { toMyWallet: true } : { bankName: key.payoutBankName, accountNumber: key.payoutAccountNumber };
+    const payout = key.payoutToWallet
+      ? { toMyWallet: true }
+      : key.payoutUsdcAddress
+        ? { usdcAddress: key.payoutUsdcAddress }
+        : key.payoutNearAccount
+          ? { nearAccount: key.payoutNearAccount }
+          : { bankName: key.payoutBankName, accountNumber: key.payoutAccountNumber };
     try {
       return await this.links.create(owner, { ...payout, amountNaira: input.amountNaira ?? null, note: input.note ?? null, dueDate: input.dueDate ?? null, lineItems: input.lineItems ?? null }, { keyId: key.id, reference: input.reference, returnUrl });
     } catch (error) {

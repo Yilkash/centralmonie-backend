@@ -176,6 +176,13 @@
       "when": 1793911947447,
       "tag": "0024_flowery_centennial",
       "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1793913862589,
+      "tag": "0025_sturdy_leopardon",
+      "breakpoints": true
     }
   ]
 }
