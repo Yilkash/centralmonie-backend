@@ -240,7 +240,8 @@ export class AgentApiService {
       .priceCheck({ payFrom: input.payFrom, usdcMinor, recipient: input.deliverTo ?? this.config.get('COLLECTION_ADDRESS', { infer: true }) ?? input.refundTo, refundTo: input.refundTo, deadline: new Date(Date.now() + DEPOSIT_WINDOW_MS), payToken: input.payToken ?? 'USDC', toNear: Boolean(input.deliverTo && isNearAccount(input.deliverTo)) })
       .catch((error: Error) => {
         this.logger.warn(`price check failed: ${error.message.slice(0, 200)}`);
-        throw new AgentRefusal('route_unavailable', 'We could not price that route just now. Nothing was sent. Please try again.', 503);
+        const hint = input.payFrom === 'near' ? ' Check that the NEAR account is spelled right.' : '';
+        throw new AgentRefusal('route_unavailable', `We could not price that route just now. Nothing was sent.${hint} Please try again.`, 503);
       });
 
     const [row] = await this.db

@@ -121,7 +121,8 @@ export class OneClickCrossChain extends CrossChain {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'query', params: { request_type: 'view_account', finality: 'final', account_id: account } }),
-        signal: AbortSignal.timeout(5000),
+        // The public NEAR server can take several seconds.
+        signal: AbortSignal.timeout(8000),
       });
       const answer = (await response.json()) as { error?: { cause?: { name?: string } }; result?: { error?: string } };
       return answer.error?.cause?.name === 'UNKNOWN_ACCOUNT' || /does not exist/i.test(answer.result?.error ?? '');
