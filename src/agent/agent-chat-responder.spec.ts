@@ -46,6 +46,18 @@ describe('AgentChatResponder', () => {
     expect(names.some((name) => /approve|send|pay|execute|transfer/.test(name))).toBe(false);
   });
 
+  it('stays within the limit on optional fields in strict tools, or every chat message fails', () => {
+    const unions = (schema: unknown): number => {
+      if (Array.isArray(schema)) return schema.reduce((sum, item) => sum + unions(item), 0);
+      if (!schema || typeof schema !== 'object') return 0;
+      const node = schema as Record<string, unknown>;
+      const own = Array.isArray(node.type) || Array.isArray(node.anyOf) ? 1 : 0;
+      return own + Object.values(node).reduce<number>((sum, value) => sum + unions(value), 0);
+    };
+    const total = AGENT_TOOLS.filter((tool) => tool.strict).reduce((sum, tool) => sum + unions(tool.input_schema), 0);
+    expect(total).toBeLessThanOrEqual(16);
+  });
+
   it('returns plain text when no tool is needed', async () => {
     const { responder, run } = setUp([say('Hello!')]);
     await expect(responder.reply(turn())).resolves.toMatchObject({ text: 'Hello!', planId: undefined });

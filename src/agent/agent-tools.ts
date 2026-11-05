@@ -184,7 +184,7 @@ export const AGENT_TOOLS: Anthropic.Tool[] = [
     name: 'make_request_link',
     description:
       "Makes a link the user can send to someone, so that person can pay from any blockchain, in USDC, and the user's bank account receives naira. Moves no money. Use when the user wants to be paid or to request money, for example from someone abroad. Ask for the bank and account number if you do not have them.",
-    strict: true,
+    // Not strict: Anthropic limits how many optional fields strict tools can have in total, and our own checks cover this one.
     input_schema: {
       type: 'object',
       properties: {
