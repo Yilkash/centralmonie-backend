@@ -462,7 +462,7 @@ export class AgentToolbox {
       lineItems: details.line_items?.map((item) => ({ description: item.description, amountNaira: item.amount_naira })) ?? null,
     });
     return {
-      result: `Pay link made for ${formatNaira(link.amountKobo)} to ${link.accountName}${link.nearAccount ? ', paid as USDC on NEAR' : `, ${link.bankName}`}. Give the user this exact link to send to the payer, and say they can pay from any supported blockchain: ${this.payLinks.url(link)}`,
+      result: `Pay link made for ${formatNaira(link.amountKobo)} to ${link.accountName}${link.nearAccount ? ', paid as USDC on NEAR' : `, ${link.bankName}`}. The app shows the details as a card, so say only that it is ready to send, and include this exact link on its own line: ${this.payLinks.url(link)}`,
     };
   }
 
