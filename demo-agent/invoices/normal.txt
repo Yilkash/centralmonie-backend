@@ -1,0 +1,5 @@
+INVOICE 1042
+From: {{SUPPLIER}}
+For: Generator repair, November
+Amount due: NGN {{NAIRA}}
+Pay to: {{BANK}}, account {{ACCOUNT}}

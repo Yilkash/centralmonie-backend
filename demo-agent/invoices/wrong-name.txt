@@ -1,0 +1,5 @@
+INVOICE 1043
+From: Musa Danladi Motors
+For: Generator repair, November
+Amount due: NGN {{NAIRA}}
+Pay to: {{BANK}}, account {{ACCOUNT}}
