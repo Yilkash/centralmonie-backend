@@ -1,7 +1,7 @@
 import { NestFastifyApplication } from '@nestjs/platform-fastify';
 import { Test } from '@nestjs/testing';
 import { Pool } from 'pg';
-import { AgentApiService, agentApiOpen, ipGroup, KEYLESS_KEY_ID, maskName, validRefundAddress } from '../src/agent-api/agent-api.service';
+import { AgentApiService, agentApiOpen, ipGroup, KEYLESS_KEY_ID, maskName, paymentsToCsv, validRefundAddress } from '../src/agent-api/agent-api.service';
 import { NearRelayer, SignedDelegate, USDC_ON_NEAR } from '../src/agent-api/near-relay';
 import { PayLinksService } from '../src/agent-api/pay-links.service';
 import { operationToken, tokenProblem } from '../src/agent-api/x402';
@@ -11,6 +11,7 @@ import { configureApp, createAdapter } from '../src/app';
 import { AppModule } from '../src/app.module';
 import { applyMigrations } from '../src/database/migrate';
 import { SwitchesService } from '../src/ops/switches.service';
+import { WalletService } from '../src/wallet/wallet.service';
 import { AgentPayout, BankLookup, ExchangeRates, PaymentProvider, PaymentRequest, PaymentState } from '../src/providers/providers';
 
 const DATABASE_URL = process.env.DATABASE_URL!;
@@ -448,6 +449,29 @@ describe('Agent API', () => {
     });
   });
 
+  describe('the accountant spreadsheet', () => {
+    it('lists a key\'s real payments with masked accounts, safely, and needs the key', async () => {
+      const paying = await accepted();
+      await quote({ amount_naira: 2000 });
+      const response = await app.inject({ method: 'GET', url: '/v1/agent/payments.csv', headers: { authorization: `Bearer ${key}` } });
+      expect(response.statusCode).toBe(200);
+      expect(response.headers['content-type']).toContain('text/csv');
+      const lines = response.body.trim().split('\r\n');
+      expect(lines).toHaveLength(2);
+      expect(lines[0]).toContain('Paid to');
+      expect(lines[1]).toContain(paying.id);
+      expect(response.body).toContain('****4568');
+      expect(response.body).not.toContain('8031234568');
+      expect((await app.inject({ method: 'GET', url: '/v1/agent/payments.csv' })).statusCode).toBe(401);
+    });
+
+    it('cannot be used to run a formula in a spreadsheet', () => {
+      const csv = paymentsToCsv([{ createdAt: new Date(0), status: 'paid', accountName: '=HYPERLINK("x")', bankName: 'OPay', accountNumber: '8031234568', amountKobo: 100, payoutKobo: null, payToken: 'USDC', payInMinor: 1, payFrom: 'near', purpose: '@cmd, more', id: 'id', transactions: [] } as unknown as AgentPayment]);
+      expect(csv).toContain(`"'=HYPERLINK(""x"")"`);
+      expect(csv).toContain(`"'@cmd, more"`);
+    });
+  });
+
   describe('the gas relayer', () => {
     const SIGNED = 'c2lnbmVkLWRlbGVnYXRl';
     const transfer = (over: Partial<SignedDelegate> = {}, args: object = { receiver_id: '0xdeposit', amount: '3573829' }, action: object = {}): SignedDelegate => ({
@@ -589,6 +613,67 @@ describe('Agent API', () => {
       await expect(links.create(user, { amountNaira: 5000, bankName: 'OPay', accountNumber: '8031230000' })).rejects.toThrow('could not find');
       await expect(links.create(user, { amountNaira: 50_001, bankName: 'OPay', accountNumber: '8031234568' })).rejects.toThrow('most for one pay link');
       expect((await open('00000000-0000-4000-8000-000000000000')).statusCode).toBe(404);
+    });
+
+    it('works as an invoice: due date and items are shown, must add up, and cannot be in the past', async () => {
+      const lineItems = [{ description: 'Generator repair', amountNaira: 3000 }, { description: 'Parts', amountNaira: 2000 }];
+      const link = await links.create(user, { lineItems, dueDate: '2099-01-31', bankName: 'OPay', accountNumber: '8031234568', note: 'Invoice 7' });
+      expect((await open(link.id)).json()).toMatchObject({ amount_naira: 5000, due_date: '2099-01-31', overdue: false, line_items: [{ description: 'Generator repair', amount_naira: 3000 }, { description: 'Parts', amount_naira: 2000 }] });
+      await expect(links.create(user, { amountNaira: 9000, lineItems, bankName: 'OPay', accountNumber: '8031234568' })).rejects.toThrow('add up');
+      await expect(links.create(user, { amountNaira: 5000, dueDate: '2020-01-01', bankName: 'OPay', accountNumber: '8031234568' })).rejects.toThrow('already passed');
+      await pool.query(`update pay_links set due_date = '2020-01-01' where id = $1`, [link.id]);
+      expect((await open(link.id)).json()).toMatchObject({ overdue: true, open: true });
+    });
+
+    it('can pay USDC on NEAR with no bank, marking it paid on delivery alone', async () => {
+      const link = await links.create(user, { amountNaira: 5000, nearAccount: 'ada.near' });
+      const shown = (await open(link.id)).json();
+      expect(shown).toMatchObject({ to: 'ada.near', receives: 'USDC on NEAR', account_number: null });
+      expect((await payLink(link.id)).json().payment.status).toBe('awaiting_deposit');
+      expect(payout.deposits).toHaveLength(0);
+      expect(crossChain.quotes[0]).toMatchObject({ recipient: 'ada.near', toNear: true, payFrom: 'arbitrum' });
+      crossChain.state = { status: 'delivered', transactions: ['nearhash'] };
+      expect((await open(link.id)).json()).toMatchObject({ paid: true, payment: { status: 'paid', links: [{ label: 'NEAR Intents settlement', url: 'https://nearblocks.io/txns/nearhash' }] } });
+      await expect(links.create(user, { amountNaira: 5000, nearAccount: 'not a near account' })).rejects.toThrow('not a valid NEAR');
+      await expect(links.create(user, { amountNaira: 5000 })).rejects.toThrow('bank and account number');
+    });
+
+    it('takes USDT only from chains that have it, and asks the route for USDT', async () => {
+      const link = await links.create(user, { amountNaira: 5000, bankName: 'OPay', accountNumber: '8031234568' });
+      expect((await payLink(link.id, { pay_from: 'base', pay_token: 'USDT', refund_to: REFUND })).json().code).toBe('token_unavailable');
+      const paying = (await payLink(link.id, { pay_from: 'near', pay_token: 'USDT', refund_to: 'agent.near' })).json();
+      expect(paying.payment).toMatchObject({ pay_token: 'USDT', pay_from: 'near' });
+      expect(crossChain.quotes[0]).toMatchObject({ payToken: 'USDT' });
+    });
+
+    it('shows proof links once delivered', async () => {
+      const link = await links.create(user, { amountNaira: 5000, bankName: 'OPay', accountNumber: '8031234568' });
+      await payLink(link.id);
+      crossChain.state = { status: 'delivered', transactions: ['nearhash', `0x${'a'.repeat(64)}`] };
+      payout.state = { state: 'completed' };
+      expect((await open(link.id)).json().payment.links).toEqual([
+        { label: 'NEAR Intents settlement', url: 'https://nearblocks.io/txns/nearhash' },
+        { label: 'Delivery on Base', url: `https://basescan.org/tx/0x${'a'.repeat(64)}` },
+      ]);
+    });
+
+    it('puts a paid link in the maker\'s activity and spreadsheet, and only the maker\'s', async () => {
+      const link = await links.create(user, { amountNaira: 5000, bankName: 'OPay', accountNumber: '8031234568', note: 'Invoice 7' });
+      await payLink(link.id);
+      const wallet = app.get(WalletService, { strict: false });
+      expect((await wallet.activityPage(user.id, 1, 6)).total).toBe(0);
+      crossChain.state = { status: 'delivered', transactions: [`0x${'b'.repeat(64)}`] };
+      payout.state = { state: 'completed' };
+      await open(link.id);
+      const page = await wallet.activityPage(user.id, 1, 6);
+      expect(page.total).toBe(1);
+      expect(page.activity[0]).toMatchObject({ type: 'pay_link', direction: 'in', description: 'Paid by link: Invoice 7', detail: 'OPay ****4568', amount_naira: '₦5,000' });
+      const csv = await wallet.activityCsv(user.id);
+      expect(csv).toContain('Paid by link: Invoice 7');
+      expect(csv).toContain('Money in');
+      expect(csv).not.toContain('8031234568');
+      const other = (await pool.query(`insert into users (provider_subject) values ('did:privy:other') returning id`)).rows[0].id;
+      expect((await wallet.activityPage(other, 1, 6)).total).toBe(0);
     });
 
     it('needs sign-in to make a link, and uses the same limits as paying without a key', async () => {

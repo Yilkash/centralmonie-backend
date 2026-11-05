@@ -3,7 +3,7 @@ import { and, desc, eq, gte, ilike, inArray, isNotNull, lte, or, sql } from 'dri
 import { Chain } from '../chain/chain.service';
 import { chainOfWallet } from '../chain/usdc-chains';
 import { DATABASE, Database } from '../database/database.module';
-import { deposits, nairaDeposits, payments, User } from '../database/schema';
+import { agentPayments, deposits, nairaDeposits, payLinks, payments, User } from '../database/schema';
 import { DAILY_LIMIT_KOBO, formatNaira, formatUsdc, usdcMinorToKobo } from '../money/money';
 import { LimitsService } from '../payments/limits.service';
 import { ExchangeRates } from '../providers/providers';
@@ -160,7 +160,7 @@ export class WalletService {
     const search = filters.search?.trim();
     return and(
       eq(payments.userId, userId),
-      filters.type && filters.type !== 'deposit' ? eq(payments.route, filters.type as 'bank' | 'airtime' | 'data' | 'usdc') : undefined,
+      filters.type && filters.type !== 'deposit' && filters.type !== 'pay_link' ? eq(payments.route, filters.type as 'bank' | 'airtime' | 'data' | 'usdc') : undefined,
       search ? ilike(payments.recipientName, `%${search.replace(/[%_\\]/g, '\\$&')}%`) : undefined,
       filters.from ? gte(payments.createdAt, new Date(`${filters.from}T00:00:00+01:00`)) : undefined,
       filters.to ? lte(payments.createdAt, new Date(`${filters.to}T23:59:59.999+01:00`)) : undefined,
@@ -181,18 +181,35 @@ export class WalletService {
 
   private wants(filters: ActivityFilters) {
     return {
-      payments: filters.direction !== 'in' && filters.type !== 'deposit',
-      deposits: filters.direction !== 'out' && (!filters.type || filters.type === 'deposit'),
+      payments: filters.direction !== 'in' && filters.type !== 'deposit' && filters.type !== 'pay_link',
+      deposits: filters.direction !== 'out' && (!filters.type || filters.type === 'deposit' || filters.type === 'pay_link'),
     };
+  }
+
+  /** Pay links this user made that someone has really paid. */
+  private async paidLinks(userId: string, filters: ActivityFilters) {
+    return this.db
+      .select({ link: payLinks, payment: agentPayments })
+      .from(payLinks)
+      .innerJoin(agentPayments, eq(payLinks.paymentId, agentPayments.id))
+      .where(
+        and(
+          eq(payLinks.userId, userId),
+          eq(agentPayments.status, 'paid'),
+          filters.from ? gte(agentPayments.createdAt, new Date(`${filters.from}T00:00:00+01:00`)) : undefined,
+          filters.to ? lte(agentPayments.createdAt, new Date(`${filters.to}T23:59:59.999+01:00`)) : undefined,
+        ),
+      );
   }
 
   /** Newest first, across payments and money received. */
   private async entries(userId: string, filters: ActivityFilters, limit: number): Promise<ActivityEntry[]> {
     const wanted = this.wants(filters);
+    const links = wanted.deposits && filters.type !== 'deposit' && !filters.search ? await this.paidLinks(userId, filters) : [];
     const [paid, received, naira] = await Promise.all([
       wanted.payments ? this.db.select().from(payments).where(this.paymentConditions(userId, filters)).orderBy(desc(payments.createdAt)).limit(limit) : [],
-      wanted.deposits ? this.db.select().from(deposits).where(this.depositConditions(userId, filters)).orderBy(desc(deposits.createdAt)).limit(limit) : [],
-      wanted.deposits ? this.db.select().from(nairaDeposits).where(and(eq(nairaDeposits.userId, userId), eq(nairaDeposits.status, 'completed'))).orderBy(desc(nairaDeposits.createdAt)).limit(200) : [],
+      wanted.deposits && filters.type !== 'pay_link' ? this.db.select().from(deposits).where(this.depositConditions(userId, filters)).orderBy(desc(deposits.createdAt)).limit(limit) : [],
+      wanted.deposits && filters.type !== 'pay_link' ? this.db.select().from(nairaDeposits).where(and(eq(nairaDeposits.userId, userId), eq(nairaDeposits.status, 'completed'))).orderBy(desc(nairaDeposits.createdAt)).limit(200) : [],
     ]);
     // A naira deposit reaches the wallet as a USDC transfer. Each is matched once, by amount and time.
     const unmatched = [...naira];
@@ -204,6 +221,23 @@ export class WalletService {
       if (index >= 0) naming.set(deposit.id, formatNaira(unmatched.splice(index, 1)[0]!.amountKobo));
     }
     const entries: ActivityEntry[] = [
+      ...links.map(({ link, payment }) => ({
+        id: payment.id,
+        has_receipt: false,
+        kind: 'payment' as const,
+        direction: 'in' as const,
+        type: 'pay_link',
+        type_label: 'Pay link',
+        created_at: payment.paidAt ?? payment.createdAt,
+        description: link.note ? `Paid by link: ${link.note}` : 'Paid by link',
+        detail: link.nearAccount ?? `${link.bankName} ****${link.accountNumber.slice(-4)}`,
+        route: null,
+        recipient: payment.payerName,
+        amount_naira: formatNaira(payment.payoutKobo ?? payment.amountKobo),
+        amount_usdc: formatUsdc(payment.usdcMinor),
+        status: 'completed',
+        tx_hash: [...payment.transactions].reverse().find((hash) => hash.startsWith('0x')) ?? payment.transactions.at(-1) ?? null,
+      })),
       ...paid.map((payment) => ({
         id: payment.id,
         has_receipt: payment.status === 'completed' && !payment.providerReference?.startsWith('simulated-'),
@@ -251,14 +285,15 @@ export class WalletService {
     const count = sql<number>`count(*)::int`;
     const [[paidCount], [receivedCount]] = await Promise.all([
       wanted.payments ? this.db.select({ count }).from(payments).where(this.paymentConditions(userId, filters)) : [{ count: 0 }],
-      wanted.deposits ? this.db.select({ count }).from(deposits).where(this.depositConditions(userId, filters)) : [{ count: 0 }],
+      wanted.deposits && filters.type !== 'pay_link' ? this.db.select({ count }).from(deposits).where(this.depositConditions(userId, filters)) : [{ count: 0 }],
     ]);
     const entries = await this.entries(userId, filters, page * perPage);
+    const linkCount = wanted.deposits && filters.type !== 'deposit' && !filters.search ? (await this.paidLinks(userId, filters)).length : 0;
     return {
       activity: entries.slice((page - 1) * perPage, page * perPage),
       page,
       per_page: perPage,
-      total: (paidCount?.count ?? 0) + (receivedCount?.count ?? 0),
+      total: (paidCount?.count ?? 0) + (receivedCount?.count ?? 0) + linkCount,
     };
   }
 

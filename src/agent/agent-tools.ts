@@ -188,12 +188,19 @@ export const AGENT_TOOLS: Anthropic.Tool[] = [
     input_schema: {
       type: 'object',
       properties: {
-        amount_naira: { type: 'integer', description: 'Whole naira the bank account should receive' },
-        bank_name: { type: 'string' },
-        account_number: { type: 'string', description: 'Exactly 10 digits' },
+        amount_naira: { type: ['integer', 'null'], description: 'Whole naira to be paid. Null if line items give the total.' },
+        bank_name: { type: ['string', 'null'], description: 'The bank to receive naira. Null if a NEAR account receives USDC instead.' },
+        account_number: { type: ['string', 'null'], description: 'Exactly 10 digits, or null if a NEAR account receives USDC instead.' },
+        near_account: { type: ['string', 'null'], description: 'Only if the user wants USDC on NEAR rather than naira, such as ada.near. Otherwise null.' },
         note: { ...nullable('string'), description: 'What it is for, shown to the payer. Null if none was given.' },
+        due_date: { type: ['string', 'null'], description: 'The date it is due, as YYYY-MM-DD. Null if none was given.' },
+        line_items: {
+          type: ['array', 'null'],
+          description: 'The separate things being charged for, if the user listed them. Otherwise null.',
+          items: { type: 'object', properties: { description: { type: 'string' }, amount_naira: { type: 'integer' } }, required: ['description', 'amount_naira'], additionalProperties: false },
+        },
       },
-      required: ['amount_naira', 'bank_name', 'account_number', 'note'],
+      required: ['amount_naira', 'bank_name', 'account_number', 'near_account', 'note', 'due_date', 'line_items'],
       additionalProperties: false,
     },
   },
@@ -434,10 +441,28 @@ export class AgentToolbox {
   }
 
   private async createPayLink(user: User, input: unknown): Promise<ToolOutcome> {
-    const details = z.object({ amount_naira: z.number().int().positive(), bank_name: z.string().min(2), account_number: z.string(), note: z.string().nullable() }).parse(input);
-    const link = await this.payLinks.create(user, { amountNaira: details.amount_naira, bankName: details.bank_name, accountNumber: details.account_number, note: details.note });
+    const details = z
+      .object({
+        amount_naira: z.number().int().positive().nullish(),
+        bank_name: z.string().min(2).nullish(),
+        account_number: z.string().nullish(),
+        near_account: z.string().nullish(),
+        note: z.string().nullish(),
+        due_date: z.string().nullish(),
+        line_items: z.array(z.object({ description: z.string().min(1), amount_naira: z.number().int().positive() })).nullish(),
+      })
+      .parse(input);
+    const link = await this.payLinks.create(user, {
+      amountNaira: details.amount_naira ?? null,
+      bankName: details.bank_name ?? null,
+      accountNumber: details.account_number ?? null,
+      nearAccount: details.near_account ?? null,
+      note: details.note ?? null,
+      dueDate: details.due_date ?? null,
+      lineItems: details.line_items?.map((item) => ({ description: item.description, amountNaira: item.amount_naira })) ?? null,
+    });
     return {
-      result: `Pay link made for ${formatNaira(link.amountKobo)} to ${link.accountName}, ${link.bankName}. Give the user this exact link to send to the payer, and say they can pay from any supported blockchain: ${this.payLinks.url(link)}`,
+      result: `Pay link made for ${formatNaira(link.amountKobo)} to ${link.accountName}${link.nearAccount ? ', paid as USDC on NEAR' : `, ${link.bankName}`}. Give the user this exact link to send to the payer, and say they can pay from any supported blockchain: ${this.payLinks.url(link)}`,
     };
   }
 

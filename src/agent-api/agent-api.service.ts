@@ -1,6 +1,6 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { and, asc, count, eq, gte, inArray, isNull, lt, sql } from 'drizzle-orm';
+import { and, asc, count, desc, eq, gte, inArray, isNull, lt, notInArray, sql } from 'drizzle-orm';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { isAddress } from 'viem';
 import { Env } from '../config/env';
@@ -10,7 +10,7 @@ import { formatNaira, koboToUsdcMinor } from '../money/money';
 import { AuditService } from '../ops/audit.service';
 import { AGENT_STATUSES_THAT_COUNT, GuardsService } from '../ops/guards.service';
 import { AgentPayout, BankLookup, ExchangeRates, PaymentProvider } from '../providers/providers';
-import { CrossChain, PayFrom } from './cross-chain';
+import { CrossChain, PayFrom, PayToken, USDT_ON } from './cross-chain';
 import { NearRelayer, relayProblem, SignedDelegate } from './near-relay';
 
 const QUOTE_LIFETIME_MS = 10 * 60_000;
@@ -76,6 +76,36 @@ export function maskName(name: string): string {
   return name.split(/\s+/).filter(Boolean).map((word) => word.slice(0, 2) + '*'.repeat(Math.max(word.length - 2, 0))).join(' ');
 }
 
+const csvCell = (value: unknown): string => {
+  const text = String(value ?? '');
+  // A leading =, +, - or @ would run as a formula in a spreadsheet.
+  const safe = /^[=+\-@\t\r]/.test(text) ? `'${text}` : text;
+  return /[",\r\n]/.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe;
+};
+
+export function paymentsToCsv(rows: AgentPayment[]): string {
+  const header = ['Date', 'Status', 'Paid to', 'Bank or network', 'Account', 'Naira', 'Paid in', 'Amount paid', 'From network', 'Purpose', 'Reference', 'Transactions'];
+  const lines = rows.map((row) =>
+    [
+      row.createdAt.toISOString(),
+      row.status,
+      row.accountName,
+      row.bankName,
+      `****${row.accountNumber.slice(-4)}`,
+      ((row.payoutKobo ?? row.amountKobo) / 100).toFixed(2),
+      row.payToken,
+      (row.payInMinor / 1_000_000).toFixed(6),
+      row.payFrom,
+      row.purpose ?? '',
+      row.id,
+      row.transactions.join(' '),
+    ]
+      .map(csvCell)
+      .join(','),
+  );
+  return [header.join(','), ...lines].join('\r\n') + '\r\n';
+}
+
 export function validRefundAddress(payFrom: PayFrom, address: string): boolean {
   if (payFrom === 'near') return /^[a-z0-9._-]{2,64}$/.test(address);
   if (payFrom === 'solana') return /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(address);
@@ -92,6 +122,9 @@ export interface QuoteInput {
   payerEmail?: string;
   purpose?: string;
   clientIp?: string;
+  payToken?: PayToken;
+  /** USDC straight to this NEAR account, with no bank payout. */
+  deliverTo?: string;
 }
 
 /** The way in for other AI agents. It uses no AI: ordinary code checks the request and tracks the money. */
@@ -170,6 +203,7 @@ export class AgentApiService {
   /** Reserves nothing and moves nothing. The agent sees the bank's name for the account before it commits. */
   async quote(key: AgentKey, input: QuoteInput): Promise<AgentPayment> {
     const amountKobo = input.amountNaira * 100;
+    if (input.payToken === 'USDT' && !USDT_ON[input.payFrom]) throw new AgentRefusal('token_unavailable', `USDT cannot be used from ${input.payFrom}. Use USDC, or pay from NEAR, Ethereum or Solana.`, 422);
     if (!validRefundAddress(input.payFrom, input.refundTo)) throw new AgentRefusal('invalid_refund_address', `That is not a valid ${input.payFrom} address to refund.`, 400);
 
     const keyless = key.id === KEYLESS_KEY_ID;
@@ -196,17 +230,12 @@ export class AgentApiService {
       throw new AgentRefusal('rate_unavailable', 'We could not get a rate just now. Nothing was sent. Please try again.', 503);
     });
     const usdcMinor = koboToUsdcMinor(amountKobo, rate);
-    const minimum = this.provider.minimumUsdcMinor('bank');
+    const minimum = input.deliverTo ? 0 : this.provider.minimumUsdcMinor('bank');
     if (usdcMinor < minimum) throw new AgentRefusal('below_minimum', `The smallest payment is about ${formatNaira(Math.ceil((minimum * rate) / 10_000 / 100) * 100)}.`, 422);
 
-    // Last of the checks: this asks the bank, and tells the caller a name.
-    const accountName = await this.banks.accountName(input.bankName, input.accountNumber).catch(() => {
-      throw new AgentRefusal('bank_unavailable', 'We could not check that account just now. Nothing was sent. Please try again.', 503);
-    });
-    if (!accountName) throw new AgentRefusal('account_not_found', 'We could not find that account. Check the bank and the account number.', 404);
-
+    const accountName = input.deliverTo ?? (await this.bankName(input));
     const { payInMinor } = await this.crossChain
-      .priceCheck({ payFrom: input.payFrom, usdcMinor, recipient: this.config.get('COLLECTION_ADDRESS', { infer: true }) ?? input.refundTo, refundTo: input.refundTo, deadline: new Date(Date.now() + DEPOSIT_WINDOW_MS) })
+      .priceCheck({ payFrom: input.payFrom, usdcMinor, recipient: input.deliverTo ?? this.config.get('COLLECTION_ADDRESS', { infer: true }) ?? input.refundTo, refundTo: input.refundTo, deadline: new Date(Date.now() + DEPOSIT_WINDOW_MS), payToken: input.payToken ?? 'USDC', toNear: Boolean(input.deliverTo) })
       .catch((error: Error) => {
         this.logger.warn(`price check failed: ${error.message.slice(0, 200)}`);
         throw new AgentRefusal('route_unavailable', 'We could not price that route just now. Nothing was sent. Please try again.', 503);
@@ -224,6 +253,8 @@ export class AgentApiService {
         accountNumber: input.accountNumber,
         accountName,
         payFrom: input.payFrom,
+        payToken: input.payToken ?? 'USDC',
+        deliverTo: input.deliverTo ?? null,
         refundTo: input.refundTo,
         payerName: input.payerName ?? null,
         payerEmail: input.payerEmail ?? null,
@@ -233,6 +264,16 @@ export class AgentApiService {
       })
       .returning();
     return row!;
+  }
+
+  private async bankName(input: QuoteInput): Promise<string> {
+    // Last of the checks: this asks the bank, and tells the caller a name.
+    const accountName = await this.banks.accountName(input.bankName, input.accountNumber).catch(() => {
+      throw new AgentRefusal('bank_unavailable', 'We could not check that account just now. Nothing was sent. Please try again.', 503);
+    });
+    if (!accountName) throw new AgentRefusal('account_not_found', 'We could not find that account. Check the bank and the account number.', 404);
+
+    return accountName;
   }
 
   /**
@@ -266,13 +307,16 @@ export class AgentApiService {
     let refused: AgentRefusal | null = null;
     try {
       const refundOnBase = isAddress(payment.refundTo) ? payment.refundTo : null;
-      const deposit = await this.payout.deposit({
-        reference: payment.id,
-        route: 'bank',
-        amountKobo: payment.amountKobo,
-        usdcMinor: payment.usdcMinor,
-        destination: { bankName: payment.bankName, accountNumber: payment.accountNumber, accountName: payment.accountName, ...(refundOnBase ? { refundAddress: refundOnBase } : {}) },
-      });
+      // Going straight to a NEAR account, there is no bank partner to set up.
+      const deposit = payment.deliverTo
+        ? { address: payment.deliverTo, usdcMinor: payment.usdcMinor, destinationKobo: null, expiresAt: null }
+        : await this.payout.deposit({
+            reference: payment.id,
+            route: 'bank',
+            amountKobo: payment.amountKobo,
+            usdcMinor: payment.usdcMinor,
+            destination: { bankName: payment.bankName, accountNumber: payment.accountNumber, accountName: payment.accountName, ...(refundOnBase ? { refundAddress: refundOnBase } : {}) },
+          });
       if (deposit.destinationKobo !== null && deposit.destinationKobo < payment.amountKobo * PRICE_TOLERANCE) {
         // Nothing can reach the partner's address without the deposit address below, so nothing is at risk.
         refused = new AgentRefusal('price_changed', 'The rate moved. Nothing was sent. Ask for a new quote.', 409);
@@ -284,7 +328,7 @@ export class AgentApiService {
       const routeEnds = Math.min(Date.now() + ROUTE_DEADLINE_MS, partnerEnds);
       if (routeEnds - Date.now() < SHORTEST_ROUTE_MS) throw new Error('The partner gave too little time for the deposit');
       const deadline = new Date(Math.min(Date.now() + DEPOSIT_WINDOW_MS, routeEnds - 5 * 60_000));
-      const quote = await this.crossChain.quote({ payFrom: payment.payFrom as PayFrom, usdcMinor: payment.usdcMinor, recipient: deposit.address, refundTo: payment.refundTo, deadline: new Date(routeEnds) });
+      const quote = await this.crossChain.quote({ payFrom: payment.payFrom as PayFrom, usdcMinor: payment.usdcMinor, recipient: deposit.address, refundTo: payment.refundTo, deadline: new Date(routeEnds), payToken: payment.payToken as PayToken, toNear: Boolean(payment.deliverTo) });
       const [row] = await this.db
         .update(agentPayments)
         .set({ status: 'awaiting_deposit', payoutAddress: deposit.address, payoutKobo: deposit.destinationKobo, depositAddress: quote.depositAddress, payInMinor: quote.payInMinor, depositDeadline: deadline, updatedAt: new Date() })
@@ -352,6 +396,12 @@ export class AgentApiService {
     }
   }
 
+  /** A key's payments as a spreadsheet an accountant can read. Account numbers stay masked. */
+  async paymentsCsv(key: AgentKey): Promise<string> {
+    const rows = await this.db.select().from(agentPayments).where(and(eq(agentPayments.keyId, key.id), notInArray(agentPayments.status, ['quoted', 'creating']))).orderBy(desc(agentPayments.createdAt)).limit(5000);
+    return paymentsToCsv(rows);
+  }
+
   /** For the background job. */
   async reconcile(): Promise<void> {
     await this.db
@@ -406,6 +456,7 @@ export class AgentApiService {
           break;
       }
     }
+    if (payment.deliverTo) return { status: 'paid', paidAt: new Date(), failureReason: null, transactions };
     const paid = await this.payout.status(payment.id);
     if (paid.state === 'completed') return { status: 'paid', paidAt: new Date(), failureReason: null, transactions };
     if (paid.state === 'failed') return { status: 'needs_support', failureReason: 'The USDC arrived, but the bank payment failed. Do not send again.', transactions };

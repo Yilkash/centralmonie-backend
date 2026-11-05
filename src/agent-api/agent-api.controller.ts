@@ -1,4 +1,4 @@
-import { Body, CanActivate, Controller, createParamDecorator, Delete, ExecutionContext, Get, Headers, HttpCode, HttpException, Injectable, NotFoundException, Param, ParseUUIDPipe, Post, Req, Res, UseFilters, UseGuards, Catch, ExceptionFilter, ArgumentsHost } from '@nestjs/common';
+import { Body, CanActivate, Controller, createParamDecorator, Delete, ExecutionContext, Get, Header, Headers, HttpCode, HttpException, Injectable, NotFoundException, Param, ParseUUIDPipe, Post, Req, Res, UseFilters, UseGuards, Catch, ExceptionFilter, ArgumentsHost } from '@nestjs/common';
 import { z } from 'zod';
 import { AuthGuard } from '../auth/auth.guard';
 import { CurrentUser } from '../auth/current-user.decorator';
@@ -131,6 +131,12 @@ export class AgentApiController {
     const parsed = paymentBody.safeParse(body);
     if (!parsed.success) throw invalid(parsed.error);
     return presentPayment(await this.agents.accept(key, parsed.data.quote_id));
+  }
+
+  @Get('payments.csv')
+  @Header('content-type', 'text/csv; charset=utf-8')
+  async csv(@CurrentKey() key: AgentKey) {
+    return this.agents.paymentsCsv(key);
   }
 
   @Get('payments/:id')
@@ -270,8 +276,16 @@ export class AgentKeysController {
   }
 }
 
-const payLinkBody = z.object({ amount_naira: z.number().int().positive(), bank_name: z.string().trim().min(2).max(80), account_number: z.string().regex(/^\d{10}$/), note: z.string().trim().max(200).nullish() });
-const payerBody = z.object({ pay_from: z.enum(Object.keys(PAY_FROM) as [PayFrom, ...PayFrom[]]), refund_to: z.string().trim().min(2).max(100), payer_name: z.string().trim().max(120).nullish() });
+const payLinkBody = z.object({
+  amount_naira: z.number().int().positive().optional(),
+  bank_name: z.string().trim().min(2).max(80).nullish(),
+  account_number: z.string().regex(/^\d{10}$/).nullish(),
+  near_account: z.string().trim().min(2).max(70).nullish(),
+  note: z.string().trim().max(200).nullish(),
+  due_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullish(),
+  line_items: z.array(z.object({ description: z.string().trim().min(1).max(120), amount_naira: z.number().int().positive() })).max(20).nullish(),
+});
+const payerBody = z.object({ pay_from: z.enum(Object.keys(PAY_FROM) as [PayFrom, ...PayFrom[]]), pay_token: z.enum(['USDC', 'USDT']).default('USDC'), refund_to: z.string().trim().min(2).max(100), payer_name: z.string().trim().max(120).nullish() });
 
 @Controller('v1/pay-links')
 @UseFilters(AgentRefusalFilter)
@@ -284,7 +298,8 @@ export class PayLinksController {
   async create(@CurrentUser() user: User, @Body() body: unknown) {
     const parsed = payLinkBody.safeParse(body);
     if (!parsed.success) throw invalid(parsed.error);
-    const link = await this.links.create(user, { amountNaira: parsed.data.amount_naira, bankName: parsed.data.bank_name, accountNumber: parsed.data.account_number, note: parsed.data.note ?? null });
+    const { amount_naira, bank_name, account_number, near_account, note, due_date, line_items } = parsed.data;
+    const link = await this.links.create(user, { amountNaira: amount_naira ?? null, bankName: bank_name ?? null, accountNumber: account_number ?? null, nearAccount: near_account ?? null, note: note ?? null, dueDate: due_date ?? null, lineItems: line_items?.map((item) => ({ description: item.description, amountNaira: item.amount_naira })) ?? null });
     return presentLink(link, this.links.url(link));
   }
 }
@@ -305,7 +320,7 @@ export class PublicPayLinksController {
   async pay(@Param('id', ParseUUIDPipe) id: string, @Body() body: unknown, @Req() request: { ip: string }) {
     const parsed = payerBody.safeParse(body);
     if (!parsed.success) throw invalid(parsed.error);
-    await this.links.pay(id, { payFrom: parsed.data.pay_from, refundTo: parsed.data.refund_to, clientIp: request.ip, ...(parsed.data.payer_name ? { payerName: parsed.data.payer_name } : {}) });
+    await this.links.pay(id, { payFrom: parsed.data.pay_from, payToken: parsed.data.pay_token, refundTo: parsed.data.refund_to, clientIp: request.ip, ...(parsed.data.payer_name ? { payerName: parsed.data.payer_name } : {}) });
     return presentPublicLink(await this.links.view(id));
   }
 }

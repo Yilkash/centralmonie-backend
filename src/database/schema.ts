@@ -344,6 +344,9 @@ export const agentPayments = pgTable(
     accountNumber: text('account_number').notNull(),
     accountName: text('account_name').notNull(),
     payFrom: text('pay_from').notNull(),
+    payToken: text('pay_token').notNull().default('USDC'),
+    /** Set when USDC goes straight to this NEAR account, with no bank payout. */
+    deliverTo: text('deliver_to'),
     refundTo: text('refund_to').notNull(),
     quoteExpiresAt: timestamp('quote_expires_at', { withTimezone: true }).notNull(),
     payoutAddress: text('payout_address'),
@@ -382,6 +385,11 @@ export const payLinks = pgTable(
     accountNumber: text('account_number').notNull(),
     accountName: text('account_name').notNull(),
     note: text('note'),
+    /** Invoice details, shown to the payer. They change nothing about the money. */
+    dueDate: text('due_date'),
+    lineItems: jsonb('line_items').$type<{ description: string; amountNaira: number }[]>(),
+    /** Set when the receiver wants USDC on this NEAR account instead of naira in a bank. */
+    nearAccount: text('near_account'),
     paymentId: uuid('payment_id').references(() => agentPayments.id),
     expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),

@@ -6,7 +6,8 @@ import { DATABASE, Database } from '../database/database.module';
 import { AgentPayment, PayLink, payLinks, User } from '../database/schema';
 import { BankLookup } from '../providers/providers';
 import { AgentApiService, AgentRefusal, maskName } from './agent-api.service';
-import { PayFrom } from './cross-chain';
+import { isNearAccount } from '../chain/usdc-chains';
+import { PayFrom, PayToken } from './cross-chain';
 
 const LINK_LIFETIME_MS = 14 * 24 * 60 * 60_000;
 const LINKS_PER_DAY = 20;
@@ -14,8 +15,19 @@ const MAX_LINK_NAIRA = 50_000;
 /** A payment that has finished without paying the bank, so the link can be tried again. */
 const CAN_RETRY = new Set(['refunded', 'expired', 'quoted']);
 
+export interface LinkInput {
+  amountNaira?: number | null;
+  bankName?: string | null;
+  accountNumber?: string | null;
+  nearAccount?: string | null;
+  note?: string | null;
+  dueDate?: string | null;
+  lineItems?: { description: string; amountNaira: number }[] | null;
+}
+
 export interface PayerDetails {
   payFrom: PayFrom;
+  payToken?: PayToken;
   refundTo: string;
   payerName?: string;
   clientIp?: string;
@@ -41,22 +53,36 @@ export class PayLinksService {
   }
 
   /** Makes a link and moves nothing, so this is safe for the chat agent to do. */
-  async create(user: User, input: { amountNaira: number; bankName: string; accountNumber: string; note?: string | null }): Promise<PayLink> {
-    if (!Number.isInteger(input.amountNaira) || input.amountNaira <= 0) throw new AgentRefusal('invalid_request', 'A pay link needs a whole naira amount.', 400);
-    if (input.amountNaira > MAX_LINK_NAIRA) throw new AgentRefusal('over_payment_limit', `The most for one pay link is ₦${MAX_LINK_NAIRA.toLocaleString('en-NG')}.`, 422);
-    if (!/^\d{10}$/.test(input.accountNumber)) throw new AgentRefusal('invalid_request', 'A bank account number has 10 digits.', 400);
+  async create(user: User, input: LinkInput): Promise<PayLink> {
+    const items = input.lineItems?.length ? input.lineItems : null;
+    const total = items ? items.reduce((sum, item) => sum + item.amountNaira, 0) : null;
+    const amountNaira = input.amountNaira ?? total;
+    if (!amountNaira || !Number.isInteger(amountNaira) || amountNaira <= 0) throw new AgentRefusal('invalid_request', 'A pay link needs a whole naira amount.', 400);
+    if (total !== null && total !== amountNaira) throw new AgentRefusal('invalid_request', `The line items add up to ₦${total.toLocaleString('en-NG')}, not ₦${amountNaira.toLocaleString('en-NG')}.`, 400);
+    if (amountNaira > MAX_LINK_NAIRA) throw new AgentRefusal('over_payment_limit', `The most for one pay link is ₦${MAX_LINK_NAIRA.toLocaleString('en-NG')}.`, 422);
+    if (input.dueDate && (Number.isNaN(new Date(`${input.dueDate}T23:59:59+01:00`).getTime()) || new Date(`${input.dueDate}T23:59:59+01:00`).getTime() < Date.now())) throw new AgentRefusal('invalid_request', 'The due date has already passed.', 400);
     const [{ made } = { made: 0 }] = await this.db
       .select({ made: count() })
       .from(payLinks)
       .where(and(eq(payLinks.userId, user.id), gte(payLinks.createdAt, sql`now() - interval '1 day'`)));
     if (made >= LINKS_PER_DAY) throw new AgentRefusal('too_many_requests', 'You have made too many pay links today. Try again tomorrow.', 429);
-    const accountName = await this.banks.accountName(input.bankName, input.accountNumber).catch(() => {
-      throw new AgentRefusal('bank_unavailable', 'We could not check that account just now. Please try again.', 503);
-    });
-    if (!accountName) throw new AgentRefusal('account_not_found', 'We could not find that account. Check the bank and the account number.', 404);
+
+    let bank: { bankName: string; accountNumber: string; accountName: string };
+    if (input.nearAccount) {
+      if (!isNearAccount(input.nearAccount)) throw new AgentRefusal('invalid_request', 'That is not a valid NEAR account. It should look like name.near.', 400);
+      bank = { bankName: 'NEAR', accountNumber: input.nearAccount, accountName: input.nearAccount };
+    } else {
+      if (!input.bankName || !input.accountNumber) throw new AgentRefusal('invalid_request', 'A pay link needs a bank and account number, or a NEAR account.', 400);
+      if (!/^\d{10}$/.test(input.accountNumber)) throw new AgentRefusal('invalid_request', 'A bank account number has 10 digits.', 400);
+      const accountName = await this.banks.accountName(input.bankName, input.accountNumber).catch(() => {
+        throw new AgentRefusal('bank_unavailable', 'We could not check that account just now. Please try again.', 503);
+      });
+      if (!accountName) throw new AgentRefusal('account_not_found', 'We could not find that account. Check the bank and the account number.', 404);
+      bank = { bankName: input.bankName, accountNumber: input.accountNumber, accountName };
+    }
     const [link] = await this.db
       .insert(payLinks)
-      .values({ userId: user.id, amountKobo: input.amountNaira * 100, bankName: input.bankName, accountNumber: input.accountNumber, accountName, note: input.note?.trim() || null, expiresAt: new Date(Date.now() + LINK_LIFETIME_MS) })
+      .values({ userId: user.id, amountKobo: amountNaira * 100, ...bank, note: input.note?.trim() || null, dueDate: input.dueDate ?? null, lineItems: items, nearAccount: input.nearAccount ?? null, expiresAt: new Date(Date.now() + LINK_LIFETIME_MS) })
       .returning();
     return link!;
   }
@@ -88,6 +114,8 @@ export class PayLinksService {
       accountNumber: link.accountNumber,
       payFrom: payer.payFrom,
       refundTo: payer.refundTo,
+      ...(payer.payToken ? { payToken: payer.payToken } : {}),
+      ...(link.nearAccount ? { deliverTo: link.nearAccount } : {}),
       payerName: payer.payerName || 'Pay link payer',
       purpose: link.note ?? 'Pay link',
       ...(payer.clientIp ? { clientIp: payer.clientIp } : {}),
@@ -111,26 +139,44 @@ export const presentLink = (link: PayLink, url: string) => ({
   account_number: `****${link.accountNumber.slice(-4)}`,
   account_name: link.accountName,
   note: link.note,
+  due_date: link.dueDate,
+  line_items: link.lineItems,
   expires_at: link.expiresAt,
 });
+
+/** The first NEAR step and the delivery on Base or NEAR, so a payer can check it for themselves. */
+function proofLinks(payment: AgentPayment): { label: string; url: string }[] {
+  const links: { label: string; url: string }[] = [];
+  const near = payment.transactions.find((hash) => !hash.startsWith('0x') && hash !== 'simulated');
+  if (near) links.push({ label: 'NEAR Intents settlement', url: `https://nearblocks.io/txns/${near}` });
+  const base = [...payment.transactions].reverse().find((hash) => /^0x[0-9a-f]{64}$/i.test(hash));
+  if (base && !payment.deliverTo) links.push({ label: 'Delivery on Base', url: `https://basescan.org/tx/${base}` });
+  return links;
+}
 
 export const presentPublicLink = ({ link, payment, open }: { link: PayLink; payment: AgentPayment | null; open: boolean }) => ({
   id: link.id,
   amount_naira: link.amountKobo / 100,
-  to: maskName(link.accountName),
+  to: link.nearAccount ?? maskName(link.accountName),
   bank_name: link.bankName,
-  account_number: `****${link.accountNumber.slice(-4)}`,
+  account_number: link.nearAccount ? null : `****${link.accountNumber.slice(-4)}`,
+  receives: link.nearAccount ? 'USDC on NEAR' : 'naira',
   note: link.note,
+  due_date: link.dueDate,
+  overdue: Boolean(link.dueDate && new Date(`${link.dueDate}T23:59:59+01:00`).getTime() < Date.now()),
+  line_items: link.lineItems?.map((item) => ({ description: item.description, amount_naira: item.amountNaira })) ?? null,
   open,
   paid: payment?.status === 'paid',
   payment: payment && {
     id: payment.id,
     status: payment.status,
     pay_from: payment.payFrom,
+    pay_token: payment.payToken,
     pay_usdc: (payment.payInMinor / 1_000_000).toFixed(6),
     deposit_address: payment.status === 'awaiting_deposit' ? payment.depositAddress : null,
     deposit_deadline: payment.status === 'awaiting_deposit' ? payment.depositDeadline : null,
     failure_reason: payment.failureReason,
     paid_at: payment.paidAt,
+    links: proofLinks(payment),
   },
 });

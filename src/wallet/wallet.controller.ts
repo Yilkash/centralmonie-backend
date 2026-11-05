@@ -10,7 +10,7 @@ const day = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine((value) => !Number.is
 const activityQuery = z.object({
   page: z.coerce.number().int().min(1).max(10_000).default(1),
   direction: z.enum(['in', 'out']).optional(),
-  type: z.enum(['bank', 'airtime', 'data', 'usdc', 'deposit']).optional(),
+  type: z.enum(['bank', 'airtime', 'data', 'usdc', 'deposit', 'pay_link']).optional(),
   search: z.string().max(80).optional(),
   from: day.optional(),
   to: day.optional(),

@@ -10,6 +10,14 @@ export const PAY_FROM = {
 } as const;
 export type PayFrom = keyof typeof PAY_FROM;
 
+/** USDT is accepted only where NEAR Intents lists it, checked on 5 Nov 2026. Each still needs a real delivery test. */
+export const USDT_ON: Partial<Record<PayFrom, string>> = {
+  near: 'nep141:usdt.tether-token.near',
+  ethereum: 'nep141:eth-0xdac17f958d2ee523a2206206994597c13d831ec7.omft.near',
+  solana: 'nep141:sol-c800a4bd850783ccb82c2b2c7e84175443606352.omft.near',
+};
+export type PayToken = 'USDC' | 'USDT';
+
 export interface CrossChainRequest {
   payFrom: PayFrom;
   /** Exactly this much USDC must arrive at `recipient` on Base. */
@@ -17,6 +25,10 @@ export interface CrossChainRequest {
   recipient: string;
   refundTo: string;
   deadline: Date;
+  /** Paying in something other than USDC. */
+  payToken?: PayToken;
+  /** Delivering USDC on NEAR rather than Base. */
+  toNear?: boolean;
 }
 
 export interface CrossChainQuote {
@@ -148,9 +160,9 @@ export class OneClickCrossChain extends CrossChain {
       dry,
       swapType: 'EXACT_OUTPUT',
       slippageTolerance: SLIPPAGE_BPS,
-      originAsset: PAY_FROM[request.payFrom],
+      originAsset: request.payToken === 'USDT' ? USDT_ON[request.payFrom] : PAY_FROM[request.payFrom],
       depositType: 'ORIGIN_CHAIN',
-      destinationAsset: BASE_USDC,
+      destinationAsset: request.toNear ? PAY_FROM.near : BASE_USDC,
       amount: String(request.usdcMinor),
       refundTo: request.refundTo,
       refundType: 'ORIGIN_CHAIN',
