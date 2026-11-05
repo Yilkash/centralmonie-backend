@@ -64,7 +64,7 @@ export const presentPayment = (payment: AgentPayment) => ({
 const invalid = (error: z.ZodError) => new AgentRefusal('invalid_request', error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`).join('; '), 400);
 
 @Catch(AgentRefusal)
-class AgentRefusalFilter implements ExceptionFilter {
+export class AgentRefusalFilter implements ExceptionFilter {
   catch(refusal: AgentRefusal, host: ArgumentsHost) {
     host.switchToHttp().getResponse<{ status(code: number): { send(body: unknown): void } }>().status(refusal.httpStatus).send({ code: refusal.code, message: refusal.message });
   }

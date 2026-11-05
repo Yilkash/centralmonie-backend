@@ -4,7 +4,7 @@ import { and, count, desc, eq, gte, isNull, sql } from 'drizzle-orm';
 import { isAddress } from 'viem';
 import { Env } from '../config/env';
 import { DATABASE, Database } from '../database/database.module';
-import { AgentPayment, agentPayments, PayLink, payLinks, User } from '../database/schema';
+import { AgentPayment, agentPayments, merchantKeys, PayLink, payLinks, User } from '../database/schema';
 import { BankLookup } from '../providers/providers';
 import { AgentApiService, AgentRefusal, maskName } from './agent-api.service';
 import { addressRefusal } from '../chain/address-check';
@@ -37,6 +37,13 @@ export interface LinkInput {
   lineItems?: { description: string; amountNaira: number }[] | null;
 }
 
+/** For an invoice a shop made through the merchant API. The shop's own daily limit applies instead of the user's. */
+export interface MerchantLink {
+  keyId: string;
+  reference: string;
+  returnUrl: string | null;
+}
+
 export interface PayerDetails {
   payFrom: PayFrom;
   payToken?: PayToken;
@@ -66,7 +73,7 @@ export class PayLinksService {
   }
 
   /** Makes a link and moves nothing, so this is safe for the chat agent to do. */
-  async create(user: User, input: LinkInput): Promise<PayLink> {
+  async create(user: User, input: LinkInput, merchant?: MerchantLink): Promise<PayLink> {
     const items = input.lineItems?.length ? input.lineItems : null;
     const total = items ? items.reduce((sum, item) => sum + item.amountNaira, 0) : null;
     const amountNaira = input.amountNaira ?? total;
@@ -80,7 +87,7 @@ export class PayLinksService {
       .select({ made: count() })
       .from(payLinks)
       .where(and(eq(payLinks.userId, user.id), gte(payLinks.createdAt, sql`now() - interval '1 day'`)));
-    if (made >= LINKS_PER_DAY) throw new AgentRefusal('too_many_requests', 'You have made too many pay links today. Try again tomorrow.', 429);
+    if (!merchant && made >= LINKS_PER_DAY) throw new AgentRefusal('too_many_requests', 'You have made too many pay links today. Try again tomorrow.', 429);
 
     if (input.toMyWallet && !user.walletAddress) throw new AgentRefusal('wallet_not_ready', 'Your wallet is still being set up. Please try again in a moment.', 409);
     const usdcAddress = input.nearAccount ? null : input.toMyWallet ? user.walletAddress : input.usdcAddress?.trim() || null;
@@ -105,7 +112,7 @@ export class PayLinksService {
     }
     const [link] = await this.db
       .insert(payLinks)
-      .values({ userId: user.id, amountKobo: amountNaira * 100, ...bank, note: input.note?.trim() || null, dueDate: input.dueDate ?? null, lineItems: items, nearAccount: input.nearAccount ?? null, usdcAddress, expiresAt: new Date(Math.max(Date.now() + LINK_LIFETIME_MS, (dueEnds ?? 0) + AFTER_DUE_MS)) })
+      .values({ userId: user.id, amountKobo: amountNaira * 100, ...bank, note: input.note?.trim() || null, dueDate: input.dueDate ?? null, lineItems: items, nearAccount: input.nearAccount ?? null, usdcAddress, merchantKeyId: merchant?.keyId ?? null, reference: merchant?.reference ?? null, returnUrl: merchant?.returnUrl ?? null, expiresAt: new Date(Math.max(Date.now() + LINK_LIFETIME_MS, (dueEnds ?? 0) + AFTER_DUE_MS)) })
       .returning();
     return link!;
   }
@@ -117,10 +124,11 @@ export class PayLinksService {
   }
 
   /** What a payer sees, with its latest payment. Anyone with the link can read this, so the name is partly hidden. */
-  async view(id: string): Promise<{ link: PayLink; payment: AgentPayment | null; open: boolean }> {
+  async view(id: string): Promise<{ link: PayLink; payment: AgentPayment | null; open: boolean; merchantName: string | null }> {
     const link = await this.find(id);
     const payment = link.paymentId ? await this.agents.get(await this.agents.keylessKey(), link.paymentId) : null;
-    return { link, payment, open: this.agents.keylessOpen && !link.cancelledAt && link.expiresAt.getTime() > Date.now() && payment?.status !== 'paid' };
+    const [shop] = link.merchantKeyId ? await this.db.select({ name: merchantKeys.name }).from(merchantKeys).where(eq(merchantKeys.id, link.merchantKeyId)) : [];
+    return { link, payment, merchantName: shop?.name ?? null, open: this.agents.keylessOpen && !link.cancelledAt && link.expiresAt.getTime() > Date.now() && payment?.status !== 'paid' };
   }
 
   /** The user's own links, newest first, each with its latest payment. */
@@ -207,8 +215,10 @@ function proofLinks(payment: AgentPayment): { label: string; url: string }[] {
   return links;
 }
 
-export const presentPublicLink = ({ link, payment, open }: { link: PayLink; payment: AgentPayment | null; open: boolean }) => ({
+export const presentPublicLink = ({ link, payment, open, merchantName = null }: { link: PayLink; payment: AgentPayment | null; open: boolean; merchantName?: string | null }) => ({
   id: link.id,
+  merchant: merchantName,
+  return_url: link.returnUrl,
   expires_at: link.expiresAt,
   amount_naira: link.amountKobo / 100,
   to: link.nearAccount ?? link.usdcAddress ?? maskName(link.accountName),

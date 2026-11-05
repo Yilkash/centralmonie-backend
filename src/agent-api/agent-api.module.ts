@@ -10,14 +10,18 @@ import { AuthModule } from '../auth/auth.module';
 import { AgentApiController, AgentKeyGuard, AgentKeysController, AgentX402Controller, PayLinksController, PublicPayLinksController, X402Guard } from './agent-api.controller';
 import { AgentApiService } from './agent-api.service';
 import { PayLinksService } from './pay-links.service';
+import { MerchantController, MerchantKeyGuard, MerchantKeysController } from './merchant.controller';
+import { MerchantService } from './merchant.service';
 import { CrossChainModule } from './cross-chain.module';
 
 @Module({
   imports: [AuthModule, CrossChainModule, OpsModule, PaymentsModule, ProvidersModule],
-  controllers: [AgentApiController, AgentX402Controller, AgentKeysController, PayLinksController, PublicPayLinksController],
+  controllers: [AgentApiController, AgentX402Controller, AgentKeysController, PayLinksController, PublicPayLinksController, MerchantController, MerchantKeysController],
   providers: [
     AgentApiService,
     PayLinksService,
+    MerchantService,
+    MerchantKeyGuard,
     AgentKeyGuard,
     X402Guard,
     {
@@ -36,9 +40,11 @@ export class AgentApiModule implements OnModuleInit {
   constructor(
     private readonly worker: WorkerService,
     private readonly agents: AgentApiService,
+    private readonly merchants: MerchantService,
   ) {}
 
   onModuleInit(): void {
     if (this.agents.open) this.worker.register({ name: 'agent-payments', run: () => this.agents.reconcile() });
+    this.worker.register({ name: 'merchant-notices', run: () => this.merchants.reconcile() });
   }
 }

@@ -4,6 +4,7 @@ import { Pool } from 'pg';
 import { AgentApiService, agentApiOpen, ipGroup, KEYLESS_KEY_ID, maskName, paymentsToCsv, validRefundAddress } from '../src/agent-api/agent-api.service';
 import { NearRelayer, SignedDelegate, USDC_ON_NEAR } from '../src/agent-api/near-relay';
 import { PayLinksService, presentOwnLink } from '../src/agent-api/pay-links.service';
+import { MerchantService, signNotice } from '../src/agent-api/merchant.service';
 import { operationToken, tokenProblem } from '../src/agent-api/x402';
 import { AgentPayment, User } from '../src/database/schema';
 import { CrossChain, CrossChainRequest, CrossChainState } from '../src/agent-api/cross-chain';
@@ -562,6 +563,127 @@ describe('Agent API', () => {
       const { id } = await accepted();
       relayer.delegate = null;
       expect((await relay(id)).json().code).toBe('invalid_request');
+    });
+  });
+
+  describe('merchant checkout', () => {
+    let merchants: MerchantService;
+    let shopKey: string;
+    let secret: string;
+    let keyId: string;
+    const notices: { url: string; headers: Record<string, string>; body: string }[] = [];
+    let shopAnswers = 200;
+    const open = (id: string) => app.inject({ method: 'GET', url: `/v1/public/pay-links/${id}` });
+    const payLink = (id: string) => app.inject({ method: 'POST', url: `/v1/public/pay-links/${id}/pay`, remoteAddress: '10.8.8.8', payload: { pay_from: 'arbitrum', refund_to: REFUND } });
+    const shop = (method: 'GET' | 'POST', url: string, body?: object, token: string | null = shopKey) =>
+      app.inject({ method, url, ...(token ? { headers: { authorization: `Bearer ${token}` } } : {}), ...(body ? { payload: body } : {}) });
+    const ORDER = { reference: 'order-1001', line_items: [{ description: 'Jollof rice', amount_naira: 3000 }, { description: 'Delivery', amount_naira: 1000 }], note: 'Order 1001', return_url: 'https://shop.example/thanks?order=1001' };
+
+    beforeEach(async () => {
+      merchants = app.get(MerchantService, { strict: false });
+      await pool.query('TRUNCATE users CASCADE');
+      await pool.query(`insert into users (provider_subject, email) values ('did:privy:shop', 'owner@shop.example')`);
+      notices.length = 0;
+      shopAnswers = 200;
+      merchants.fetchFn = (async (url: string, init: RequestInit) => {
+        notices.push({ url, headers: init.headers as Record<string, string>, body: init.body as string });
+        return new Response(null, { status: shopAnswers });
+      }) as unknown as typeof fetch;
+      const made = await merchants.createKey({ userEmail: 'owner@shop.example', name: 'Mama Put Kitchen', payout: { bankName: 'OPay', accountNumber: '8031234568' }, returnOrigins: ['https://shop.example'], webhookUrl: 'https://shop.example/hooks/10kobo' });
+      shopKey = made.key;
+      secret = made.webhookSecret!;
+      keyId = made.id;
+    });
+
+    it('lets a shop make an invoice with its key, and the payer sees the shop and a way back', async () => {
+      const made = await shop('POST', '/v1/merchant/invoices', ORDER);
+      expect(made.statusCode).toBe(200);
+      const invoice = made.json();
+      expect(invoice).toMatchObject({ reference: 'order-1001', status: 'unpaid', amount_naira: 4000, receives: 'naira, OPay ****4568', return_url: 'https://shop.example/thanks?order=1001' });
+      expect(invoice.checkout_url).toContain(`/pay/${invoice.id}`);
+      expect((await open(invoice.id)).json()).toMatchObject({ merchant: 'Mama Put Kitchen', return_url: 'https://shop.example/thanks?order=1001', amount_naira: 4000, open: true });
+      expect((await shop('GET', `/v1/merchant/invoices/${invoice.id}`)).json().status).toBe('unpaid');
+    });
+
+    it('gives the same invoice for the same reference, and refuses that reference for another amount', async () => {
+      const first = (await shop('POST', '/v1/merchant/invoices', ORDER)).json();
+      const again = await Promise.all([shop('POST', '/v1/merchant/invoices', ORDER), shop('POST', '/v1/merchant/invoices', ORDER)]);
+      expect(again.map((response) => response.json().id)).toEqual([first.id, first.id]);
+      const changed = await shop('POST', '/v1/merchant/invoices', { reference: 'order-1001', amount_naira: 9000 });
+      expect(changed.statusCode).toBe(409);
+      expect(changed.json().code).toBe('reference_used');
+    });
+
+    it('refuses a bad key, a revoked key, a return address on another website, and another shop\'s invoice', async () => {
+      expect((await shop('POST', '/v1/merchant/invoices', ORDER, 'mk_wrong')).statusCode).toBe(401);
+      expect((await shop('POST', '/v1/merchant/invoices', ORDER, null)).statusCode).toBe(401);
+      const elsewhere = await shop('POST', '/v1/merchant/invoices', { ...ORDER, reference: 'x', return_url: 'https://evil.example/' });
+      expect(elsewhere.json()).toMatchObject({ code: 'invalid_request', message: 'The return address must be on a website registered for this key.' });
+      expect((await shop('POST', '/v1/merchant/invoices', { ...ORDER, reference: 'y', return_url: 'http://shop.example/' })).json().message).toContain('https');
+
+      const invoice = (await shop('POST', '/v1/merchant/invoices', ORDER)).json();
+      const other = await merchants.createKey({ userEmail: 'owner@shop.example', name: 'Other shop', payout: { toMyWallet: true } });
+      expect((await shop('GET', `/v1/merchant/invoices/${invoice.id}`, undefined, other.key)).statusCode).toBe(404);
+      expect((await shop('POST', `/v1/merchant/invoices/${invoice.id}/cancel`, undefined, other.key)).statusCode).toBe(404);
+      await merchants.revokeKey(keyId);
+      expect((await shop('GET', `/v1/merchant/invoices/${invoice.id}`)).statusCode).toBe(401);
+    });
+
+    it('pays out only where the key says, whatever the shop sends', async () => {
+      const invoice = (await shop('POST', '/v1/merchant/invoices', { ...ORDER, bank_name: 'Kuda', account_number: '0000000001', usdc_address: '0x70997970C51812dc3A010C7d01b50e0d17dc79C8' })).json();
+      expect(invoice.receives).toBe('naira, OPay ****4568');
+    });
+
+    it('tells the shop once when an invoice is paid, signed so the shop can check it, and retries when the shop is down', async () => {
+      const invoice = (await shop('POST', '/v1/merchant/invoices', ORDER)).json();
+      await merchants.reconcile();
+      expect(notices).toHaveLength(0);
+
+      await payLink(invoice.id);
+      crossChain.state = { status: 'delivered', transactions: ['0xa'] };
+      payout.state = { state: 'completed' };
+      expect((await open(invoice.id)).json().paid).toBe(true);
+
+      shopAnswers = 500;
+      await merchants.reconcile();
+      expect(notices).toHaveLength(1);
+      await merchants.reconcile();
+      expect(notices).toHaveLength(1);
+      await pool.query(`update merchant_events set next_attempt_at = now()`);
+      shopAnswers = 200;
+      await merchants.reconcile();
+      expect(notices).toHaveLength(2);
+      await pool.query(`update merchant_events set next_attempt_at = now()`);
+      await merchants.reconcile();
+      expect(notices).toHaveLength(2);
+
+      const notice = notices[1]!;
+      expect(notice.url).toBe('https://shop.example/hooks/10kobo');
+      const body = JSON.parse(notice.body);
+      expect(body).toMatchObject({ type: 'invoice.paid', data: { id: invoice.id, reference: 'order-1001', status: 'paid' } });
+      expect(notice.headers['10kobo-event-id']).toBe(body.id);
+      const timestamp = Number(/t=(\d+)/.exec(notice.headers['10kobo-signature']!)![1]);
+      expect(notice.headers['10kobo-signature']).toBe(signNotice(secret, timestamp, notice.body));
+      expect(notice.headers['10kobo-signature']).not.toBe(signNotice('whsec_wrong', timestamp, notice.body));
+      const [row] = (await pool.query('select attempts, delivered_at from merchant_events')).rows;
+      expect(row.attempts).toBe(2);
+      expect(row.delivered_at).not.toBeNull();
+    });
+
+    it('lets a shop cancel an unpaid invoice, and tells it so', async () => {
+      const invoice = (await shop('POST', '/v1/merchant/invoices', ORDER)).json();
+      const cancelled = await shop('POST', `/v1/merchant/invoices/${invoice.id}/cancel`);
+      expect(cancelled.json().status).toBe('cancelled');
+      expect((await payLink(invoice.id)).json().code).toBe('link_cancelled');
+      await merchants.reconcile();
+      expect(JSON.parse(notices[0]!.body)).toMatchObject({ type: 'invoice.cancelled', data: { reference: 'order-1001' } });
+    });
+
+    it('refuses keys that would send payers or notices somewhere unsafe', async () => {
+      await expect(merchants.createKey({ userEmail: 'owner@shop.example', name: 'x', payout: { toMyWallet: true }, webhookUrl: 'http://shop.example/hook' })).rejects.toThrow('https');
+      await expect(merchants.createKey({ userEmail: 'owner@shop.example', name: 'x', payout: { toMyWallet: true }, returnOrigins: ['https://shop.example/path'] })).rejects.toThrow('start of an address');
+      await expect(merchants.createKey({ userEmail: 'nobody@shop.example', name: 'x', payout: { toMyWallet: true } })).rejects.toThrow('No 10kobo user');
+      await expect(merchants.createKey({ userEmail: 'owner@shop.example', name: 'x', payout: { toMyWallet: true }, webhookUrl: 'http://localhost:3010/hook' })).resolves.toMatchObject({ key: expect.stringMatching(/^mk_/) });
     });
   });
 

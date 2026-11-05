@@ -394,11 +394,62 @@ export const payLinks = pgTable(
     usdcAddress: text('usdc_address'),
     /** Set when the user cancels it. A cancelled link can never be paid. */
     cancelledAt: timestamp('cancelled_at', { withTimezone: true }),
+    /** Set when a shop made it through the merchant API, with the shop's own order reference. */
+    merchantKeyId: uuid('merchant_key_id').references(() => merchantKeys.id, { onDelete: 'set null' }),
+    reference: text('reference'),
+    /** Where the payer goes back to once paid. Only a website the shop registered. */
+    returnUrl: text('return_url'),
     paymentId: uuid('payment_id').references(() => agentPayments.id),
     expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
-  (table) => [index('pay_links_user_idx').on(table.userId, table.createdAt)],
+  (table) => [
+    index('pay_links_user_idx').on(table.userId, table.createdAt),
+    uniqueIndex('pay_links_merchant_reference_idx').on(table.merchantKeyId, table.reference),
+  ],
 );
 
 export type PayLink = typeof payLinks.$inferSelect;
+
+/**
+ * A shop's secret key for making checkout invoices from its own server. It belongs to a 10kobo user, and the payout is
+ * fixed on the key, so a leaked key can make invoices but can never change where the money goes.
+ */
+export const merchantKeys = pgTable('merchant_keys', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  /** Shown to payers, such as the shop's name. */
+  name: text('name').notNull(),
+  keyHash: text('key_hash').notNull().unique(),
+  payoutBankName: text('payout_bank_name'),
+  payoutAccountNumber: text('payout_account_number'),
+  payoutToWallet: boolean('payout_to_wallet').notNull().default(false),
+  /** Websites a payer may be sent back to, such as https://shop.example. */
+  returnOrigins: jsonb('return_origins').$type<string[]>().notNull().default([]),
+  webhookUrl: text('webhook_url'),
+  /** Signs paid notices so the shop can tell they came from us. It cannot move money. */
+  webhookSecret: text('webhook_secret'),
+  invoicesPerDay: integer('invoices_per_day').notNull().default(200),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  revokedAt: timestamp('revoked_at', { withTimezone: true }),
+});
+
+export type MerchantKey = typeof merchantKeys.$inferSelect;
+
+/** One notice to a shop's server. Each invoice gets at most one notice of each kind, and each is retried until it lands. */
+export const merchantEvents = pgTable(
+  'merchant_events',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    keyId: uuid('key_id').notNull().references(() => merchantKeys.id, { onDelete: 'cascade' }),
+    linkId: uuid('link_id').notNull().references(() => payLinks.id, { onDelete: 'cascade' }),
+    type: text('type').notNull(),
+    payload: jsonb('payload').notNull(),
+    attempts: integer('attempts').notNull().default(0),
+    nextAttemptAt: timestamp('next_attempt_at', { withTimezone: true }).notNull().defaultNow(),
+    deliveredAt: timestamp('delivered_at', { withTimezone: true }),
+    lastError: text('last_error'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [uniqueIndex('merchant_events_link_type_idx').on(table.linkId, table.type), index('merchant_events_due_idx').on(table.deliveredAt, table.nextAttemptAt)],
+);
