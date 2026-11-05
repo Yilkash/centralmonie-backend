@@ -3,7 +3,7 @@ import { Test } from '@nestjs/testing';
 import { Pool } from 'pg';
 import { AgentApiService, agentApiOpen, ipGroup, KEYLESS_KEY_ID, maskName, paymentsToCsv, validRefundAddress } from '../src/agent-api/agent-api.service';
 import { NearRelayer, SignedDelegate, USDC_ON_NEAR } from '../src/agent-api/near-relay';
-import { PayLinksService } from '../src/agent-api/pay-links.service';
+import { PayLinksService, presentOwnLink } from '../src/agent-api/pay-links.service';
 import { operationToken, tokenProblem } from '../src/agent-api/x402';
 import { AgentPayment, User } from '../src/database/schema';
 import { CrossChain, CrossChainRequest, CrossChainState } from '../src/agent-api/cross-chain';
@@ -642,6 +642,41 @@ describe('Agent API', () => {
       const soon = await links.create(user, { amountNaira: 5000, bankName: 'OPay', accountNumber: '8031234568', dueDate: inDays(1) });
       expect(soon.expiresAt.getTime()).toBeGreaterThan(Date.now() + 13 * 86_400_000);
       await expect(links.create(user, { amountNaira: 5000, bankName: 'OPay', accountNumber: '8031234568', dueDate: inDays(400) })).rejects.toThrow('at most a year');
+    });
+
+    it('lists the user\'s invoices with a plain status, and cancelling one stops it being paid', async () => {
+      const make = () => links.create(user, { amountNaira: 5000, bankName: 'OPay', accountNumber: '8031234568', note: 'Repair' });
+      const status = async () => Object.fromEntries((await links.list(user)).map((row) => [row.link.id, presentOwnLink(row, 'u').status]));
+      const unpaid = await make();
+      const paying = await make();
+      const overdue = await make();
+      await pool.query(`update pay_links set due_date = '2020-01-01' where id = $1`, [overdue.id]);
+      await payLink(paying.id);
+      expect(await status()).toEqual({ [unpaid.id]: 'unpaid', [paying.id]: 'being_paid', [overdue.id]: 'overdue' });
+      expect(presentOwnLink((await links.list(user))[0]!, 'u')).toMatchObject({ to: 'Ada Bello', receives: 'naira, OPay ****4568' });
+
+      await expect(links.cancel(user, paying.id)).rejects.toThrow('paying this invoice right now');
+      await links.cancel(user, unpaid.id);
+      expect((await status())[unpaid.id]).toBe('cancelled');
+      expect((await open(unpaid.id)).json()).toMatchObject({ open: false, cancelled: true });
+      const refused = await payLink(unpaid.id);
+      expect(refused.statusCode).toBe(410);
+      expect(refused.json().code).toBe('link_cancelled');
+
+      const stranger = { id: (await pool.query(`insert into users (provider_subject) values ('did:privy:stranger') returning id`)).rows[0].id } as User;
+      await expect(links.cancel(stranger, overdue.id)).rejects.toThrow('does not exist');
+      expect(await links.list(stranger)).toEqual([]);
+      expect((await app.inject({ method: 'GET', url: '/v1/pay-links' })).statusCode).toBe(401);
+    });
+
+    it('cannot cancel an invoice that has been paid', async () => {
+      const link = await links.create(user, { amountNaira: 5000, bankName: 'OPay', accountNumber: '8031234568' });
+      await payLink(link.id);
+      crossChain.state = { status: 'delivered', transactions: ['0xa'] };
+      payout.state = { state: 'completed' };
+      expect((await open(link.id)).json().paid).toBe(true);
+      await expect(links.cancel(user, link.id)).rejects.toThrow('has been paid');
+      expect(presentOwnLink((await links.list(user))[0]!, 'u').status).toBe('paid');
     });
 
     it('says plainly when the NEAR refund account does not exist, and offers no address', async () => {

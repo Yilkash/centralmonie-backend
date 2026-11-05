@@ -7,7 +7,7 @@ import { formatNaira, formatUsdc } from '../money/money';
 import { AdminGuard } from '../ops/admin.controller';
 import { PAY_FROM, PayFrom } from './cross-chain';
 import { AgentApiService, AgentRefusal, KEYLESS_KEY_ID, maskName } from './agent-api.service';
-import { PayLinksService, presentLink, presentPublicLink } from './pay-links.service';
+import { PayLinksService, presentLink, presentOwnLink, presentPublicLink } from './pay-links.service';
 import { decodeSignature, encode, firstChallenge, provesPayment, quotedChallenge, settlement, tokenProblem } from './x402';
 
 const quoteBody = z.object({
@@ -281,6 +281,8 @@ const payLinkBody = z.object({
   bank_name: z.string().trim().min(2).max(80).nullish(),
   account_number: z.string().regex(/^\d{10}$/).nullish(),
   near_account: z.string().trim().min(2).max(70).nullish(),
+  usdc_address: z.string().trim().max(42).nullish(),
+  to_my_wallet: z.boolean().nullish(),
   note: z.string().trim().max(200).nullish(),
   due_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullish(),
   line_items: z.array(z.object({ description: z.string().trim().min(1).max(120), amount_naira: z.number().int().positive() })).max(20).nullish(),
@@ -298,9 +300,21 @@ export class PayLinksController {
   async create(@CurrentUser() user: User, @Body() body: unknown) {
     const parsed = payLinkBody.safeParse(body);
     if (!parsed.success) throw invalid(parsed.error);
-    const { amount_naira, bank_name, account_number, near_account, note, due_date, line_items } = parsed.data;
-    const link = await this.links.create(user, { amountNaira: amount_naira ?? null, bankName: bank_name ?? null, accountNumber: account_number ?? null, nearAccount: near_account ?? null, note: note ?? null, dueDate: due_date ?? null, lineItems: line_items?.map((item) => ({ description: item.description, amountNaira: item.amount_naira })) ?? null });
+    const { amount_naira, bank_name, account_number, near_account, usdc_address, to_my_wallet, note, due_date, line_items } = parsed.data;
+    const link = await this.links.create(user, { amountNaira: amount_naira ?? null, bankName: bank_name ?? null, accountNumber: account_number ?? null, nearAccount: near_account ?? null, usdcAddress: usdc_address ?? null, toMyWallet: to_my_wallet ?? null, note: note ?? null, dueDate: due_date ?? null, lineItems: line_items?.map((item) => ({ description: item.description, amountNaira: item.amount_naira })) ?? null });
     return presentLink(link, this.links.url(link));
+  }
+
+  @Get()
+  async list(@CurrentUser() user: User) {
+    return { invoices: (await this.links.list(user)).map((row) => presentOwnLink(row, this.links.url(row.link))) };
+  }
+
+  @Post(':id/cancel')
+  @HttpCode(200)
+  async cancel(@CurrentUser() user: User, @Param('id', ParseUUIDPipe) id: string) {
+    const link = await this.links.cancel(user, id);
+    return presentOwnLink({ link, payment: null }, this.links.url(link));
   }
 }
 

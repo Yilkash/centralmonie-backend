@@ -1,0 +1,1 @@
+ALTER TABLE "pay_links" ADD COLUMN "cancelled_at" timestamp with time zone;

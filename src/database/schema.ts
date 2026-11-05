@@ -392,6 +392,8 @@ export const payLinks = pgTable(
     nearAccount: text('near_account'),
     /** Set when the receiver wants USDC on this Base address instead of naira in a bank. */
     usdcAddress: text('usdc_address'),
+    /** Set when the user cancels it. A cancelled link can never be paid. */
+    cancelledAt: timestamp('cancelled_at', { withTimezone: true }),
     paymentId: uuid('payment_id').references(() => agentPayments.id),
     expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),

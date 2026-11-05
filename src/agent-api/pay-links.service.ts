@@ -1,10 +1,10 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { and, count, eq, gte, sql } from 'drizzle-orm';
+import { and, count, desc, eq, gte, isNull, sql } from 'drizzle-orm';
 import { isAddress } from 'viem';
 import { Env } from '../config/env';
 import { DATABASE, Database } from '../database/database.module';
-import { AgentPayment, PayLink, payLinks, User } from '../database/schema';
+import { AgentPayment, agentPayments, PayLink, payLinks, User } from '../database/schema';
 import { BankLookup } from '../providers/providers';
 import { AgentApiService, AgentRefusal, maskName } from './agent-api.service';
 import { addressRefusal } from '../chain/address-check';
@@ -120,7 +120,36 @@ export class PayLinksService {
   async view(id: string): Promise<{ link: PayLink; payment: AgentPayment | null; open: boolean }> {
     const link = await this.find(id);
     const payment = link.paymentId ? await this.agents.get(await this.agents.keylessKey(), link.paymentId) : null;
-    return { link, payment, open: this.agents.keylessOpen && link.expiresAt.getTime() > Date.now() && payment?.status !== 'paid' };
+    return { link, payment, open: this.agents.keylessOpen && !link.cancelledAt && link.expiresAt.getTime() > Date.now() && payment?.status !== 'paid' };
+  }
+
+  /** The user's own links, newest first, each with its latest payment. */
+  async list(user: User): Promise<{ link: PayLink; payment: AgentPayment | null }[]> {
+    return this.db
+      .select({ link: payLinks, payment: agentPayments })
+      .from(payLinks)
+      .leftJoin(agentPayments, eq(payLinks.paymentId, agentPayments.id))
+      .where(eq(payLinks.userId, user.id))
+      .orderBy(desc(payLinks.createdAt))
+      .limit(200);
+  }
+
+  /** Stops a link for good. Refused while someone is part way through paying it, because their money may already be moving. */
+  async cancel(user: User, id: string): Promise<PayLink> {
+    const [found] = await this.db.select().from(payLinks).where(and(eq(payLinks.id, id), eq(payLinks.userId, user.id)));
+    if (!found) throw new AgentRefusal('not_found', 'This invoice does not exist.', 404);
+    if (found.cancelledAt) return found;
+    const payment = found.paymentId ? await this.agents.get(await this.agents.keylessKey(), found.paymentId) : null;
+    if (payment?.status === 'paid') throw new AgentRefusal('already_paid', 'This invoice has been paid, so it cannot be cancelled.', 409);
+    if (payment && !CAN_RETRY.has(payment.status) && !lapsed(payment)) throw new AgentRefusal('in_progress', 'Someone is paying this invoice right now, so it cannot be cancelled.', 409);
+    // Only if no payment has started since it was read, so a payer cannot slip in between.
+    const [cancelled] = await this.db
+      .update(payLinks)
+      .set({ cancelledAt: new Date() })
+      .where(and(eq(payLinks.id, id), isNull(payLinks.cancelledAt), found.paymentId ? eq(payLinks.paymentId, found.paymentId) : isNull(payLinks.paymentId)))
+      .returning();
+    if (!cancelled) throw new AgentRefusal('in_progress', 'Someone started paying this invoice just now. Please check it again.', 409);
+    return cancelled;
   }
 
   /** Paying again while a payment is waiting gives that same payment, so a refresh cannot make a second one. */
@@ -128,6 +157,7 @@ export class PayLinksService {
     const { link, payment, open } = await this.view(id);
     if (payment?.status === 'paid') throw new AgentRefusal('already_paid', 'This pay link has been paid.', 409);
     if (!this.agents.keylessOpen) throw new AgentRefusal('unavailable', 'Pay links are not open right now.', 503);
+    if (link.cancelledAt) throw new AgentRefusal('link_cancelled', 'This invoice was cancelled. Please ask the person who sent it.', 410);
     if (!open) throw new AgentRefusal('link_expired', 'This pay link has expired.', 410);
     if (payment && !CAN_RETRY.has(payment.status) && !lapsed(payment)) return payment;
     const key = await this.agents.keylessKey();
@@ -147,7 +177,7 @@ export class PayLinksService {
     const claimed = await this.db
       .update(payLinks)
       .set({ paymentId: quote.id })
-      .where(and(eq(payLinks.id, id), link.paymentId ? eq(payLinks.paymentId, link.paymentId) : sql`${payLinks.paymentId} is null`))
+      .where(and(eq(payLinks.id, id), isNull(payLinks.cancelledAt), link.paymentId ? eq(payLinks.paymentId, link.paymentId) : sql`${payLinks.paymentId} is null`))
       .returning({ id: payLinks.id });
     if (claimed.length === 0) throw new AgentRefusal('in_progress', 'Someone is paying this link right now. Try again in a moment.', 409);
     return this.agents.accept(key, quote.id, payer.clientIp);
@@ -190,6 +220,7 @@ export const presentPublicLink = ({ link, payment, open }: { link: PayLink; paym
   overdue: Boolean(link.dueDate && new Date(`${link.dueDate}T23:59:59+01:00`).getTime() < Date.now()),
   line_items: link.lineItems?.map((item) => ({ description: item.description, amount_naira: item.amountNaira })) ?? null,
   open,
+  cancelled: Boolean(link.cancelledAt),
   paid: payment?.status === 'paid',
   payment: payment && {
     id: payment.id,
@@ -205,3 +236,36 @@ export const presentPublicLink = ({ link, payment, open }: { link: PayLink; paym
     links: proofLinks(payment),
   },
 });
+
+export type InvoiceStatus = 'paid' | 'cancelled' | 'expired' | 'being_paid' | 'overdue' | 'unpaid';
+
+/** One line of the user's own list. They made it, so they see the full details. */
+export const presentOwnLink = ({ link, payment }: { link: PayLink; payment: AgentPayment | null }, url: string) => {
+  const overdue = Boolean(link.dueDate && new Date(`${link.dueDate}T23:59:59+01:00`).getTime() < Date.now());
+  const status: InvoiceStatus =
+    payment?.status === 'paid'
+      ? 'paid'
+      : link.cancelledAt
+        ? 'cancelled'
+        : link.expiresAt.getTime() <= Date.now()
+          ? 'expired'
+          : payment && !CAN_RETRY.has(payment.status) && !lapsed(payment)
+            ? 'being_paid'
+            : overdue
+              ? 'overdue'
+              : 'unpaid';
+  return {
+    id: link.id,
+    url,
+    status,
+    amount_naira: link.amountKobo / 100,
+    note: link.note,
+    due_date: link.dueDate,
+    line_items: link.lineItems?.map((item) => ({ description: item.description, amount_naira: item.amountNaira })) ?? null,
+    to: link.nearAccount ?? link.usdcAddress ?? link.accountName,
+    receives: link.nearAccount ? 'USDC on NEAR' : link.usdcAddress ? 'USDC on Base' : `naira, ${link.bankName} ****${link.accountNumber.slice(-4)}`,
+    created_at: link.createdAt,
+    expires_at: link.expiresAt,
+    paid_at: payment?.status === 'paid' ? payment.paidAt : null,
+  };
+};
