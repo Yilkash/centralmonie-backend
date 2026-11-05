@@ -866,7 +866,7 @@ describe('Agent API', () => {
       await agents.reconcile();
       expect((await pool.query('select status from agent_payments where id = $1', [id])).rows[0].status).toBe('processing');
       const stuck = await quote();
-      await pool.query(`update agent_payments set status = 'creating', updated_at = now() - interval '5 minutes' where id = $1`, [stuck.id]);
+      await pool.query(`update agent_payments set status = 'creating', updated_at = now() - interval '10 minutes' where id = $1`, [stuck.id]);
       await agents.reconcile();
       expect((await pool.query('select status from agent_payments where id = $1', [stuck.id])).rows[0].status).toBe('quoted');
     });
