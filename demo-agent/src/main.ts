@@ -63,9 +63,9 @@ if (real && ledger.includes(invoiceId)) {
   process.exit(1);
 }
 const wallet: Wallet = {
-  sendUsdc: (to, usdcMinor) => {
+  sendUsdc: (to, usdcMinor, paymentId) => {
     if (real) writeFileSync(LEDGER, JSON.stringify([...ledger, invoiceId]));
-    return realWallet.sendUsdc(to, usdcMinor);
+    return realWallet.sendUsdc(to, usdcMinor, paymentId);
   },
 };
 
