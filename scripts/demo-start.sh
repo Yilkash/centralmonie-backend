@@ -4,7 +4,7 @@
 set -u
 cd "$(dirname "$0")/.."
 BACKEND="$PWD"
-FRONTEND="$PWD/../10kobo-frontend-work"; [ -d "$FRONTEND" ] || FRONTEND="$PWD/../10kobo-frontend"
+FRONTEND="$PWD/../10kobo-frontend"
 export DATABASE_URL='postgres://tenkobo:localdev@localhost:54445/tenkobo_demo'
 docker exec tenkobo-pg psql -U tenkobo -d postgres -tc "select 1 from pg_database where datname='tenkobo_demo'" | grep -q 1 || docker exec tenkobo-pg psql -U tenkobo -d postgres -qc 'CREATE DATABASE tenkobo_demo'
 npm run -s db:migrate >/dev/null || { echo 'The database could not be prepared. Is Docker running?'; exit 1; }
