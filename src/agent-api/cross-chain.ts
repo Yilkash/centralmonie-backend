@@ -78,6 +78,10 @@ export abstract class CrossChain {
   /** Exactly this much USDC leaves Base, and a little less arrives on the other chain. With dry, it only prices it. */
   abstract sendFromBase(request: SendRequest): Promise<SendQuote>;
   abstract status(depositAddress: string): Promise<CrossChainState>;
+  /** True only when NEAR itself says the account does not exist. Any doubt is false, and the route then decides. */
+  async nearAccountMissing(_account: string): Promise<boolean> {
+    return false;
+  }
 }
 
 const STATES: Record<string, CrossChainStatus> = {
@@ -104,8 +108,26 @@ export class OneClickCrossChain extends CrossChain {
     private readonly fetchFn: typeof fetch = fetch,
     private readonly waitMs = 1500,
     private readonly fee: { bps: number; recipient: string | undefined } = { bps: 0, recipient: undefined },
+    private readonly nearRpcUrl: string = 'https://rpc.mainnet.near.org',
   ) {
     super();
+  }
+
+  override async nearAccountMissing(account: string): Promise<boolean> {
+    // A 64-character account can receive before it has ever been used, so it is never missing.
+    if (/^[0-9a-f]{64}$/.test(account)) return false;
+    try {
+      const response = await this.fetchFn(this.nearRpcUrl, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'query', params: { request_type: 'view_account', finality: 'final', account_id: account } }),
+        signal: AbortSignal.timeout(5000),
+      });
+      const answer = (await response.json()) as { error?: { cause?: { name?: string } }; result?: { error?: string } };
+      return answer.error?.cause?.name === 'UNKNOWN_ACCOUNT' || /does not exist/i.test(answer.result?.error ?? '');
+    } catch {
+      return false;
+    }
   }
 
   priceCheck(request: CrossChainRequest): Promise<CrossChainQuote> {

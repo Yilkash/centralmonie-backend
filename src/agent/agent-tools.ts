@@ -183,15 +183,17 @@ export const AGENT_TOOLS: Anthropic.Tool[] = [
   {
     name: 'make_request_link',
     description:
-      "Makes a link the user can send to someone, so that person can pay from any blockchain, in USDC, and the user's bank account receives naira. Moves no money. Use when the user wants to be paid or to request money, for example from someone abroad. Ask for the bank and account number if you do not have them.",
+      "Makes a link the user can send to someone, so that person can pay from any blockchain, in USDC, and the user receives naira in a bank account or USDC. Moves no money. Use when the user wants to be paid or to request money, for example from someone abroad. It is priced in naira. Ask where they want to receive it if you do not know: a bank and account number, or USDC.",
     // Not strict: Anthropic limits how many optional fields strict tools can have in total, and our own checks cover this one.
     input_schema: {
       type: 'object',
       properties: {
         amount_naira: { type: ['integer', 'null'], description: 'Whole naira to be paid. Null if line items give the total.' },
-        bank_name: { type: ['string', 'null'], description: 'The bank to receive naira. Null if a NEAR account receives USDC instead.' },
-        account_number: { type: ['string', 'null'], description: 'Exactly 10 digits, or null if a NEAR account receives USDC instead.' },
+        bank_name: { type: ['string', 'null'], description: 'The bank to receive naira. Null if USDC is received instead.' },
+        account_number: { type: ['string', 'null'], description: 'Exactly 10 digits, or null if USDC is received instead.' },
         near_account: { type: ['string', 'null'], description: 'Only if the user wants USDC on NEAR rather than naira, such as ada.near. Otherwise null.' },
+        usdc_address: { type: ['string', 'null'], description: 'Only if the user wants USDC on a Base address they gave, starting 0x. Otherwise null.' },
+        to_my_wallet: { type: ['boolean', 'null'], description: "True if the user wants the USDC in their own 10kobo wallet. Otherwise null." },
         note: { ...nullable('string'), description: 'What it is for, shown to the payer. Null if none was given.' },
         due_date: { type: ['string', 'null'], description: 'The date it is due, as YYYY-MM-DD. Null if none was given.' },
         line_items: {
@@ -200,7 +202,7 @@ export const AGENT_TOOLS: Anthropic.Tool[] = [
           items: { type: 'object', properties: { description: { type: 'string' }, amount_naira: { type: 'integer' } }, required: ['description', 'amount_naira'], additionalProperties: false },
         },
       },
-      required: ['amount_naira', 'bank_name', 'account_number', 'near_account', 'note', 'due_date', 'line_items'],
+      required: ['amount_naira', 'bank_name', 'account_number', 'near_account', 'usdc_address', 'to_my_wallet', 'note', 'due_date', 'line_items'],
       additionalProperties: false,
     },
   },
@@ -447,6 +449,8 @@ export class AgentToolbox {
         bank_name: z.string().min(2).nullish(),
         account_number: z.string().nullish(),
         near_account: z.string().nullish(),
+        usdc_address: z.string().nullish(),
+        to_my_wallet: z.boolean().nullish(),
         note: z.string().nullish(),
         due_date: z.string().nullish(),
         line_items: z.array(z.object({ description: z.string().min(1), amount_naira: z.number().int().positive() })).nullish(),
@@ -457,12 +461,14 @@ export class AgentToolbox {
       bankName: details.bank_name ?? null,
       accountNumber: details.account_number ?? null,
       nearAccount: details.near_account ?? null,
+      usdcAddress: details.usdc_address ?? null,
+      toMyWallet: details.to_my_wallet ?? null,
       note: details.note ?? null,
       dueDate: details.due_date ?? null,
       lineItems: details.line_items?.map((item) => ({ description: item.description, amountNaira: item.amount_naira })) ?? null,
     });
     return {
-      result: `Pay link made for ${formatNaira(link.amountKobo)} to ${link.accountName}${link.nearAccount ? ', paid as USDC on NEAR' : `, ${link.bankName}`}. The app shows the details as a card, so say only that it is ready to send, and include this exact link on its own line: ${this.payLinks.url(link)}`,
+      result: `Pay link made for ${formatNaira(link.amountKobo)} to ${link.accountName}${link.nearAccount ? ', paid as USDC on NEAR' : link.usdcAddress ? ', paid as USDC on Base' : `, ${link.bankName}`}. The app shows the details as a card, so say only that it is ready to send, and include this exact link on its own line: ${this.payLinks.url(link)}`,
     };
   }
 

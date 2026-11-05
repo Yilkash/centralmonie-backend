@@ -1,25 +1,37 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { and, count, eq, gte, sql } from 'drizzle-orm';
+import { isAddress } from 'viem';
 import { Env } from '../config/env';
 import { DATABASE, Database } from '../database/database.module';
 import { AgentPayment, PayLink, payLinks, User } from '../database/schema';
 import { BankLookup } from '../providers/providers';
 import { AgentApiService, AgentRefusal, maskName } from './agent-api.service';
-import { isNearAccount } from '../chain/usdc-chains';
-import { PayFrom, PayToken } from './cross-chain';
+import { addressRefusal } from '../chain/address-check';
+import { isNearAccount, USDC_CHAINS } from '../chain/usdc-chains';
+import { CrossChain, PayFrom, PayToken } from './cross-chain';
 
-const LINK_LIFETIME_MS = 14 * 24 * 60 * 60_000;
+const DAY_MS = 24 * 60 * 60_000;
+const LINK_LIFETIME_MS = 14 * DAY_MS;
+/** An invoice stays payable this long after its due date, because a late payment is still a payment. */
+const AFTER_DUE_MS = 14 * DAY_MS;
+const FURTHEST_DUE_MS = 366 * DAY_MS;
 const LINKS_PER_DAY = 20;
 const MAX_LINK_NAIRA = 50_000;
 /** A payment that has finished without paying the bank, so the link can be tried again. */
 const CAN_RETRY = new Set(['refunded', 'expired', 'quoted']);
+/** The time to send has passed. The old payment is still watched for a late arrival, but its address is no longer offered. */
+const lapsed = (payment: AgentPayment | null) => Boolean(payment?.status === 'awaiting_deposit' && payment.depositDeadline && payment.depositDeadline.getTime() <= Date.now());
 
 export interface LinkInput {
   amountNaira?: number | null;
   bankName?: string | null;
   accountNumber?: string | null;
   nearAccount?: string | null;
+  /** USDC to this Base address instead of naira to a bank. */
+  usdcAddress?: string | null;
+  /** USDC to the user's own 10kobo wallet instead of naira to a bank. */
+  toMyWallet?: boolean | null;
   note?: string | null;
   dueDate?: string | null;
   lineItems?: { description: string; amountNaira: number }[] | null;
@@ -44,6 +56,7 @@ export class PayLinksService {
     private readonly config: ConfigService<Env, true>,
     private readonly banks: BankLookup,
     private readonly agents: AgentApiService,
+    private readonly crossChain: CrossChain,
   ) {}
 
   /** Where the link opens. */
@@ -61,18 +74,28 @@ export class PayLinksService {
     if (total !== null && total !== amountNaira) throw new AgentRefusal('invalid_request', `The line items add up to ₦${total.toLocaleString('en-NG')}, not ₦${amountNaira.toLocaleString('en-NG')}.`, 400);
     if (amountNaira > MAX_LINK_NAIRA) throw new AgentRefusal('over_payment_limit', `The most for one pay link is ₦${MAX_LINK_NAIRA.toLocaleString('en-NG')}.`, 422);
     if (input.dueDate && (Number.isNaN(new Date(`${input.dueDate}T23:59:59+01:00`).getTime()) || new Date(`${input.dueDate}T23:59:59+01:00`).getTime() < Date.now())) throw new AgentRefusal('invalid_request', 'The due date has already passed.', 400);
+    const dueEnds = input.dueDate ? new Date(`${input.dueDate}T23:59:59+01:00`).getTime() : null;
+    if (dueEnds && dueEnds > Date.now() + FURTHEST_DUE_MS) throw new AgentRefusal('invalid_request', 'A due date can be at most a year away.', 400);
     const [{ made } = { made: 0 }] = await this.db
       .select({ made: count() })
       .from(payLinks)
       .where(and(eq(payLinks.userId, user.id), gte(payLinks.createdAt, sql`now() - interval '1 day'`)));
     if (made >= LINKS_PER_DAY) throw new AgentRefusal('too_many_requests', 'You have made too many pay links today. Try again tomorrow.', 429);
 
+    if (input.toMyWallet && !user.walletAddress) throw new AgentRefusal('wallet_not_ready', 'Your wallet is still being set up. Please try again in a moment.', 409);
+    const usdcAddress = input.nearAccount ? null : input.toMyWallet ? user.walletAddress : input.usdcAddress?.trim() || null;
     let bank: { bankName: string; accountNumber: string; accountName: string };
     if (input.nearAccount) {
       if (!isNearAccount(input.nearAccount)) throw new AgentRefusal('invalid_request', 'That is not a valid NEAR account. It should look like name.near.', 400);
+      if (await this.crossChain.nearAccountMissing(input.nearAccount)) throw new AgentRefusal('invalid_request', `The NEAR account ${input.nearAccount} does not exist. Check the spelling.`, 400);
       bank = { bankName: 'NEAR', accountNumber: input.nearAccount, accountName: input.nearAccount };
+    } else if (usdcAddress) {
+      if (!isAddress(usdcAddress)) throw new AgentRefusal('invalid_request', 'That is not a valid Base address. It should start with 0x and have 42 characters.', 400);
+      const problem = addressRefusal(usdcAddress, { usdc: USDC_CHAINS.base.usdc, own: null });
+      if (problem) throw new AgentRefusal('invalid_request', problem, 400);
+      bank = { bankName: 'Base', accountNumber: usdcAddress, accountName: usdcAddress };
     } else {
-      if (!input.bankName || !input.accountNumber) throw new AgentRefusal('invalid_request', 'A pay link needs a bank and account number, or a NEAR account.', 400);
+      if (!input.bankName || !input.accountNumber) throw new AgentRefusal('invalid_request', 'A pay link needs a bank and account number, or somewhere to receive USDC.', 400);
       if (!/^\d{10}$/.test(input.accountNumber)) throw new AgentRefusal('invalid_request', 'A bank account number has 10 digits.', 400);
       const accountName = await this.banks.accountName(input.bankName, input.accountNumber).catch(() => {
         throw new AgentRefusal('bank_unavailable', 'We could not check that account just now. Please try again.', 503);
@@ -82,7 +105,7 @@ export class PayLinksService {
     }
     const [link] = await this.db
       .insert(payLinks)
-      .values({ userId: user.id, amountKobo: amountNaira * 100, ...bank, note: input.note?.trim() || null, dueDate: input.dueDate ?? null, lineItems: items, nearAccount: input.nearAccount ?? null, expiresAt: new Date(Date.now() + LINK_LIFETIME_MS) })
+      .values({ userId: user.id, amountKobo: amountNaira * 100, ...bank, note: input.note?.trim() || null, dueDate: input.dueDate ?? null, lineItems: items, nearAccount: input.nearAccount ?? null, usdcAddress, expiresAt: new Date(Math.max(Date.now() + LINK_LIFETIME_MS, (dueEnds ?? 0) + AFTER_DUE_MS)) })
       .returning();
     return link!;
   }
@@ -106,7 +129,7 @@ export class PayLinksService {
     if (payment?.status === 'paid') throw new AgentRefusal('already_paid', 'This pay link has been paid.', 409);
     if (!this.agents.keylessOpen) throw new AgentRefusal('unavailable', 'Pay links are not open right now.', 503);
     if (!open) throw new AgentRefusal('link_expired', 'This pay link has expired.', 410);
-    if (payment && !CAN_RETRY.has(payment.status)) return payment;
+    if (payment && !CAN_RETRY.has(payment.status) && !lapsed(payment)) return payment;
     const key = await this.agents.keylessKey();
     const quote = await this.agents.quote(key, {
       amountNaira: link.amountKobo / 100,
@@ -115,7 +138,7 @@ export class PayLinksService {
       payFrom: payer.payFrom,
       refundTo: payer.refundTo,
       ...(payer.payToken ? { payToken: payer.payToken } : {}),
-      ...(link.nearAccount ? { deliverTo: link.nearAccount } : {}),
+      ...(link.nearAccount || link.usdcAddress ? { deliverTo: (link.nearAccount ?? link.usdcAddress)! } : {}),
       payerName: payer.payerName || 'Pay link payer',
       purpose: link.note ?? 'Pay link',
       ...(payer.clientIp ? { clientIp: payer.clientIp } : {}),
@@ -150,17 +173,18 @@ function proofLinks(payment: AgentPayment): { label: string; url: string }[] {
   const near = payment.transactions.find((hash) => !hash.startsWith('0x') && hash !== 'simulated');
   if (near) links.push({ label: 'NEAR Intents settlement', url: `https://nearblocks.io/txns/${near}` });
   const base = [...payment.transactions].reverse().find((hash) => /^0x[0-9a-f]{64}$/i.test(hash));
-  if (base && !payment.deliverTo) links.push({ label: 'Delivery on Base', url: `https://basescan.org/tx/${base}` });
+  if (base && (!payment.deliverTo || payment.deliverTo.startsWith('0x'))) links.push({ label: 'Delivery on Base', url: `https://basescan.org/tx/${base}` });
   return links;
 }
 
 export const presentPublicLink = ({ link, payment, open }: { link: PayLink; payment: AgentPayment | null; open: boolean }) => ({
   id: link.id,
+  expires_at: link.expiresAt,
   amount_naira: link.amountKobo / 100,
-  to: link.nearAccount ?? maskName(link.accountName),
+  to: link.nearAccount ?? link.usdcAddress ?? maskName(link.accountName),
   bank_name: link.bankName,
-  account_number: link.nearAccount ? null : `****${link.accountNumber.slice(-4)}`,
-  receives: link.nearAccount ? 'USDC on NEAR' : 'naira',
+  account_number: link.nearAccount || link.usdcAddress ? null : `****${link.accountNumber.slice(-4)}`,
+  receives: link.nearAccount ? 'USDC on NEAR' : link.usdcAddress ? 'USDC on Base' : 'naira',
   note: link.note,
   due_date: link.dueDate,
   overdue: Boolean(link.dueDate && new Date(`${link.dueDate}T23:59:59+01:00`).getTime() < Date.now()),
@@ -169,13 +193,14 @@ export const presentPublicLink = ({ link, payment, open }: { link: PayLink; paym
   paid: payment?.status === 'paid',
   payment: payment && {
     id: payment.id,
-    status: payment.status,
+    status: lapsed(payment) ? 'expired' : payment.status,
     pay_from: payment.payFrom,
     pay_token: payment.payToken,
     pay_usdc: (payment.payInMinor / 1_000_000).toFixed(6),
-    deposit_address: payment.status === 'awaiting_deposit' ? payment.depositAddress : null,
-    deposit_deadline: payment.status === 'awaiting_deposit' ? payment.depositDeadline : null,
-    failure_reason: payment.failureReason,
+    receiver_gets_usdc: payment.deliverTo ? (payment.usdcMinor / 1_000_000).toFixed(2) : null,
+    deposit_address: payment.status === 'awaiting_deposit' && !lapsed(payment) ? payment.depositAddress : null,
+    deposit_deadline: payment.status === 'awaiting_deposit' && !lapsed(payment) ? payment.depositDeadline : null,
+    failure_reason: lapsed(payment) ? 'No payment arrived in time.' : payment.failureReason,
     paid_at: payment.paidAt,
     links: proofLinks(payment),
   },

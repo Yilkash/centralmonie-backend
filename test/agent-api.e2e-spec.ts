@@ -22,6 +22,10 @@ class FakeCrossChain extends CrossChain {
   state: CrossChainState = { status: 'waiting', transactions: [] };
   quotes: CrossChainRequest[] = [];
   failNext = 0;
+  missingNear = new Set<string>();
+  override async nearAccountMissing(account: string) {
+    return this.missingNear.has(account);
+  }
   async priceCheck(request: CrossChainRequest) {
     return { depositAddress: null, payInMinor: request.usdcMinor + 2_400 };
   }
@@ -596,6 +600,59 @@ describe('Agent API', () => {
       expect(again.json().code).toBe('already_paid');
     });
 
+    it('can pay USDC to the user\'s own wallet or a Base address instead of a bank, with no bank payout', async () => {
+      const wallet = '0x70997970C51812dc3A010C7d01b50e0d17dc79C8';
+      const link = await links.create({ ...user, walletAddress: wallet } as User, { amountNaira: 5000, toMyWallet: true, note: 'Repair' });
+      expect((await open(link.id)).json()).toMatchObject({ to: wallet, receives: 'USDC on Base', account_number: null });
+      const before = payout.deposits.length;
+      const paying = (await payLink(link.id)).json();
+      expect(paying.payment.receiver_gets_usdc).toEqual(expect.any(String));
+      expect(crossChain.quotes.at(-1)).toMatchObject({ recipient: wallet, toNear: false });
+      expect(payout.deposits).toHaveLength(before);
+      crossChain.state = { status: 'delivered', transactions: ['0x' + 'a'.repeat(64)] };
+      const paid = (await open(link.id)).json();
+      expect(paid).toMatchObject({ paid: true, payment: { status: 'paid', links: [{ label: 'Delivery on Base' }] } });
+
+      const other = await links.create(user, { amountNaira: 1000, usdcAddress: wallet });
+      expect((await open(other.id)).json()).toMatchObject({ to: wallet, receives: 'USDC on Base' });
+    });
+
+    it('refuses a USDC receiver that cannot work', async () => {
+      await expect(links.create(user, { amountNaira: 1000, toMyWallet: true })).rejects.toThrow('still being set up');
+      await expect(links.create(user, { amountNaira: 1000, usdcAddress: '0x123' })).rejects.toThrow('not a valid Base address');
+      await expect(links.create(user, { amountNaira: 1000, usdcAddress: '0x0000000000000000000000000000000000000000' })).rejects.toThrow('zero address');
+      crossChain.missingNear.add('nobody.near');
+      await expect(links.create(user, { amountNaira: 1000, nearAccount: 'nobody.near' })).rejects.toThrow('does not exist');
+    });
+
+    it('stops offering an address once the time to send has passed, and lets the payer start again', async () => {
+      const link = await links.create(user, { amountNaira: 5000, bankName: 'OPay', accountNumber: '8031234568' });
+      const first = (await payLink(link.id)).json().payment;
+      await pool.query(`update agent_payments set deposit_deadline = now() - interval '1 second' where id = $1`, [first.id]);
+      expect((await open(link.id)).json()).toMatchObject({ open: true, payment: { id: first.id, status: 'expired', deposit_address: null, deposit_deadline: null, failure_reason: 'No payment arrived in time.' } });
+      const second = (await payLink(link.id)).json().payment;
+      expect(second.id).not.toBe(first.id);
+      expect(second).toMatchObject({ status: 'awaiting_deposit', deposit_address: '0xdeposit' });
+    });
+
+    it('keeps an invoice payable past its due date, and refuses a date more than a year away', async () => {
+      const inDays = (days: number) => new Date(Date.now() + days * 86_400_000).toISOString().slice(0, 10);
+      const link = await links.create(user, { amountNaira: 5000, bankName: 'OPay', accountNumber: '8031234568', dueDate: inDays(60) });
+      expect(link.expiresAt.getTime()).toBeGreaterThan(Date.now() + 70 * 86_400_000);
+      const soon = await links.create(user, { amountNaira: 5000, bankName: 'OPay', accountNumber: '8031234568', dueDate: inDays(1) });
+      expect(soon.expiresAt.getTime()).toBeGreaterThan(Date.now() + 13 * 86_400_000);
+      await expect(links.create(user, { amountNaira: 5000, bankName: 'OPay', accountNumber: '8031234568', dueDate: inDays(400) })).rejects.toThrow('at most a year');
+    });
+
+    it('says plainly when the NEAR refund account does not exist, and offers no address', async () => {
+      const link = await links.create(user, { amountNaira: 5000, bankName: 'OPay', accountNumber: '8031234568' });
+      crossChain.missingNear.add('10kokbo.near');
+      const response = await payLink(link.id, { pay_from: 'near', refund_to: '10kokbo.near' });
+      expect(response.statusCode).toBe(400);
+      expect(response.json()).toMatchObject({ code: 'invalid_refund_address', message: 'The NEAR account 10kokbo.near does not exist. Check the spelling.' });
+      expect((await open(link.id)).json().payment).toBeNull();
+    });
+
     it('gives the same payment on a refresh, and allows a new one after it expires', async () => {
       const link = await links.create(user, { amountNaira: 5000, bankName: 'OPay', accountNumber: '8031234568' });
       const first = (await payLink(link.id)).json().payment.id;
@@ -617,8 +674,9 @@ describe('Agent API', () => {
 
     it('works as an invoice: due date and items are shown, must add up, and cannot be in the past', async () => {
       const lineItems = [{ description: 'Generator repair', amountNaira: 3000 }, { description: 'Parts', amountNaira: 2000 }];
-      const link = await links.create(user, { lineItems, dueDate: '2099-01-31', bankName: 'OPay', accountNumber: '8031234568', note: 'Invoice 7' });
-      expect((await open(link.id)).json()).toMatchObject({ amount_naira: 5000, due_date: '2099-01-31', overdue: false, line_items: [{ description: 'Generator repair', amount_naira: 3000 }, { description: 'Parts', amount_naira: 2000 }] });
+      const due = new Date(Date.now() + 90 * 86_400_000).toISOString().slice(0, 10);
+      const link = await links.create(user, { lineItems, dueDate: due, bankName: 'OPay', accountNumber: '8031234568', note: 'Invoice 7' });
+      expect((await open(link.id)).json()).toMatchObject({ amount_naira: 5000, due_date: due, overdue: false, line_items: [{ description: 'Generator repair', amount_naira: 3000 }, { description: 'Parts', amount_naira: 2000 }] });
       await expect(links.create(user, { amountNaira: 9000, lineItems, bankName: 'OPay', accountNumber: '8031234568' })).rejects.toThrow('add up');
       await expect(links.create(user, { amountNaira: 5000, dueDate: '2020-01-01', bankName: 'OPay', accountNumber: '8031234568' })).rejects.toThrow('already passed');
       await pool.query(`update pay_links set due_date = '2020-01-01' where id = $1`, [link.id]);

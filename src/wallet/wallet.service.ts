@@ -230,7 +230,7 @@ export class WalletService {
         type_label: 'Pay link',
         created_at: payment.paidAt ?? payment.createdAt,
         description: link.note ? `Paid by link: ${link.note}` : 'Paid by link',
-        detail: link.nearAccount ?? `${link.bankName} ****${link.accountNumber.slice(-4)}`,
+        detail: link.nearAccount ?? link.usdcAddress ?? `${link.bankName} ****${link.accountNumber.slice(-4)}`,
         route: null,
         recipient: payment.payerName,
         amount_naira: formatNaira(payment.payoutKobo ?? payment.amountKobo),

@@ -1,0 +1,1 @@
+ALTER TABLE "pay_links" ADD COLUMN "usdc_address" text;

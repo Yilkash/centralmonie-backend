@@ -115,3 +115,24 @@ describe('SimulatedCrossChain', () => {
     await expect(chain.status(depositAddress!)).resolves.toMatchObject({ status: 'delivered' });
   });
 });
+
+describe('checking a NEAR account exists', () => {
+  const answering = (body: unknown) => jest.fn().mockResolvedValue({ json: async () => body }) as unknown as typeof fetch;
+  const chain = (fetchFn: typeof fetch) => new OneClickCrossChain(undefined, 'https://1click.test', fetchFn, 0);
+
+  it('is missing only when NEAR says so', async () => {
+    await expect(chain(answering({ error: { cause: { name: 'UNKNOWN_ACCOUNT' } } })).nearAccountMissing('typo.near')).resolves.toBe(true);
+    await expect(chain(answering({ result: { amount: '0' } })).nearAccountMissing('real.near')).resolves.toBe(false);
+  });
+
+  it('does not stop a payment when the check itself fails', async () => {
+    await expect(chain(answering({ error: { cause: { name: 'UNAVAILABLE_SHARD' } } })).nearAccountMissing('real.near')).resolves.toBe(false);
+    await expect(chain(jest.fn().mockRejectedValue(new Error('down')) as unknown as typeof fetch).nearAccountMissing('real.near')).resolves.toBe(false);
+  });
+
+  it('never asks about a 64-character account, which can receive before its first use', async () => {
+    const fetchFn = answering({});
+    await expect(chain(fetchFn).nearAccountMissing('a'.repeat(64))).resolves.toBe(false);
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
+});

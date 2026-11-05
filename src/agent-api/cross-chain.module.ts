@@ -14,7 +14,7 @@ import { CrossChain, OneClickCrossChain, SimulatedCrossChain } from './cross-cha
           : new OneClickCrossChain(config.get('ONECLICK_API_KEY', { infer: true }), config.get('ONECLICK_BASE_URL', { infer: true }), fetch, 1500, {
               bps: config.get('ONECLICK_FEE_BPS', { infer: true }),
               recipient: config.get('ONECLICK_FEE_RECIPIENT', { infer: true }),
-            }),
+            }, config.get('NEAR_RPC_URL', { infer: true })),
     },
   ],
   exports: [CrossChain],

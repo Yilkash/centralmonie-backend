@@ -10,6 +10,7 @@ import { formatNaira, koboToUsdcMinor } from '../money/money';
 import { AuditService } from '../ops/audit.service';
 import { AGENT_STATUSES_THAT_COUNT, GuardsService } from '../ops/guards.service';
 import { AgentPayout, BankLookup, ExchangeRates, PaymentProvider } from '../providers/providers';
+import { isNearAccount } from '../chain/usdc-chains';
 import { CrossChain, PayFrom, PayToken, USDT_ON } from './cross-chain';
 import { NearRelayer, relayProblem, SignedDelegate } from './near-relay';
 
@@ -123,7 +124,7 @@ export interface QuoteInput {
   purpose?: string;
   clientIp?: string;
   payToken?: PayToken;
-  /** USDC straight to this NEAR account, with no bank payout. */
+  /** USDC straight to this NEAR account or Base address, with no bank payout. */
   deliverTo?: string;
 }
 
@@ -225,6 +226,7 @@ export class AgentApiService {
     if (made >= MAX_QUOTES_A_DAY) throw new AgentRefusal('too_many_quotes', 'This key has asked for too many quotes today.', 429);
 
     await this.assertAllowed(key, amountKobo, this.db);
+    if (input.payFrom === 'near' && (await this.crossChain.nearAccountMissing(input.refundTo))) throw new AgentRefusal('invalid_refund_address', `The NEAR account ${input.refundTo} does not exist. Check the spelling.`, 400);
 
     const rate = await this.rates.nairaPerUsdc().catch(() => {
       throw new AgentRefusal('rate_unavailable', 'We could not get a rate just now. Nothing was sent. Please try again.', 503);
@@ -235,7 +237,7 @@ export class AgentApiService {
 
     const accountName = input.deliverTo ?? (await this.bankName(input));
     const { payInMinor } = await this.crossChain
-      .priceCheck({ payFrom: input.payFrom, usdcMinor, recipient: input.deliverTo ?? this.config.get('COLLECTION_ADDRESS', { infer: true }) ?? input.refundTo, refundTo: input.refundTo, deadline: new Date(Date.now() + DEPOSIT_WINDOW_MS), payToken: input.payToken ?? 'USDC', toNear: Boolean(input.deliverTo) })
+      .priceCheck({ payFrom: input.payFrom, usdcMinor, recipient: input.deliverTo ?? this.config.get('COLLECTION_ADDRESS', { infer: true }) ?? input.refundTo, refundTo: input.refundTo, deadline: new Date(Date.now() + DEPOSIT_WINDOW_MS), payToken: input.payToken ?? 'USDC', toNear: Boolean(input.deliverTo && isNearAccount(input.deliverTo)) })
       .catch((error: Error) => {
         this.logger.warn(`price check failed: ${error.message.slice(0, 200)}`);
         throw new AgentRefusal('route_unavailable', 'We could not price that route just now. Nothing was sent. Please try again.', 503);
@@ -328,7 +330,7 @@ export class AgentApiService {
       const routeEnds = Math.min(Date.now() + ROUTE_DEADLINE_MS, partnerEnds);
       if (routeEnds - Date.now() < SHORTEST_ROUTE_MS) throw new Error('The partner gave too little time for the deposit');
       const deadline = new Date(Math.min(Date.now() + DEPOSIT_WINDOW_MS, routeEnds - 5 * 60_000));
-      const quote = await this.crossChain.quote({ payFrom: payment.payFrom as PayFrom, usdcMinor: payment.usdcMinor, recipient: deposit.address, refundTo: payment.refundTo, deadline: new Date(routeEnds), payToken: payment.payToken as PayToken, toNear: Boolean(payment.deliverTo) });
+      const quote = await this.crossChain.quote({ payFrom: payment.payFrom as PayFrom, usdcMinor: payment.usdcMinor, recipient: deposit.address, refundTo: payment.refundTo, deadline: new Date(routeEnds), payToken: payment.payToken as PayToken, toNear: Boolean(payment.deliverTo && isNearAccount(payment.deliverTo)) });
       const [row] = await this.db
         .update(agentPayments)
         .set({ status: 'awaiting_deposit', payoutAddress: deposit.address, payoutKobo: deposit.destinationKobo, depositAddress: quote.depositAddress, payInMinor: quote.payInMinor, depositDeadline: deadline, updatedAt: new Date() })

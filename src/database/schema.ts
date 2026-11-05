@@ -390,6 +390,8 @@ export const payLinks = pgTable(
     lineItems: jsonb('line_items').$type<{ description: string; amountNaira: number }[]>(),
     /** Set when the receiver wants USDC on this NEAR account instead of naira in a bank. */
     nearAccount: text('near_account'),
+    /** Set when the receiver wants USDC on this Base address instead of naira in a bank. */
+    usdcAddress: text('usdc_address'),
     paymentId: uuid('payment_id').references(() => agentPayments.id),
     expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
