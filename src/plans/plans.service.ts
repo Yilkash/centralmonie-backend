@@ -2,8 +2,9 @@ import { ConflictException, Inject, Injectable, NotFoundException } from '@nestj
 import { ConfigService } from '@nestjs/config';
 import { and, asc, eq, inArray, sql } from 'drizzle-orm';
 import { WalletCall } from '../chain/chain';
-import { CrossChain } from '../agent-api/cross-chain';
-import { addressRefusal, checkAddress, isNearAccount } from '../chain/address-check';
+import { CrossChain, routeProblem } from '../agent-api/cross-chain';
+import { addressRefusal, checkAddress } from '../chain/address-check';
+import { chainOfWallet } from '../chain/usdc-chains';
 import { Chain, usdcTransferCall } from '../chain/chain.service';
 import { Env } from '../config/env';
 import { describeDestination, ContactsService } from '../contacts/contacts.service';
@@ -12,6 +13,7 @@ import { LimitsService } from '../payments/limits.service';
 import { PaymentEngine } from '../payments/payment-engine.service';
 import { AuditService } from '../ops/audit.service';
 import { GuardsService } from '../ops/guards.service';
+import { SwitchesService } from '../ops/switches.service';
 import { contacts, Plan, PlanItem, Payment, payments, planItems, plans, User, users } from '../database/schema';
 import { DAILY_LIMIT_KOBO, formatNaira, formatUsdc, koboToUsdcMinor, nairaToKobo, parseUsdc, usdcMinorToKobo } from '../money/money';
 import { DataPlans, ExchangeRates, PaymentProvider, PaymentRequest } from '../providers/providers';
@@ -34,7 +36,7 @@ export interface PlanView extends Plan {
   calls: WalletCall[];
 }
 
-const NEAR_ROUTE_MS = 30 * 60_000;
+const CROSS_CHAIN_ROUTE_MS = 30 * 60_000;
 
 @Injectable()
 export class PlansService {
@@ -48,6 +50,7 @@ export class PlansService {
     private readonly engine: PaymentEngine,
     private readonly chain: Chain,
     private readonly crossChain: CrossChain,
+    private readonly switches: SwitchesService,
     private readonly config: ConfigService<Env, true>,
     private readonly guards: GuardsService,
     private readonly audit: AuditService,
@@ -138,12 +141,23 @@ export class PlansService {
 
     // Crypto sent to a wrong address cannot come back, so these are stopped and the whole address is always shown.
     let addressCheck: string | null = null;
+    let delivery: PlanItem['delivery'] = null;
     if (item.route === 'usdc' && destination.walletAddress) {
       const [owner] = await this.db.select({ wallet: users.walletAddress }).from(users).where(eq(users.id, userId));
       const refused = addressRefusal(destination.walletAddress, { usdc: this.chain.usdcAddress(), own: owner?.wallet ?? null });
       if (refused) throw new PlanRefused(refused);
-      // A NEAR account has no history on Base to read, so the name and the warning on the approval are the check.
-      if (this.onChain && !isNearAccount(destination.walletAddress)) addressCheck = await checkAddress(this.chain, destination.walletAddress);
+      const chain = chainOfWallet(destination);
+      if (chain.key === 'base') {
+        if (this.onChain) addressCheck = await checkAddress(this.chain, destination.walletAddress);
+      } else {
+        if (await this.switches.isPaused('usdc_other_chains')) throw new PlanRefused(`Sending to ${chain.name} is paused for the moment. Nothing was sent.`);
+        const priced = await this.crossChain
+          .sendFromBase({ usdcMinor, destinationAsset: chain.assetId, recipient: destination.walletAddress, refundTo: owner?.wallet ?? this.chain.usdcAddress(), deadline: new Date(Date.now() + CROSS_CHAIN_ROUTE_MS), dry: true })
+          .catch((error: unknown) => {
+            throw new PlanRefused(routeProblem(error, chain.name));
+          });
+        delivery = { chain: chain.key, name: chain.name, receiverMinor: priced.receiverMinor, seconds: priced.seconds };
+      }
     }
 
     return {
@@ -151,6 +165,7 @@ export class PlansService {
       recipientName: contact.name,
       recipientDetail: destination.walletAddress ?? describeDestination(destination),
       addressCheck,
+      delivery,
       // The partner needs the plan's own id to deliver it.
       destination: dataPlanId ? { ...destination, dataPlanId } : destination,
       dataPlan,
@@ -273,15 +288,19 @@ export class PlansService {
     for (const item of plan.items) {
       if (item.route === 'usdc') {
         const to = (item.destination as { walletAddress: string }).walletAddress;
-        if (!isNearAccount(to)) {
+        const chain = chainOfWallet(item.destination as { walletAddress: string; network?: string | null });
+        if (chain.key === 'base') {
           addresses.set(item.id, { address: to, refundable: false });
           continue;
         }
-        // The user pays on Base. NEAR Intents delivers to the account, and refunds this wallet if it cannot.
-        const route = await this.crossChain.sendToNear({ usdcMinor: item.usdcMinor, recipient: to, refundTo: user.walletAddress, deadline: new Date(Date.now() + NEAR_ROUTE_MS) }).catch(() => {
-          throw new PlanRefused('Sending to NEAR is not available right now. Nothing was sent. Please try again later.');
-        });
-        addresses.set(item.id, { address: route.depositAddress, refundable: false });
+        // The user pays on Base. NEAR Intents delivers on the other chain, and refunds this wallet if it cannot.
+        if (await this.switches.isPaused('usdc_other_chains')) throw new PlanRefused(`Sending to ${chain.name} is paused for the moment. Nothing was sent.`);
+        const route = await this.crossChain
+          .sendFromBase({ usdcMinor: item.usdcMinor, destinationAsset: chain.assetId, recipient: to, refundTo: user.walletAddress, deadline: new Date(Date.now() + CROSS_CHAIN_ROUTE_MS), dry: false })
+          .catch((error: unknown) => {
+            throw new PlanRefused(routeProblem(error, chain.name));
+          });
+        addresses.set(item.id, { address: route.depositAddress!, refundable: false });
         continue;
       }
       const request: PaymentRequest = {

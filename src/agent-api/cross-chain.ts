@@ -25,6 +25,30 @@ export interface CrossChainQuote {
   payInMinor: number;
 }
 
+export interface SendRequest {
+  usdcMinor: number;
+  destinationAsset: string;
+  recipient: string;
+  refundTo: string;
+  deadline: Date;
+  dry: boolean;
+}
+
+export interface SendQuote {
+  depositAddress: string | null;
+  receiverMinor: number;
+  seconds: number | null;
+}
+
+/** A sentence for the user about why a route refused, and nothing from the partner they should not see. */
+export function routeProblem(error: unknown, chainName: string): string {
+  const text = String((error as Error)?.message ?? '');
+  if (/too low/i.test(text)) return `That amount is too small to send to ${chainName}. Nothing was sent. Try at least 0.5 USDC.`;
+  if (/trustline/i.test(text)) return `That account on ${chainName} is not set up to receive USDC yet. Nothing was sent.`;
+  if (/swap limits/i.test(text)) return `Sending that amount to ${chainName} is limited for the moment. Nothing was sent. Please try again later.`;
+  return `Sending to ${chainName} is not available right now. Nothing was sent. Please try again later.`;
+}
+
 export type CrossChainStatus = 'waiting' | 'moving' | 'delivered' | 'underpaid' | 'refunded' | 'failed';
 
 export interface CrossChainState {
@@ -36,8 +60,8 @@ export interface CrossChainState {
 export abstract class CrossChain {
   abstract priceCheck(request: CrossChainRequest): Promise<CrossChainQuote>;
   abstract quote(request: CrossChainRequest): Promise<CrossChainQuote>;
-  /** Exactly this much USDC leaves Base, and a little less arrives at the NEAR account. */
-  abstract sendToNear(request: { usdcMinor: number; recipient: string; refundTo: string; deadline: Date }): Promise<{ depositAddress: string }>;
+  /** Exactly this much USDC leaves Base, and a little less arrives on the other chain. With dry, it only prices it. */
+  abstract sendFromBase(request: SendRequest): Promise<SendQuote>;
   abstract status(depositAddress: string): Promise<CrossChainState>;
 }
 
@@ -55,6 +79,8 @@ const ATTEMPTS = 4;
 const BASE_USDC = PAY_FROM.base;
 /** Stablecoin to stablecoin, so a small margin. Anything sent above the need comes back less a refund fee. */
 const SLIPPAGE_BPS = 10;
+/** Sending stablecoins between chains, where a route can move a little before it settles. */
+const SEND_SLIPPAGE_BPS = 50;
 
 export class OneClickCrossChain extends CrossChain {
   constructor(
@@ -75,14 +101,14 @@ export class OneClickCrossChain extends CrossChain {
     return this.ask(request, false);
   }
 
-  async sendToNear(request: { usdcMinor: number; recipient: string; refundTo: string; deadline: Date }): Promise<{ depositAddress: string }> {
-    const answer = await this.call<{ quote?: { depositAddress?: string } }>('POST', '/v0/quote', {
-      dry: false,
+  async sendFromBase(request: SendRequest): Promise<SendQuote> {
+    const answer = await this.call<{ quote?: { depositAddress?: string; amountOut?: string; timeEstimate?: number } }>('POST', '/v0/quote', {
+      dry: request.dry,
       swapType: 'EXACT_INPUT',
-      slippageTolerance: SLIPPAGE_BPS,
+      slippageTolerance: SEND_SLIPPAGE_BPS,
       originAsset: PAY_FROM.base,
       depositType: 'ORIGIN_CHAIN',
-      destinationAsset: PAY_FROM.near,
+      destinationAsset: request.destinationAsset,
       amount: String(request.usdcMinor),
       refundTo: request.refundTo,
       refundType: 'ORIGIN_CHAIN',
@@ -90,8 +116,10 @@ export class OneClickCrossChain extends CrossChain {
       recipientType: 'DESTINATION_CHAIN',
       deadline: request.deadline.toISOString(),
     });
-    if (!answer.quote?.depositAddress) throw new Error('NEAR Intents gave no deposit address');
-    return { depositAddress: answer.quote.depositAddress };
+    const receiverMinor = Number(answer.quote?.amountOut);
+    if (!Number.isSafeInteger(receiverMinor) || receiverMinor <= 0 || receiverMinor > request.usdcMinor) throw new Error('NEAR Intents gave an unusable amount');
+    if (!request.dry && !answer.quote?.depositAddress) throw new Error('NEAR Intents gave no deposit address');
+    return { depositAddress: answer.quote?.depositAddress ?? null, receiverMinor, seconds: answer.quote?.timeEstimate ?? null };
   }
 
   async status(depositAddress: string): Promise<CrossChainState> {
@@ -176,8 +204,10 @@ export class SimulatedCrossChain extends CrossChain {
     return { depositAddress, payInMinor: Math.ceil(request.usdcMinor * 1.002) };
   }
 
-  async sendToNear(): Promise<{ depositAddress: string }> {
-    return { depositAddress: `0x${randomBytes(20).toString('hex')}` };
+  async sendFromBase(request: SendRequest): Promise<SendQuote> {
+    const depositAddress = request.dry ? null : `0x${randomBytes(20).toString('hex')}`;
+    if (depositAddress) this.checks.set(depositAddress, 0);
+    return { depositAddress, receiverMinor: Math.floor(request.usdcMinor * 0.998), seconds: 40 };
   }
 
   /** Waiting on the first check, delivered from the second. */

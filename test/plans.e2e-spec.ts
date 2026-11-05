@@ -9,6 +9,7 @@ import { applyMigrations } from '../src/database/migrate';
 import { IdentityProvider, InvalidIdentityError } from '../src/identity/identity-provider';
 import { ProposedItem } from '../src/plans/plan.types';
 import { presentPlan } from '../src/plans/plans.controller';
+import { SchedulesService } from '../src/schedules/schedules.service';
 import { PlanRefused, PlansService } from '../src/plans/plans.service';
 import { PaymentProvider } from '../src/providers/providers';
 import { User } from '../src/database/schema';
@@ -219,18 +220,49 @@ describe('plans and contacts', () => {
       ).rejects.toThrow('your own wallet');
     });
 
-    it('accepts a NEAR account, and names NEAR as the network on the approval', async () => {
-      const wallet = await saved(alice, 'Ada', { kind: 'wallet', walletAddress: 'ada.near' });
-      const plan = await plans.propose(alice, [{ route: 'usdc', destinationId: wallet.id, amountNaira: null, amountUsdc: '1', dataPlanId: null }]);
-      const shown = presentPlan(plan).items[0]!;
-      expect(shown.recipient_detail).toBe('ada.near');
-      expect(shown.network).toBe('NEAR, through NEAR Intents');
+    it.each([
+      ['a NEAR account', 'ada.near', null, 'NEAR'],
+      ['a Solana address', '9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM', null, 'Solana'],
+      ['a 0x address on a named chain', '0x70997970C51812dc3A010C7d01b50e0d17dc79C8', 'Arbitrum', 'Arbitrum'],
+      ['the short name of a chain', '0x70997970C51812dc3A010C7d01b50e0d17dc79C8', 'matic', 'Polygon'],
+    ])('prices %s, and shows the chain and what the receiver gets', async (_name, walletAddress, chain, network) => {
+      const contact = await contacts.propose(alice, 'Ada', [], { kind: 'wallet', walletAddress, chain });
+      await contacts.confirm(alice, contact.id);
+      const plan = await plans.propose(alice, [{ route: 'usdc', destinationId: contact.destinations[0]!.id, amountNaira: null, amountUsdc: '5', dataPlanId: null }]);
+      expect(presentPlan(plan).items[0]).toMatchObject({ recipient_detail: walletAddress, network, receiver_gets: '4.99 USDC', receiver_gets_exact: '4.990000', fee_warning: false });
+    });
+
+    it('keeps a 0x address with no chain named on Base, with no route', async () => {
+      const address = '0x70997970C51812dc3A010C7d01b50e0d17dc79C8';
+      const contact = await contacts.propose(alice, 'Ada', [], { kind: 'wallet', walletAddress: address });
+      await contacts.confirm(alice, contact.id);
+      const plan = await plans.propose(alice, [{ route: 'usdc', destinationId: contact.destinations[0]!.id, amountNaira: null, amountUsdc: '5', dataPlanId: null }]);
+      expect(presentPlan(plan).items[0]).toMatchObject({ receiver_gets: null, fee_warning: false });
+      expect(presentPlan(plan).items[0]!.network).toMatch(/^Base/);
+    });
+
+    it.each([
+      ['a chain not offered', '0x70997970C51812dc3A010C7d01b50e0d17dc79C8', 'Tron', 'cannot send USDC to Tron'],
+      ['a NEAR name on another chain', 'ada.near', 'Arbitrum', 'a NEAR address'],
+      ['a Solana address on another chain', '9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM', 'Polygon', 'a Solana address'],
+      ['a 0x address on Solana', '0x70997970C51812dc3A010C7d01b50e0d17dc79C8', 'Solana', 'not a valid Solana address'],
+      ['USDC itself on Solana', 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', null, 'USDC token contract on Solana'],
+      ['USDC itself on Arbitrum', '0xaf88d065e77c8cC2239327C5EDb3A432268e5831', 'Arbitrum', 'USDC token contract on Arbitrum'],
+    ])('refuses %s', async (_name, walletAddress, chain, message) => {
+      await expect(contacts.propose(alice, 'X', [], { kind: 'wallet', walletAddress, chain })).rejects.toThrow(message);
+    });
+
+    it('refuses a schedule to another chain, for now', async () => {
+      const contact = await contacts.propose(alice, 'Ada', [], { kind: 'wallet', walletAddress: 'ada.near' });
+      await contacts.confirm(alice, contact.id);
+      const schedules = app.get(SchedulesService, { strict: false });
+      await expect(schedules.propose(alice, [{ route: 'usdc', destinationId: contact.destinations[0]!.id, amountNaira: null, amountUsdc: '5', dataPlanId: null, timing: { kind: 'once', delayMinutes: 30 } } as never])).rejects.toThrow('not available yet');
     });
 
     it('says what is wrong with a mistyped wallet address', async () => {
       const mistyped = '0xe1a9cdb2907134c35E8d055DD72605331f4E642d';
       await expect(contacts.propose(alice, 'Typo', [], { kind: 'wallet', walletAddress: mistyped })).rejects.toThrow('mistake');
-      await expect(contacts.propose(alice, 'Solana', [], { kind: 'wallet', walletAddress: 'So11111111111111111111111111111111111111112' })).rejects.toThrow('valid wallet address');
+      await expect(contacts.propose(alice, 'Tron', [], { kind: 'wallet', walletAddress: 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t' })).rejects.toThrow('not a valid Base address');
     });
 
     it('prices a mixed plan, taking the data price from the catalogue', async () => {

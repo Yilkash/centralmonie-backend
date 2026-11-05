@@ -1,4 +1,5 @@
 import { Module, OnModuleInit } from '@nestjs/common';
+import { CrossChainModule } from '../agent-api/cross-chain.module';
 import { ProvidersModule } from '../providers/providers.module';
 import { DepositsService } from './deposits.service';
 import { FundingService } from './funding.service';
@@ -7,7 +8,7 @@ import { PaymentEngine } from './payment-engine.service';
 import { WorkerService } from './worker.service';
 
 @Module({
-  imports: [ProvidersModule],
+  imports: [CrossChainModule, ProvidersModule],
   providers: [PaymentEngine, FundingService, LimitsService, DepositsService, WorkerService],
   exports: [PaymentEngine, FundingService, LimitsService, DepositsService, WorkerService],
 })

@@ -29,8 +29,8 @@ class FakeCrossChain extends CrossChain {
     this.quotes.push(request);
     return { depositAddress: '0xdeposit', payInMinor: request.usdcMinor + 2_400 };
   }
-  async sendToNear() {
-    return { depositAddress: '0xnear' };
+  async sendFromBase(request: { usdcMinor: number; dry: boolean }) {
+    return { depositAddress: request.dry ? null : '0xnear', receiverMinor: request.usdcMinor - 1000, seconds: 30 };
   }
   async status() {
     return this.state;
@@ -256,9 +256,11 @@ describe('Agent API', () => {
     });
 
     it('counts agent payments towards the company cap', async () => {
+      // Other test files leave payments behind, and those count towards the same cap.
+      await pool.query('TRUNCATE payments CASCADE');
       const big = await agents.createKey('Big', 9_000_000);
       const first = (await call('POST', '/v1/agent/quotes', { ...REQUEST, amount_naira: 4_900_000 }, big.key)).json();
-      await call('POST', '/v1/agent/payments', { quote_id: first.id }, big.key);
+      expect((await call('POST', '/v1/agent/payments', { quote_id: first.id }, big.key)).statusCode).toBe(200);
       const response = await call('POST', '/v1/agent/quotes', { ...REQUEST, amount_naira: 200_000 }, big.key);
       expect(response.json().code).toBe('paused');
     });

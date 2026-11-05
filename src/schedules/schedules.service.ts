@@ -1,4 +1,3 @@
-import { isNearAccount } from '../chain/address-check';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { ConflictException, Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -79,8 +78,8 @@ export class SchedulesService {
         try {
           const timing = normalise(item.timing, now);
           firstRun(timing, now);
-          // The scheduler pays on Base directly, and a NEAR account has no address there.
-          if (priced.route === 'usdc' && isNearAccount((priced.destination as { walletAddress?: string }).walletAddress ?? '')) throw new PlanRefused('Scheduled payments to NEAR accounts are not available yet. Send it now instead.');
+          // The scheduler pays on Base directly, with no way to follow a delivery on another chain.
+          if (priced.delivery) throw new PlanRefused(`Scheduled payments to ${priced.delivery.name} are not available yet. Send it now instead.`);
           return {
             userId,
             groupId,

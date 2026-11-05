@@ -1,4 +1,4 @@
-import { OneClickCrossChain, PAY_FROM, SimulatedCrossChain } from './cross-chain';
+import { OneClickCrossChain, PAY_FROM, routeProblem, SimulatedCrossChain } from './cross-chain';
 
 const request = { payFrom: 'near' as const, usdcMinor: 1_050_000, recipient: '0xrecipient', refundTo: 'agent.near', deadline: new Date('2026-11-05T00:00:00Z') };
 const reply = (status: number, body: unknown) => new Response(typeof body === 'string' ? body : JSON.stringify(body), { status });
@@ -32,10 +32,30 @@ describe('OneClickCrossChain', () => {
     expect(JSON.parse(none.mock.calls[0][1].body).appFees).toBeUndefined();
   });
 
-  it('sends to a NEAR account with an exact amount leaving Base, and refunds to the sender', async () => {
-    const fetchFn = jest.fn().mockResolvedValue(reply(200, goodQuote));
-    await expect(client(fetchFn).sendToNear({ usdcMinor: 5_000_000, recipient: 'ada.near', refundTo: '0xwallet', deadline: new Date('2026-11-05T00:00:00Z') })).resolves.toEqual({ depositAddress: '0xdeposit' });
-    expect(JSON.parse(fetchFn.mock.calls[0][1].body)).toMatchObject({ dry: false, swapType: 'EXACT_INPUT', originAsset: PAY_FROM.base, destinationAsset: PAY_FROM.near, amount: '5000000', recipient: 'ada.near', refundTo: '0xwallet', refundType: 'ORIGIN_CHAIN' });
+  it('sends an exact amount from Base to the chosen chain, refunding the sender, and reports what arrives', async () => {
+    const fetchFn = jest.fn().mockResolvedValue(reply(200, { quote: { depositAddress: '0xdeposit', amountOut: '4989536', timeEstimate: 32 } }));
+    const send = { usdcMinor: 5_000_000, destinationAsset: PAY_FROM.solana, recipient: 'someone', refundTo: '0xwallet', deadline: new Date('2026-11-05T00:00:00Z'), dry: false };
+    await expect(client(fetchFn).sendFromBase(send)).resolves.toEqual({ depositAddress: '0xdeposit', receiverMinor: 4_989_536, seconds: 32 });
+    expect(JSON.parse(fetchFn.mock.calls[0][1].body)).toMatchObject({ dry: false, swapType: 'EXACT_INPUT', originAsset: PAY_FROM.base, destinationAsset: PAY_FROM.solana, amount: '5000000', recipient: 'someone', refundTo: '0xwallet', refundType: 'ORIGIN_CHAIN' });
+  });
+
+  it('refuses a send quote it cannot use', async () => {
+    const send = { usdcMinor: 5_000_000, destinationAsset: PAY_FROM.near, recipient: 'a.near', refundTo: '0xw', deadline: new Date(), dry: false };
+    await expect(client(jest.fn().mockResolvedValue(reply(200, { quote: { amountOut: '4000000' } }))).sendFromBase(send)).rejects.toThrow('no deposit address');
+    await expect(client(jest.fn().mockResolvedValue(reply(200, { quote: { depositAddress: '0xd', amountOut: '6000000' } }))).sendFromBase(send)).rejects.toThrow('unusable');
+  });
+
+  it.each([
+    ['Amount is too low for bridge', 'too small'],
+    ['Destination address does not have a trustline for this asset', 'not set up'],
+    ['Temporary swap limits: minimum swap amount is $1,000', 'limited'],
+    ['Quoting for this pair is not available', 'not available'],
+    ['secret partner detail', 'not available'],
+  ])('turns "%s" into a sentence for the user', (message, expected) => {
+    const sentence = routeProblem(new Error(message), 'Solana');
+    expect(sentence).toContain(expected);
+    expect(sentence).toContain('Nothing was sent');
+    expect(sentence).not.toContain('partner');
   });
 
   it('retries server faults and dropped connections, including a server fault reported as a 400', async () => {

@@ -1,3 +1,5 @@
+import { CrossChain } from '../agent-api/cross-chain';
+import { chainOfWallet } from '../chain/usdc-chains';
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { and, eq, inArray, lt } from 'drizzle-orm';
 import { Chain } from '../chain/chain.service';
@@ -32,6 +34,7 @@ export class PaymentEngine {
     private readonly provider: PaymentProvider,
     private readonly chain: Chain,
     private readonly notifications: NotificationsService,
+    private readonly crossChain: CrossChain,
   ) {}
 
   /** Simulated mode: no USDC moves, so the partner step is all there is. */
@@ -51,6 +54,11 @@ export class PaymentEngine {
       .returning();
     if (!payment) return;
     if (payment.route === 'usdc') {
+      if (chainOfWallet(payment.destination as { walletAddress?: string; network?: string | null }).key !== 'base') {
+        // On its way, not there. The background job follows it, and Paid waits for delivery.
+        await this.finish(payment.id, { providerReference: payment.fundingAddress });
+        return;
+      }
       // The funding transfer went straight to the recipient, so it is the payment.
       await this.finish(payment.id, { status: 'completed', providerReference: payment.fundingTxHash });
       return;
@@ -126,7 +134,29 @@ export class PaymentEngine {
       .where(and(eq(payments.status, 'returning'), lt(payments.createdAt, cutoff)));
   }
 
+  /** Only reads where the money is. NEAR Intents holds it from here, and refunds the user's wallet itself. */
+  private async followDelivery(payment: Payment): Promise<void> {
+    const chain = chainOfWallet(payment.destination as { walletAddress?: string; network?: string | null });
+    const name = payment.recipientName ?? 'the recipient';
+    const state = await this.crossChain.status(payment.fundingAddress!);
+    const closed = async (values: Partial<Payment>, text: string) => {
+      const moved = await this.db.update(payments).set(values).where(and(eq(payments.id, payment.id), eq(payments.status, 'paying'))).returning({ id: payments.id });
+      if (moved.length > 0) await this.notifications.notify(payment.userId, text);
+    };
+    if (state.status === 'delivered') {
+      await closed({ status: 'completed', providerReference: state.transactions.at(-1) ?? payment.fundingAddress }, `Your ${formatUsdc(payment.usdcMinor)} reached ${name} on ${chain.name}.`);
+    } else if (state.status === 'refunded') {
+      await closed({ status: 'returned', failureReason: `It could not be delivered on ${chain.name}.` }, `Your payment to ${name} on ${chain.name} could not be delivered, so your USDC was sent back to your wallet, less a small fee.`);
+    } else if (state.status === 'failed') {
+      await closed({ status: 'needs_support', failureReason: `It could not be delivered on ${chain.name}.` }, `Your payment to ${name} on ${chain.name} failed, and ${formatUsdc(payment.usdcMinor)} has not come back yet. Our team is on it.`);
+    } else if (payment.createdAt.getTime() < Date.now() - PENDING_LIMIT_MS) {
+      await closed({ status: 'needs_support', failureReason: 'This has not arrived after a day.' }, `Your payment to ${name} on ${chain.name} has not arrived after a day. Our team is checking. Please do not send it again.`);
+      this.logger.error(`Payment ${payment.id} has been on its way for over a day`);
+    }
+  }
+
   private async checkPartner(payment: Payment): Promise<void> {
+    if (payment.route === 'usdc') return this.followDelivery(payment);
     const state = await this.provider.status(requestFor(payment).reference, payment.providerReference!, payment.route);
     if (state.state === 'completed') {
       await this.finish(payment.id, { status: 'completed' });

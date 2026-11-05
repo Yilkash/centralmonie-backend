@@ -3,7 +3,7 @@ import { eq } from 'drizzle-orm';
 import { DATABASE, Database } from '../database/database.module';
 import { opSwitches } from '../database/schema';
 
-export const SWITCH_NAMES = ['payments', 'schedules', 'airtime', 'data', 'bank', 'usdc', 'deposits'] as const;
+export const SWITCH_NAMES = ['payments', 'schedules', 'airtime', 'data', 'bank', 'usdc', 'usdc_other_chains', 'deposits'] as const;
 export type SwitchName = (typeof SWITCH_NAMES)[number];
 
 /** Pause switches, read fresh each time so pausing takes effect on the very next payment. */

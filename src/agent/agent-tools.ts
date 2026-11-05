@@ -70,11 +70,12 @@ export const AGENT_TOOLS: Anthropic.Tool[] = [
               data_plan_id: nullable('string'),
               new_phone_number: { type: ['string', 'null'], description: 'Only for airtime to a phone not in list_contacts. Otherwise null.' },
               new_wallet_address: { type: ['string', 'null'], description: 'Only for USDC to a wallet not in list_contacts. Otherwise null.' },
+              new_wallet_chain: { type: ['string', 'null'], description: 'The network the user named for that new wallet, such as Solana or Arbitrum. Null if they named none, which means Base unless the address can only be NEAR or Solana.' },
               new_bank_name: { type: ['string', 'null'], description: 'Only for a bank transfer to an account not in list_contacts. Otherwise null.' },
               new_account_number: { type: ['string', 'null'], description: 'The 10-digit account number for that new bank account. Otherwise null.' },
               new_contact_name: { type: ['string', 'null'], description: 'The name given for that new recipient, or null if none was given.' },
             },
-            required: ['route', 'destination_id', 'amount_naira', 'amount_usdc', 'data_plan_id', 'new_phone_number', 'new_wallet_address', 'new_bank_name', 'new_account_number', 'new_contact_name'],
+            required: ['route', 'destination_id', 'amount_naira', 'amount_usdc', 'data_plan_id', 'new_phone_number', 'new_wallet_address', 'new_wallet_chain', 'new_bank_name', 'new_account_number', 'new_contact_name'],
             additionalProperties: false,
           },
         },
@@ -161,8 +162,9 @@ export const AGENT_TOOLS: Anthropic.Tool[] = [
         bank_name: nullable('string'),
         account_number: nullable('string'),
         wallet_address: nullable('string'),
+        wallet_chain: { ...nullable('string'), description: 'The network the user named for that wallet. Null if none was named.' },
       },
-      required: ['name', 'aliases', 'kind', 'phone', 'bank_name', 'account_number', 'wallet_address'],
+      required: ['name', 'aliases', 'kind', 'phone', 'bank_name', 'account_number', 'wallet_address', 'wallet_chain'],
       additionalProperties: false,
     },
   },
@@ -207,6 +209,7 @@ const planInput = z.object({
       data_plan_id: z.string().nullable(),
       new_phone_number: z.string().nullish(),
       new_wallet_address: z.string().nullish(),
+      new_wallet_chain: z.string().nullish(),
       new_bank_name: z.string().nullish(),
       new_account_number: z.string().nullish(),
       new_contact_name: z.string().nullish(),
@@ -265,6 +268,7 @@ const contactInput = z.object({
   bank_name: z.string().nullable(),
   account_number: z.string().nullable(),
   wallet_address: z.string().nullable(),
+  wallet_chain: z.string().nullish(),
 });
 
 export interface ToolOutcome {
@@ -371,7 +375,7 @@ export class AgentToolbox {
             user.id,
             item.new_contact_name?.trim() || phone || walletAddress || '',
             [],
-            phone ? { kind: 'phone', phone } : walletAddress ? { kind: 'wallet', walletAddress } : { kind: 'bank', ...bank! },
+            phone ? { kind: 'phone', phone } : walletAddress ? { kind: 'wallet', walletAddress, chain: item.new_wallet_chain ?? null } : { kind: 'bank', ...bank! },
           );
           created.push(contact.id);
           destinationId = contact.destinations[0]!.id;
@@ -460,7 +464,7 @@ export class AgentToolbox {
       case 'bank':
         return { kind: 'bank', bankName: details.bank_name ?? '', accountNumber: details.account_number ?? '' };
       case 'wallet':
-        return { kind: 'wallet', walletAddress: details.wallet_address ?? '' };
+        return { kind: 'wallet', walletAddress: details.wallet_address ?? '', chain: details.wallet_chain ?? null };
     }
   }
 }

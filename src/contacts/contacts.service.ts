@@ -1,7 +1,7 @@
 import { Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { and, eq, inArray } from 'drizzle-orm';
 import { getAddress, isAddress } from 'viem';
-import { isNearAccount } from '../chain/address-check';
+import { chainFromAddress, chainNamed, CHAIN_NAMES, USDC_CHAINS } from '../chain/usdc-chains';
 import { DATABASE, Database } from '../database/database.module';
 import { Contact, ContactDestination, contactDestinations, contacts } from '../database/schema';
 import { BankLookup, PHONE_NETWORKS } from '../providers/providers';
@@ -9,7 +9,7 @@ import { BankLookup, PHONE_NETWORKS } from '../providers/providers';
 export type NewDestination =
   | { kind: 'phone'; phone: string }
   | { kind: 'bank'; bankName: string; accountNumber: string }
-  | { kind: 'wallet'; walletAddress: string };
+  | { kind: 'wallet'; walletAddress: string; chain?: string | null };
 
 export interface ContactWithDestinations extends Contact {
   destinations: ContactDestination[];
@@ -59,14 +59,17 @@ export class ContactsService {
         return { kind: 'bank' as const, bankName: destination.bankName, accountNumber: destination.accountNumber, accountName };
       }
       case 'wallet': {
-        if (isNearAccount(destination.walletAddress)) return { kind: 'wallet' as const, walletAddress: destination.walletAddress };
-        if (isAddress(destination.walletAddress, { strict: false }) && !isAddress(destination.walletAddress)) {
-          throw new ContactRefused('That address has a mistake in it: its capital letters do not match its checksum. Please copy it again.');
-        }
-        if (!isAddress(destination.walletAddress)) {
-          throw new ContactRefused('That is not a valid wallet address. It should be a Base address starting with 0x, or a NEAR account such as name.near. Addresses from networks such as Solana or Tron cannot be used.');
-        }
-        return { kind: 'wallet' as const, walletAddress: getAddress(destination.walletAddress) };
+        const address = destination.walletAddress.trim();
+        const named = chainNamed(destination.chain);
+        if (destination.chain?.trim() && !named) throw new ContactRefused(`I cannot send USDC to ${destination.chain.trim()} yet. I can send to ${CHAIN_NAMES}.`);
+        const own = chainFromAddress(address);
+        if (named && own && named.key !== own.key) throw new ContactRefused(`That is a ${own.name} address, not a ${named.name} one. Please check the address or the network.`);
+        const chain = named ?? own ?? USDC_CHAINS.base;
+        if (isAddress(address, { strict: false }) && !isAddress(address)) throw new ContactRefused('That address has a mistake in it: its capital letters do not match its checksum. Please copy it again.');
+        if (!chain.valid(address)) throw new ContactRefused(`That is not a valid ${chain.name} address. Addresses from a network such as Tron cannot be used. I can send to ${CHAIN_NAMES}.`);
+        if (address.toLowerCase() === chain.usdc.toLowerCase() || address === chain.usdc) throw new ContactRefused(`That is the USDC token contract on ${chain.name}, not a wallet. Anything sent there is lost.`);
+        const isEvm = isAddress(address);
+        return { kind: 'wallet' as const, walletAddress: isEvm ? getAddress(address) : address, network: chain.key === 'base' ? null : chain.key };
       }
     }
   }

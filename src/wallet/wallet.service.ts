@@ -1,6 +1,7 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { and, desc, eq, gte, ilike, inArray, isNotNull, lte, or, sql } from 'drizzle-orm';
 import { Chain } from '../chain/chain.service';
+import { chainOfWallet } from '../chain/usdc-chains';
 import { DATABASE, Database } from '../database/database.module';
 import { deposits, nairaDeposits, payments, User } from '../database/schema';
 import { DAILY_LIMIT_KOBO, formatNaira, formatUsdc, usdcMinorToKobo } from '../money/money';
@@ -24,6 +25,12 @@ export interface WalletSummary {
 const ROUTE_LABEL: Record<string, string> = { bank: 'Bank transfer', airtime: 'Airtime', data: 'Data', usdc: 'USDC transfer' };
 
 /** What a shareable receipt shows. Numbers are masked because these get sent to other people. */
+/** The chain a USDC payment was delivered on, when it is not the one the wallet is on. */
+function crossChainName(destination: unknown): string | null {
+  const chain = chainOfWallet(destination as { walletAddress?: string; network?: string | null });
+  return chain.key === 'base' ? null : chain.name;
+}
+
 export interface Receipt {
   reference: string;
   kind: string;
@@ -305,7 +312,7 @@ export class WalletService {
       title: 'Payment successful',
       recipient: payment.recipientName,
       recipient_detail: maskedDestination(payment.destination),
-      network: usdc ? this.chain.networkName() : null,
+      network: usdc ? (crossChainName(payment.destination) ?? this.chain.networkName()) : null,
       amount: usdc ? formatUsdc(payment.usdcMinor) : formatNaira(payment.amountKobo),
       second_amount: usdc ? null : formatUsdc(payment.usdcMinor),
       // The partner sets the exact naira from the rate when it pays out, so the quote can differ by a little.
