@@ -82,6 +82,8 @@ const envSchema = z.object({
   // Timers for deposits, reconciliation and schedules. Off in unit tests.
   WORKER_ENABLED: z.enum(['true', 'false']).default('true').transform((value) => value === 'true'),
   WORKER_INTERVAL_MS: z.coerce.number().int().positive().default(15000),
+  /** Page views reuse a partner check on a payment younger than this, so a payer's page stays quick. 0 checks every time. */
+  PAYMENT_RECHECK_MS: z.coerce.number().int().min(0).default(4000),
 });
 
 export type Env = z.infer<typeof envSchema>;

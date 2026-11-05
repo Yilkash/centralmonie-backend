@@ -138,6 +138,8 @@ export interface QuoteInput {
 export class AgentApiService {
   private readonly logger = new Logger(AgentApiService.name);
   private readonly ipWindows = new Map<string, { until: number; count: number }>();
+  /** When each payment was last asked about, so a page checking every few seconds does not ask the partners each time. */
+  private readonly lastChecked = new Map<string, number>();
 
   constructor(
     @Inject(DATABASE) private readonly db: Database,
@@ -442,7 +444,15 @@ export class AgentApiService {
   async get(key: AgentKey, id: string): Promise<AgentPayment> {
     const [row] = await this.db.select().from(agentPayments).where(and(eq(agentPayments.id, id), eq(agentPayments.keyId, key.id)));
     if (!row) throw new AgentRefusal('not_found', 'No such payment.', 404);
-    return this.stillWatched(row) ? this.refresh(row) : row;
+    return this.stillWatched(row) && this.dueForCheck(row.id) ? this.refresh(row) : row;
+  }
+
+  /** At most one partner check per payment every few seconds from page views. The background job checks regardless. */
+  private dueForCheck(id: string, now = Date.now()): boolean {
+    if (now - (this.lastChecked.get(id) ?? 0) < this.config.get('PAYMENT_RECHECK_MS', { infer: true })) return false;
+    if (this.lastChecked.size > 5000) for (const [key, at] of this.lastChecked) if (now - at > 60 * 60_000) this.lastChecked.delete(key);
+    this.lastChecked.set(id, now);
+    return true;
   }
 
   private stillWatched(row: AgentPayment): boolean {
@@ -503,7 +513,10 @@ export class AgentApiService {
       .where(and(eq(agentPayments.status, 'creating'), lt(agentPayments.updatedAt, new Date(Date.now() - STUCK_CREATING_MS))));
     // Oldest check first, so a slow partner cannot leave the same rows at the back every time.
     const open = await this.db.select().from(agentPayments).where(inArray(agentPayments.status, [...OPEN, 'expired'])).orderBy(asc(agentPayments.updatedAt)).limit(100);
-    for (const payment of open.filter((row) => this.stillWatched(row)).slice(0, 50)) await this.refresh(payment);
+    for (const payment of open.filter((row) => this.stillWatched(row)).slice(0, 50)) {
+      this.lastChecked.set(payment.id, Date.now());
+      await this.refresh(payment);
+    }
   }
 
   /** Only ever reads where the money is, so it is safe to run at any time. If it cannot ask, nothing changes. */

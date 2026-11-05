@@ -745,6 +745,21 @@ describe('Agent API', () => {
       user.id = (await pool.query(`insert into users (provider_subject, wallet_address) values ('did:privy:naira', $1) returning id`, [WALLET])).rows[0].id;
     });
 
+    it('lets a busy payer page reuse a check from a few seconds ago instead of asking the partner again', async () => {
+      const due = (agents as unknown as { dueForCheck: (id: string, now?: number) => boolean }).dueForCheck.bind(agents);
+      const config = (agents as unknown as { config: { get: (name: string) => unknown } }).config;
+      const real = config.get.bind(config);
+      config.get = (name: string) => (name === 'PAYMENT_RECHECK_MS' ? 4000 : real(name));
+      try {
+        expect(due('p-1', 1_000_000)).toBe(true);
+        expect(due('p-1', 1_002_000)).toBe(false);
+        expect(due('p-2', 1_002_000)).toBe(true);
+        expect(due('p-1', 1_004_500)).toBe(true);
+      } finally {
+        config.get = real;
+      }
+    });
+
     it('lets a payer transfer naira when the receiver gets USDC on Base, and the partner sends the USDC straight there', async () => {
       const link = await usdcInvoice();
       expect((await open(link.id)).json()).toMatchObject({ naira_available: true, receives: 'USDC on Base' });
