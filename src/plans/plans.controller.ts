@@ -27,7 +27,7 @@ export const presentPlan = (plan: PlanView) => ({
     route: item.route,
     recipient_name: item.recipientName,
     recipient_detail: item.recipientDetail,
-    network: item.route === 'usdc' ? plan.network : null,
+    network: item.route !== 'usdc' ? null : /\.near$|^[0-9a-f]{64}$/.test(item.recipientDetail) ? 'NEAR, through NEAR Intents' : plan.network,
     address_check: item.addressCheck,
     data_plan: item.dataPlan,
     amount_naira: formatNaira(item.amountKobo),

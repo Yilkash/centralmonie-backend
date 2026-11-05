@@ -23,6 +23,21 @@ describe('OneClickCrossChain', () => {
     expect(init.headers.authorization).toBeUndefined();
   });
 
+  it('adds our fee when one is set, and sends none when it is off', async () => {
+    const fetchFn = jest.fn().mockResolvedValue(reply(200, goodQuote));
+    await new OneClickCrossChain('k', 'https://oneclick.test', fetchFn as unknown as typeof fetch, 0, { bps: 50, recipient: '10kobo.near' }).quote(request);
+    expect(JSON.parse(fetchFn.mock.calls[0][1].body).appFees).toEqual([{ recipient: '10kobo.near', fee: 50 }]);
+    const none = jest.fn().mockResolvedValue(reply(200, goodQuote));
+    await client(none).quote(request);
+    expect(JSON.parse(none.mock.calls[0][1].body).appFees).toBeUndefined();
+  });
+
+  it('sends to a NEAR account with an exact amount leaving Base, and refunds to the sender', async () => {
+    const fetchFn = jest.fn().mockResolvedValue(reply(200, goodQuote));
+    await expect(client(fetchFn).sendToNear({ usdcMinor: 5_000_000, recipient: 'ada.near', refundTo: '0xwallet', deadline: new Date('2026-11-05T00:00:00Z') })).resolves.toEqual({ depositAddress: '0xdeposit' });
+    expect(JSON.parse(fetchFn.mock.calls[0][1].body)).toMatchObject({ dry: false, swapType: 'EXACT_INPUT', originAsset: PAY_FROM.base, destinationAsset: PAY_FROM.near, amount: '5000000', recipient: 'ada.near', refundTo: '0xwallet', refundType: 'ORIGIN_CHAIN' });
+  });
+
   it('retries server faults and dropped connections, including a server fault reported as a 400', async () => {
     const fetchFn = jest.fn()
       .mockResolvedValueOnce(reply(400, { message: 'Internal server error' }))

@@ -1,6 +1,7 @@
 import { Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { and, eq, inArray } from 'drizzle-orm';
 import { getAddress, isAddress } from 'viem';
+import { isNearAccount } from '../chain/address-check';
 import { DATABASE, Database } from '../database/database.module';
 import { Contact, ContactDestination, contactDestinations, contacts } from '../database/schema';
 import { BankLookup, PHONE_NETWORKS } from '../providers/providers';
@@ -58,11 +59,12 @@ export class ContactsService {
         return { kind: 'bank' as const, bankName: destination.bankName, accountNumber: destination.accountNumber, accountName };
       }
       case 'wallet': {
+        if (isNearAccount(destination.walletAddress)) return { kind: 'wallet' as const, walletAddress: destination.walletAddress };
         if (isAddress(destination.walletAddress, { strict: false }) && !isAddress(destination.walletAddress)) {
           throw new ContactRefused('That address has a mistake in it: its capital letters do not match its checksum. Please copy it again.');
         }
         if (!isAddress(destination.walletAddress)) {
-          throw new ContactRefused('That is not a valid Base wallet address. It should start with 0x and have 42 characters. Addresses from networks such as Solana or Tron cannot be used.');
+          throw new ContactRefused('That is not a valid wallet address. It should be a Base address starting with 0x, or a NEAR account such as name.near. Addresses from networks such as Solana or Tron cannot be used.');
         }
         return { kind: 'wallet' as const, walletAddress: getAddress(destination.walletAddress) };
       }

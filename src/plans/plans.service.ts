@@ -2,7 +2,8 @@ import { ConflictException, Inject, Injectable, NotFoundException } from '@nestj
 import { ConfigService } from '@nestjs/config';
 import { and, asc, eq, inArray, sql } from 'drizzle-orm';
 import { WalletCall } from '../chain/chain';
-import { addressRefusal, checkAddress } from '../chain/address-check';
+import { CrossChain } from '../agent-api/cross-chain';
+import { addressRefusal, checkAddress, isNearAccount } from '../chain/address-check';
 import { Chain, usdcTransferCall } from '../chain/chain.service';
 import { Env } from '../config/env';
 import { describeDestination, ContactsService } from '../contacts/contacts.service';
@@ -33,6 +34,8 @@ export interface PlanView extends Plan {
   calls: WalletCall[];
 }
 
+const NEAR_ROUTE_MS = 30 * 60_000;
+
 @Injectable()
 export class PlansService {
   constructor(
@@ -44,6 +47,7 @@ export class PlansService {
     private readonly limits: LimitsService,
     private readonly engine: PaymentEngine,
     private readonly chain: Chain,
+    private readonly crossChain: CrossChain,
     private readonly config: ConfigService<Env, true>,
     private readonly guards: GuardsService,
     private readonly audit: AuditService,
@@ -138,7 +142,8 @@ export class PlansService {
       const [owner] = await this.db.select({ wallet: users.walletAddress }).from(users).where(eq(users.id, userId));
       const refused = addressRefusal(destination.walletAddress, { usdc: this.chain.usdcAddress(), own: owner?.wallet ?? null });
       if (refused) throw new PlanRefused(refused);
-      if (this.onChain) addressCheck = await checkAddress(this.chain, destination.walletAddress);
+      // A NEAR account has no history on Base to read, so the name and the warning on the approval are the check.
+      if (this.onChain && !isNearAccount(destination.walletAddress)) addressCheck = await checkAddress(this.chain, destination.walletAddress);
     }
 
     return {
@@ -267,7 +272,16 @@ export class PlansService {
     const addresses = new Map<string, { address: string; refundable: boolean }>();
     for (const item of plan.items) {
       if (item.route === 'usdc') {
-        addresses.set(item.id, { address: (item.destination as { walletAddress: string }).walletAddress, refundable: false });
+        const to = (item.destination as { walletAddress: string }).walletAddress;
+        if (!isNearAccount(to)) {
+          addresses.set(item.id, { address: to, refundable: false });
+          continue;
+        }
+        // The user pays on Base. NEAR Intents delivers to the account, and refunds this wallet if it cannot.
+        const route = await this.crossChain.sendToNear({ usdcMinor: item.usdcMinor, recipient: to, refundTo: user.walletAddress, deadline: new Date(Date.now() + NEAR_ROUTE_MS) }).catch(() => {
+          throw new PlanRefused('Sending to NEAR is not available right now. Nothing was sent. Please try again later.');
+        });
+        addresses.set(item.id, { address: route.depositAddress, refundable: false });
         continue;
       }
       const request: PaymentRequest = {

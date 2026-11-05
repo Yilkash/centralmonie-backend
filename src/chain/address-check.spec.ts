@@ -1,4 +1,4 @@
-import { addressRefusal, checkAddress } from './address-check';
+import { addressRefusal, checkAddress, isNearAccount } from './address-check';
 import { Chain } from './chain.service';
 
 const USDC = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
@@ -33,4 +33,9 @@ describe('checkAddress', () => {
   it('says unknown when the chain is too slow', async () => {
     await expect(checkAddress(chainThat(() => new Promise(() => undefined)), OTHER, 5)).resolves.toBe('unknown');
   });
+});
+
+describe('isNearAccount', () => {
+  it.each(['ada.near', '10kobo.near', 'pay.ada-b.near', 'a'.repeat(64)])('accepts %s', (value) => expect(isNearAccount(value)).toBe(true));
+  it.each(['ada', 'ADA.near', '.near', 'ada..near', OTHER, 'a'.repeat(63), 'ada.near ', 'ada.testnet'])('refuses %s', (value) => expect(isNearAccount(value)).toBe(false));
 });

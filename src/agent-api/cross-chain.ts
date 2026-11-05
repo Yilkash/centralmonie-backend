@@ -36,6 +36,8 @@ export interface CrossChainState {
 export abstract class CrossChain {
   abstract priceCheck(request: CrossChainRequest): Promise<CrossChainQuote>;
   abstract quote(request: CrossChainRequest): Promise<CrossChainQuote>;
+  /** Exactly this much USDC leaves Base, and a little less arrives at the NEAR account. */
+  abstract sendToNear(request: { usdcMinor: number; recipient: string; refundTo: string; deadline: Date }): Promise<{ depositAddress: string }>;
   abstract status(depositAddress: string): Promise<CrossChainState>;
 }
 
@@ -60,6 +62,7 @@ export class OneClickCrossChain extends CrossChain {
     private readonly baseUrl: string,
     private readonly fetchFn: typeof fetch = fetch,
     private readonly waitMs = 1500,
+    private readonly fee: { bps: number; recipient: string | undefined } = { bps: 0, recipient: undefined },
   ) {
     super();
   }
@@ -70,6 +73,25 @@ export class OneClickCrossChain extends CrossChain {
 
   quote(request: CrossChainRequest): Promise<CrossChainQuote> {
     return this.ask(request, false);
+  }
+
+  async sendToNear(request: { usdcMinor: number; recipient: string; refundTo: string; deadline: Date }): Promise<{ depositAddress: string }> {
+    const answer = await this.call<{ quote?: { depositAddress?: string } }>('POST', '/v0/quote', {
+      dry: false,
+      swapType: 'EXACT_INPUT',
+      slippageTolerance: SLIPPAGE_BPS,
+      originAsset: PAY_FROM.base,
+      depositType: 'ORIGIN_CHAIN',
+      destinationAsset: PAY_FROM.near,
+      amount: String(request.usdcMinor),
+      refundTo: request.refundTo,
+      refundType: 'ORIGIN_CHAIN',
+      recipient: request.recipient,
+      recipientType: 'DESTINATION_CHAIN',
+      deadline: request.deadline.toISOString(),
+    });
+    if (!answer.quote?.depositAddress) throw new Error('NEAR Intents gave no deposit address');
+    return { depositAddress: answer.quote.depositAddress };
   }
 
   async status(depositAddress: string): Promise<CrossChainState> {
@@ -98,6 +120,7 @@ export class OneClickCrossChain extends CrossChain {
       recipient: request.recipient,
       recipientType: 'DESTINATION_CHAIN',
       deadline: request.deadline.toISOString(),
+      ...(this.fee.bps > 0 && this.fee.recipient ? { appFees: [{ recipient: this.fee.recipient, fee: this.fee.bps }] } : {}),
     });
     const payInMinor = Number(answer.quote?.amountIn);
     if (!Number.isSafeInteger(payInMinor) || payInMinor < request.usdcMinor) throw new Error('NEAR Intents gave an unusable amount');
@@ -151,6 +174,10 @@ export class SimulatedCrossChain extends CrossChain {
     const depositAddress = `0x${randomBytes(20).toString('hex')}`;
     this.checks.set(depositAddress, 0);
     return { depositAddress, payInMinor: Math.ceil(request.usdcMinor * 1.002) };
+  }
+
+  async sendToNear(): Promise<{ depositAddress: string }> {
+    return { depositAddress: `0x${randomBytes(20).toString('hex')}` };
   }
 
   /** Waiting on the first check, delivered from the second. */

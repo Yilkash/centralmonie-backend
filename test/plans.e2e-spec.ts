@@ -219,10 +219,18 @@ describe('plans and contacts', () => {
       ).rejects.toThrow('your own wallet');
     });
 
+    it('accepts a NEAR account, and names NEAR as the network on the approval', async () => {
+      const wallet = await saved(alice, 'Ada', { kind: 'wallet', walletAddress: 'ada.near' });
+      const plan = await plans.propose(alice, [{ route: 'usdc', destinationId: wallet.id, amountNaira: null, amountUsdc: '1', dataPlanId: null }]);
+      const shown = presentPlan(plan).items[0]!;
+      expect(shown.recipient_detail).toBe('ada.near');
+      expect(shown.network).toBe('NEAR, through NEAR Intents');
+    });
+
     it('says what is wrong with a mistyped wallet address', async () => {
       const mistyped = '0xe1a9cdb2907134c35E8d055DD72605331f4E642d';
       await expect(contacts.propose(alice, 'Typo', [], { kind: 'wallet', walletAddress: mistyped })).rejects.toThrow('mistake');
-      await expect(contacts.propose(alice, 'Solana', [], { kind: 'wallet', walletAddress: 'So11111111111111111111111111111111111111112' })).rejects.toThrow('Base wallet address');
+      await expect(contacts.propose(alice, 'Solana', [], { kind: 'wallet', walletAddress: 'So11111111111111111111111111111111111111112' })).rejects.toThrow('valid wallet address');
     });
 
     it('prices a mixed plan, taking the data price from the catalogue', async () => {

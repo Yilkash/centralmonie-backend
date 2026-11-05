@@ -28,6 +28,9 @@ class FakeCrossChain extends CrossChain {
     this.quotes.push(request);
     return { depositAddress: '0xdeposit', payInMinor: request.usdcMinor + 2_400 };
   }
+  async sendToNear() {
+    return { depositAddress: '0xnear' };
+  }
   async status() {
     return this.state;
   }

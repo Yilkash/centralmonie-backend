@@ -1,6 +1,4 @@
 import { Module, OnModuleInit } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
-import { Env } from '../config/env';
 import { OpsModule } from '../ops/ops.module';
 import { PaymentsModule } from '../payments/payments.module';
 import { WorkerService } from '../payments/worker.service';
@@ -9,24 +7,16 @@ import { AuthModule } from '../auth/auth.module';
 import { AgentApiController, AgentKeyGuard, AgentKeysController, AgentX402Controller, PayLinksController, PublicPayLinksController, X402Guard } from './agent-api.controller';
 import { AgentApiService } from './agent-api.service';
 import { PayLinksService } from './pay-links.service';
-import { CrossChain, OneClickCrossChain, SimulatedCrossChain } from './cross-chain';
+import { CrossChainModule } from './cross-chain.module';
 
 @Module({
-  imports: [AuthModule, OpsModule, PaymentsModule, ProvidersModule],
+  imports: [AuthModule, CrossChainModule, OpsModule, PaymentsModule, ProvidersModule],
   controllers: [AgentApiController, AgentX402Controller, AgentKeysController, PayLinksController, PublicPayLinksController],
   providers: [
     AgentApiService,
     PayLinksService,
     AgentKeyGuard,
     X402Guard,
-    {
-      provide: CrossChain,
-      inject: [ConfigService],
-      useFactory: (config: ConfigService<Env, true>): CrossChain =>
-        config.get('PAYMENTS_MODE', { infer: true }) === 'simulated'
-          ? new SimulatedCrossChain()
-          : new OneClickCrossChain(config.get('ONECLICK_API_KEY', { infer: true }), config.get('ONECLICK_BASE_URL', { infer: true })),
-    },
   ],
   exports: [PayLinksService],
 })

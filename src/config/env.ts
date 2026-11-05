@@ -59,6 +59,9 @@ const envSchema = z.object({
   // NEAR Intents' 1Click API. The key lowers the fee and is not required.
   ONECLICK_API_KEY: z.string().min(1).optional(),
   ONECLICK_BASE_URL: z.string().url().default('https://1click.chaindefuser.com'),
+  // Our fee on payments through NEAR Intents, in basis points (100 = 1%), paid to this NEAR account. Off at 0.
+  ONECLICK_FEE_BPS: z.coerce.number().int().min(0).max(400).default(0),
+  ONECLICK_FEE_RECIPIENT: z.string().min(2).optional(),
   // Opens the admin API. Without it, the admin API refuses everyone.
   ADMIN_TOKEN: z.string().min(24).optional(),
   // Lets the web app's gas proxy ask whether a wallet belongs to one of our users.
@@ -114,6 +117,7 @@ export function validateEnv(raw: Record<string, unknown>): Env {
     if (/sepolia/i.test(result.data.CHAIN_RPC_URL)) throw new Error('Real money needs CHAIN_RPC_URL set to a Base mainnet RPC');
     if (result.data.PAYSCRIBE_BASE_URL?.includes('sandbox')) throw new Error('Real money needs the live PAYSCRIBE_BASE_URL');
   }
+  if (result.data.ONECLICK_FEE_BPS > 0 && !result.data.ONECLICK_FEE_RECIPIENT) throw new Error('ONECLICK_FEE_BPS needs ONECLICK_FEE_RECIPIENT');
   // Behind a proxy with this unset, every caller looks like one address, and anyone could use up the limit for all.
   if (result.data.PAYMENTS_MODE === 'chain' && result.data.X402_KEYLESS_ENABLED && result.data.TRUST_PROXY_HOPS === undefined) {
     throw new Error('X402_KEYLESS_ENABLED needs TRUST_PROXY_HOPS set, even to 0');

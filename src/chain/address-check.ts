@@ -26,3 +26,8 @@ export async function checkAddress(chain: Chain, address: string, timeoutMs = 50
     clearTimeout(timer);
   }
 }
+
+/** A named NEAR account, or the 64-character kind. A Base address never matches. */
+export function isNearAccount(address: string): boolean {
+  return /^[0-9a-f]{64}$/.test(address) || /^([a-z0-9]+[-_])*[a-z0-9]+(\.([a-z0-9]+[-_])*[a-z0-9]+)*\.near$/.test(address);
+}
