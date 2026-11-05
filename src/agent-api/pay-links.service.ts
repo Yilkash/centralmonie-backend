@@ -6,7 +6,7 @@ import { Env } from '../config/env';
 import { DATABASE, Database } from '../database/database.module';
 import { AgentPayment, agentPayments, merchantKeys, PayLink, payLinks, User } from '../database/schema';
 import { BankLookup } from '../providers/providers';
-import { AgentApiService, AgentRefusal, maskName, NAIRA } from './agent-api.service';
+import { AgentApiService, AgentRefusal, LATE_ARRIVAL_MS, maskName, NAIRA } from './agent-api.service';
 import { addressRefusal } from '../chain/address-check';
 import { isNearAccount, USDC_CHAINS } from '../chain/usdc-chains';
 import { CrossChain, PayFrom, PayToken } from './cross-chain';
@@ -22,6 +22,13 @@ const MAX_LINK_NAIRA = 50_000;
 const CAN_RETRY = new Set(['refunded', 'expired', 'quoted']);
 /** The time to send has passed. The old payment is still watched for a late arrival, but its address is no longer offered. */
 const lapsed = (payment: AgentPayment | null) => Boolean(payment?.status === 'awaiting_deposit' && payment.depositDeadline && payment.depositDeadline.getTime() <= Date.now());
+/**
+ * The time to send has passed, but money sent at the last moment may still be on its way. Until the background check
+ * gives up, nobody is offered a new payment, so a payer who did send in time is never asked to pay twice.
+ */
+const checking = (payment: AgentPayment | null) => lapsed(payment) && payment!.depositDeadline!.getTime() + LATE_ARRIVAL_MS > Date.now();
+/** Someone may still be paying: open, moving, or being checked for a late arrival. */
+const inProgress = (payment: AgentPayment | null) => Boolean(payment && !CAN_RETRY.has(payment.status) && payment.status !== 'paid' && (!lapsed(payment) || checking(payment)));
 
 export interface LinkInput {
   amountNaira?: number | null;
@@ -154,7 +161,13 @@ export class PayLinksService {
     if (found.cancelledAt) return found;
     const payment = found.paymentId ? await this.agents.get(await this.agents.keylessKey(), found.paymentId) : null;
     if (payment?.status === 'paid') throw new AgentRefusal('already_paid', 'This invoice has been paid, so it cannot be cancelled.', 409);
-    if (payment && !CAN_RETRY.has(payment.status) && !lapsed(payment)) throw new AgentRefusal('in_progress', 'Someone is paying this invoice right now, so it cannot be cancelled.', 409);
+    if (inProgress(payment)) throw new AgentRefusal('in_progress', 'Someone is paying this invoice right now, so it cannot be cancelled.', 409);
+    // A quote not yet accepted is voided first, so it cannot be accepted after the cancel. If it was accepted in the
+    // meantime, the void finds nothing and the cancel is refused.
+    if (payment?.status === 'quoted') {
+      const voided = await this.db.update(agentPayments).set({ status: 'expired', updatedAt: new Date() }).where(and(eq(agentPayments.id, payment.id), eq(agentPayments.status, 'quoted'))).returning({ id: agentPayments.id });
+      if (voided.length === 0) throw new AgentRefusal('in_progress', 'Someone started paying this invoice just now. Please check it again.', 409);
+    }
     // Only if no payment has started since it was read, so a payer cannot slip in between.
     const [cancelled] = await this.db
       .update(payLinks)
@@ -172,7 +185,8 @@ export class PayLinksService {
     if (!this.agents.keylessOpen) throw new AgentRefusal('unavailable', 'Pay links are not open right now.', 503);
     if (link.cancelledAt) throw new AgentRefusal('link_cancelled', 'This invoice was cancelled. Please ask the person who sent it.', 410);
     if (!open) throw new AgentRefusal('link_expired', 'This pay link has expired.', 410);
-    if (payment && !CAN_RETRY.has(payment.status) && !lapsed(payment)) return payment;
+    if (checking(payment)) throw new AgentRefusal('checking_last_payment', 'The time to send has just passed. We are still checking whether your payment arrived, for up to 15 minutes. If you did not send it, you can start again then.', 409);
+    if (payment && inProgress(payment)) return payment;
     if (payer.payFrom === NAIRA && !this.nairaAvailable(link)) throw new AgentRefusal('naira_unavailable', 'This invoice cannot be paid in naira. Please pay with USDC or USDT.', 422);
     const key = await this.agents.keylessKey();
     const quote = await this.agents.quote(key, {
@@ -241,7 +255,7 @@ export const presentPublicLink = ({ link, payment, open, merchantName = null, na
   paid: payment?.status === 'paid',
   payment: payment && {
     id: payment.id,
-    status: lapsed(payment) ? 'expired' : payment.status,
+    status: checking(payment) ? 'checking' : lapsed(payment) ? 'expired' : payment.status,
     pay_from: payment.payFrom,
     pay_token: payment.payToken,
     pay_usdc: (payment.payInMinor / 1_000_000).toFixed(6),
@@ -253,7 +267,7 @@ export const presentPublicLink = ({ link, payment, open, merchantName = null, na
         : null,
     deposit_address: payment.status === 'awaiting_deposit' && !lapsed(payment) ? payment.depositAddress : null,
     deposit_deadline: payment.status === 'awaiting_deposit' && !lapsed(payment) ? payment.depositDeadline : null,
-    failure_reason: lapsed(payment) ? 'No payment arrived in time.' : payment.failureReason,
+    failure_reason: checking(payment) ? null : lapsed(payment) ? 'No payment arrived in time.' : payment.failureReason,
     paid_at: payment.paidAt,
     links: proofLinks(payment),
   },
@@ -265,14 +279,15 @@ export type InvoiceStatus = 'paid' | 'cancelled' | 'expired' | 'being_paid' | 'o
 export const presentOwnLink = ({ link, payment }: { link: PayLink; payment: AgentPayment | null }, url: string) => {
   const overdue = Boolean(link.dueDate && new Date(`${link.dueDate}T23:59:59+01:00`).getTime() < Date.now());
   const status: InvoiceStatus =
+    // Paid first, then a payment in progress, so a shop is never told an invoice ended while money is still moving.
     payment?.status === 'paid'
       ? 'paid'
-      : link.cancelledAt
-        ? 'cancelled'
-        : link.expiresAt.getTime() <= Date.now()
-          ? 'expired'
-          : payment && !CAN_RETRY.has(payment.status) && !lapsed(payment)
-            ? 'being_paid'
+      : inProgress(payment)
+        ? 'being_paid'
+        : link.cancelledAt
+          ? 'cancelled'
+          : link.expiresAt.getTime() <= Date.now()
+            ? 'expired'
             : overdue
               ? 'overdue'
               : 'unpaid';

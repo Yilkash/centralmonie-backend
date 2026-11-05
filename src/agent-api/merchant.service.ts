@@ -184,7 +184,8 @@ export class MerchantService {
         and(
           isNotNull(merchantKeys.webhookUrl),
           or(eq(agentPayments.status, 'paid'), isNotNull(payLinks.cancelledAt), lt(payLinks.expiresAt, new Date())),
-          sql`not exists (select 1 from ${merchantEvents} where ${merchantEvents.linkId} = ${payLinks.id})`,
+          // One notice per invoice, except that "paid" is always sent, even after an earlier "expired" or "cancelled".
+          sql`not exists (select 1 from ${merchantEvents} where ${merchantEvents.linkId} = ${payLinks.id} and (${merchantEvents.type} = 'invoice.paid' or ${agentPayments.status} is distinct from 'paid'))`,
         ),
       )
       .limit(100);

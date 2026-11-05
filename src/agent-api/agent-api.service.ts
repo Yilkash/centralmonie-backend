@@ -22,6 +22,8 @@ const ROUTE_DEADLINE_MS = 30 * 60_000;
 const SHORTEST_ROUTE_MS = 10 * 60_000;
 /** Only after this do we call it expired, and for a day after that we keep looking in case money still moved. */
 const EXPIRE_AFTER_MS = 35 * 60_000;
+/** After the time to send ends, money sent at the last moment is still looked for this long. */
+export const LATE_ARRIVAL_MS = EXPIRE_AFTER_MS - DEPOSIT_WINDOW_MS;
 const KEEP_CHECKING_EXPIRED_MS = 24 * 60 * 60_000;
 const PAYING_TOO_LONG_MS = 24 * 60 * 60_000;
 /** Longer than the slowest setup can take (about 144 seconds), so this cannot fire on one still running. */

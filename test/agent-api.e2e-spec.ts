@@ -698,6 +698,46 @@ describe('Agent API', () => {
       expect(row.delivered_at).not.toBeNull();
     });
 
+    it('never tells a shop an invoice ended while its money is still moving, and always sends paid', async () => {
+      const invoice = (await shop('POST', '/v1/merchant/invoices', ORDER)).json();
+      await payLink(invoice.id);
+      crossChain.state = { status: 'moving', transactions: ['0xa'] };
+      expect((await open(invoice.id)).json().payment.status).toBe('processing');
+      await pool.query(`update pay_links set expires_at = now() - interval '1 minute' where id = $1`, [invoice.id]);
+      await merchants.reconcile();
+      expect(notices).toHaveLength(0);
+      expect((await shop('GET', `/v1/merchant/invoices/${invoice.id}`)).json().status).toBe('being_paid');
+      crossChain.state = { status: 'delivered', transactions: ['0xa'] };
+      payout.state = { state: 'completed' };
+      expect((await open(invoice.id)).json().paid).toBe(true);
+      await merchants.reconcile();
+      expect(notices.map((notice) => JSON.parse(notice.body).type)).toEqual(['invoice.paid']);
+    });
+
+    it('still sends paid when money sent at the last moment lands after the shop cancelled', async () => {
+      const invoice = (await shop('POST', '/v1/merchant/invoices', ORDER)).json();
+      const payment = (await payLink(invoice.id)).json().payment;
+      await pool.query(`update agent_payments set deposit_deadline = now() - interval '16 minutes' where id = $1`, [payment.id]);
+      expect((await open(invoice.id)).json().payment.status).toBe('expired');
+      expect((await shop('POST', `/v1/merchant/invoices/${invoice.id}/cancel`)).json().status).toBe('cancelled');
+      await merchants.reconcile();
+      crossChain.state = { status: 'delivered', transactions: ['0xa'] };
+      payout.state = { state: 'completed' };
+      await agents.reconcile();
+      await agents.reconcile();
+      await merchants.reconcile();
+      expect(notices.map((notice) => JSON.parse(notice.body).type)).toEqual(['invoice.cancelled', 'invoice.paid']);
+    });
+
+    it('voids an unaccepted quote when the invoice is cancelled, so it cannot be accepted afterwards', async () => {
+      const invoice = (await shop('POST', '/v1/merchant/invoices', ORDER)).json();
+      const quote = await agents.quote(await agents.keylessKey(), { amountNaira: 4000, bankName: 'OPay', accountNumber: '8031234568', payFrom: 'arbitrum', refundTo: REFUND });
+      await pool.query('update pay_links set payment_id = $1 where id = $2', [quote.id, invoice.id]);
+      expect((await shop('POST', `/v1/merchant/invoices/${invoice.id}/cancel`)).json().status).toBe('cancelled');
+      expect((await pool.query('select status from agent_payments where id = $1', [quote.id])).rows[0].status).toBe('expired');
+      await expect(agents.accept(await agents.keylessKey(), quote.id)).rejects.toThrow('expired');
+    });
+
     it('lets a shop cancel an unpaid invoice, and tells it so', async () => {
       const invoice = (await shop('POST', '/v1/merchant/invoices', ORDER)).json();
       const cancelled = await shop('POST', `/v1/merchant/invoices/${invoice.id}/cancel`);
@@ -812,17 +852,18 @@ describe('Agent API', () => {
       expect(missing.statusCode).toBe(400);
     });
 
-    it('stops showing the bank account when its time is up, and lets the payer start again', async () => {
+    it('stops showing the bank account when its time is up, waits for a late transfer, then lets the payer start again', async () => {
       const link = await usdcInvoice();
       const first = (await payNaira(link.id)).json().payment;
       await pool.query(`update agent_payments set deposit_deadline = now() - interval '1 second' where id = $1`, [first.id]);
-      expect((await open(link.id)).json().payment).toMatchObject({ status: 'expired', naira_account: null });
+      expect((await open(link.id)).json().payment).toMatchObject({ status: 'checking', naira_account: null });
+      expect((await payNaira(link.id)).json().code).toBe('checking_last_payment');
+      onramp.state = 'expired';
+      expect((await open(link.id)).json().payment).toMatchObject({ status: 'expired' });
+      onramp.state = 'waiting';
       const second = (await payNaira(link.id)).json().payment;
       expect(second.id).not.toBe(first.id);
       expect(second.naira_account.account_number).toBe('6010681891');
-      onramp.state = 'expired';
-      await agents.reconcile();
-      expect((await pool.query('select status from agent_payments where id = $1', [first.id])).rows[0].status).toBe('expired');
     });
 
     it('says nothing was paid when the partner cannot give an account, and works on the next try', async () => {
@@ -904,11 +945,17 @@ describe('Agent API', () => {
       await expect(links.create(user, { amountNaira: 1000, nearAccount: 'nobody.near' })).rejects.toThrow('does not exist');
     });
 
-    it('stops offering an address once the time to send has passed, and lets the payer start again', async () => {
+    it('stops offering an address once the time to send has passed, checks for a late arrival, then lets the payer start again', async () => {
       const link = await links.create(user, { amountNaira: 5000, bankName: 'OPay', accountNumber: '8031234568' });
       const first = (await payLink(link.id)).json().payment;
       await pool.query(`update agent_payments set deposit_deadline = now() - interval '1 second' where id = $1`, [first.id]);
-      expect((await open(link.id)).json()).toMatchObject({ open: true, payment: { id: first.id, status: 'expired', deposit_address: null, deposit_deadline: null, failure_reason: 'No payment arrived in time.' } });
+      expect((await open(link.id)).json()).toMatchObject({ open: true, payment: { id: first.id, status: 'checking', deposit_address: null, deposit_deadline: null, failure_reason: null } });
+      // Someone who sent at the last moment is not asked to pay again while we look for their money.
+      const early = await payLink(link.id);
+      expect(early.statusCode).toBe(409);
+      expect(early.json().code).toBe('checking_last_payment');
+      await pool.query(`update agent_payments set deposit_deadline = now() - interval '16 minutes' where id = $1`, [first.id]);
+      expect((await open(link.id)).json().payment).toMatchObject({ id: first.id, status: 'expired', failure_reason: 'No payment arrived in time.' });
       const second = (await payLink(link.id)).json().payment;
       expect(second.id).not.toBe(first.id);
       expect(second).toMatchObject({ status: 'awaiting_deposit', deposit_address: '0xdeposit' });
