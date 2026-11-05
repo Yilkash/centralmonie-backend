@@ -18,6 +18,7 @@ const quoteBody = z.object({
   refund_to: z.string().trim().min(2).max(100),
 });
 const paymentBody = z.object({ quote_id: z.string().uuid() });
+const relayBody = z.object({ signed_delegate: z.string().min(10).max(8000) });
 /** What a keyless agent must tell us. It can be false, so it is a record for follow-up and never a safety check. */
 const keylessFields = z.object({ payer_name: z.string().trim().min(2).max(120), payer_email: z.string().trim().email().max(160), purpose: z.string().trim().min(3).max(300) });
 const keyBody = z.object({ name: z.string().trim().min(2).max(80), daily_limit_naira: z.number().int().positive() });
@@ -152,6 +153,15 @@ interface X402Reply {
 @UseGuards(X402Guard)
 export class AgentX402Controller {
   constructor(private readonly agents: AgentApiService) {}
+
+  /** Pays the gas for a signed USDC transfer from NEAR, so an agent needs no NEAR. Safe to refuse: nothing moves unless it passes. */
+  @Post('pay/:id/relay')
+  @HttpCode(200)
+  async relay(@CurrentKey() key: AgentKey, @Param('id', ParseUUIDPipe) id: string, @Body() body: unknown) {
+    const parsed = relayBody.safeParse(body);
+    if (!parsed.success) throw invalid(parsed.error);
+    return presentPayment(await this.agents.relay(key, id, parsed.data.signed_delegate));
+  }
 
   /** Starts a payment and answers with the first 402, so an agent needs nothing from us beforehand. */
   @Post('pay')

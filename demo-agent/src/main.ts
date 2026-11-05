@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { runAgent, type Model } from './agent.ts';
 import { TenKoboApi, X402Api } from './api.ts';
-import { NearWallet, SimulatedWallet, type Wallet } from './wallet.ts';
+import { GaslessNearWallet, NearWallet, SimulatedWallet, type Wallet } from './wallet.ts';
 
 // Reads only the settings it names, so the rest of an env file never reaches this program.
 function settings(path: string | undefined, names: string[]): Record<string, string> {
@@ -20,7 +20,7 @@ function settings(path: string | undefined, names: string[]): Record<string, str
 
 const [invoicePath, ...flags] = process.argv.slice(2);
 if (!invoicePath) {
-  console.log('Usage: npm run demo -- invoices/normal.txt [--x402] [--real]');
+  console.log('Usage: npm run demo -- invoices/normal.txt [--x402] [--real] [--gasless]');
   process.exit(1);
 }
 const real = flags.includes('--real');
@@ -35,7 +35,11 @@ const anthropic = new Anthropic({ apiKey: need('ANTHROPIC_API_KEY') });
 const model: Model = async ({ system, tools, messages }) =>
   (await anthropic.messages.create({ model: env.AGENT_MODEL ?? 'claude-haiku-5-5', max_tokens: 2000, system, tools, messages: messages as Anthropic.MessageParam[] })) as unknown as { content: never[] };
 
-const realWallet: Wallet = real ? new NearWallet(need('NEAR_AGENT_ACCOUNT_ID'), need('NEAR_AGENT_PRIVATE_KEY')) : new SimulatedWallet();
+const realWallet: Wallet = !real
+  ? new SimulatedWallet()
+  : flags.includes('--gasless')
+    ? new GaslessNearWallet({ accountId: need('NEAR_AGENT_ACCOUNT_ID'), privateKey: need('NEAR_AGENT_PRIVATE_KEY'), baseUrl: env.TENKOBO_API_URL ?? 'http://localhost:4010', key: env.TENKOBO_API_KEY })
+    : new NearWallet(need('NEAR_AGENT_ACCOUNT_ID'), need('NEAR_AGENT_PRIVATE_KEY'));
 const common = { baseUrl: env.TENKOBO_API_URL ?? 'http://localhost:4010', payFrom: 'near', refundTo: env.NEAR_AGENT_ACCOUNT_ID ?? 'demo-agent.near' };
 const api = flags.includes('--x402')
   ? new X402Api({ ...common, ...(env.TENKOBO_API_KEY ? { key: env.TENKOBO_API_KEY } : {}), payer: { payer_name: '10kobo demo agent', payer_email: 'demo@example.com', purpose: 'Supplier invoice' } })

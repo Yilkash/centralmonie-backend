@@ -37,6 +37,8 @@ Add `--x402` and leave out `TENKOBO_API_KEY` to pay with no key at all: no sign-
 
 ## With real money
 
+Add `--gasless` with `--real` to have 10kobo's relayer pay the NEAR gas, so the wallet needs only USDC. The relayer pays only for a USDC transfer to that payment's own deposit address, once per payment.
+
 `--real` signs from the NEAR wallet in `NEAR_AGENT_ACCOUNT_ID` and `NEAR_AGENT_PRIVATE_KEY`. Set `AGENT_ENV_FILE` to read
 settings from a file: the program picks out only the settings it names, and ignores the rest of the file.
 Keep only a few dollars in this wallet.

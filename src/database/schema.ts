@@ -355,6 +355,8 @@ export const agentPayments = pgTable(
     clientIp: text('client_ip'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+    /** When our relayer sent this payment's transfer. It pays once per payment, so it cannot be drained by repeats. */
+    relayedAt: timestamp('relayed_at', { withTimezone: true }),
     /** When limits start counting this payment. A quote reserves nothing, so its own date must not decide the day. */
     acceptedAt: timestamp('accepted_at', { withTimezone: true }),
     paidAt: timestamp('paid_at', { withTimezone: true }),

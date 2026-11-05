@@ -2,6 +2,7 @@ import { NestFastifyApplication } from '@nestjs/platform-fastify';
 import { Test } from '@nestjs/testing';
 import { Pool } from 'pg';
 import { AgentApiService, agentApiOpen, ipGroup, KEYLESS_KEY_ID, maskName, validRefundAddress } from '../src/agent-api/agent-api.service';
+import { NearRelayer, SignedDelegate, USDC_ON_NEAR } from '../src/agent-api/near-relay';
 import { PayLinksService } from '../src/agent-api/pay-links.service';
 import { operationToken, tokenProblem } from '../src/agent-api/x402';
 import { AgentPayment, User } from '../src/database/schema';
@@ -58,6 +59,25 @@ class FakeBanks extends BankLookup {
   }
 }
 
+class FakeRelayer extends NearRelayer {
+  sent: string[] = [];
+  registered: string[] = [];
+  delegate: SignedDelegate | null = null;
+  failSend = false;
+  decode() {
+    if (!this.delegate) throw new Error('unreadable');
+    return this.delegate;
+  }
+  async ensureRegistered(account: string) {
+    this.registered.push(account);
+  }
+  async send(signed: string) {
+    if (this.failSend) throw new Error('rpc down');
+    this.sent.push(signed);
+    return '0xrelayed';
+  }
+}
+
 describe('Agent API', () => {
   let app: NestFastifyApplication;
   let pool: Pool;
@@ -65,6 +85,7 @@ describe('Agent API', () => {
   const crossChain = new FakeCrossChain();
   const payout = new FakePayout();
   const banks = new FakeBanks();
+  const relayer = new FakeRelayer();
   let key: string;
 
   const call = (method: 'GET' | 'POST', url: string, body?: object, token: string | null = key) =>
@@ -80,6 +101,7 @@ describe('Agent API', () => {
       .overrideProvider(CrossChain).useValue(crossChain)
       .overrideProvider(AgentPayout).useValue(payout)
       .overrideProvider(BankLookup).useValue(banks)
+      .overrideProvider(NearRelayer).useValue(relayer)
       .overrideProvider(ExchangeRates).useValue({ nairaPerUsdc: async () => 1400 })
       .compile();
     app = moduleRef.createNestApplication<NestFastifyApplication>(createAdapter());
@@ -421,6 +443,95 @@ describe('Agent API', () => {
       expect(keyless.statusCode).toBe(404);
       const theirs = (await start()).json().payment.id;
       expect((await call('GET', `/v1/agent/payments/${theirs}`)).statusCode).toBe(404);
+    });
+  });
+
+  describe('the gas relayer', () => {
+    const SIGNED = 'c2lnbmVkLWRlbGVnYXRl';
+    const transfer = (over: Partial<SignedDelegate> = {}, args: object = { receiver_id: '0xdeposit', amount: '3573829' }, action: object = {}): SignedDelegate => ({
+      senderId: 'agent.near',
+      receiverId: USDC_ON_NEAR,
+      actions: [{ method: 'ft_transfer', args: JSON.stringify(args), deposit: 1n, gas: 30_000_000_000_000n, ...action }],
+      ...over,
+    });
+    const relay = (id: string, token: string = key) => app.inject({ method: 'POST', url: `/v1/agent/x402/pay/${id}/relay`, headers: { authorization: `Bearer ${token}` }, payload: { signed_delegate: SIGNED } });
+
+    beforeEach(() => {
+      relayer.sent = [];
+      relayer.registered = [];
+      relayer.failSend = false;
+      relayer.delegate = transfer();
+    });
+
+    it('sends the exact transfer, registers the deposit address, and records the transaction', async () => {
+      const { id } = await accepted();
+      const response = await relay(id);
+      expect(response.statusCode).toBe(200);
+      expect(response.json().transactions).toEqual(['0xrelayed']);
+      expect(relayer.registered).toEqual(['0xdeposit']);
+      expect(relayer.sent).toEqual([SIGNED]);
+    });
+
+    it.each<[string, () => SignedDelegate]>([
+      ['someone else signing', () => transfer({ senderId: 'attacker.near' })],
+      ['another contract', () => transfer({ receiverId: 'evil.near' })],
+      ['another method', () => transfer({}, undefined, { method: 'storage_withdraw' })],
+      ['a non-call action', () => transfer({}, undefined, { method: null })],
+      ['two actions', () => { const one = transfer(); return { ...one, actions: [one.actions[0]!, one.actions[0]!] }; }],
+      ['another receiver', () => transfer({}, { receiver_id: 'attacker.near', amount: '3573829' })],
+      ['a different amount', () => transfer({}, { receiver_id: '0xdeposit', amount: '1' })],
+      ['more than one yocto attached', () => transfer({}, undefined, { deposit: 10n ** 24n })],
+      ['too much gas', () => transfer({}, undefined, { gas: 300_000_000_000_000n })],
+      ['unreadable arguments', () => transfer({}, undefined, { args: 'not json' })],
+    ])('refuses %s, and sends nothing', async (_name, make) => {
+      const { id } = await accepted();
+      relayer.delegate = make();
+      const response = await relay(id);
+      expect(response.statusCode).toBe(422);
+      expect(response.json().code).toBe('relay_refused');
+      expect(relayer.sent).toHaveLength(0);
+      expect(relayer.registered).toHaveLength(0);
+    });
+
+    it('pays once per payment, even when asked twice at once', async () => {
+      const { id } = await accepted();
+      const answers = await Promise.all([relay(id), relay(id)]);
+      expect(answers.map((item) => item.statusCode).sort()).toEqual([200, 409]);
+      expect(relayer.sent).toHaveLength(1);
+    });
+
+    it('does not try again after a failure, and says to check first', async () => {
+      const { id } = await accepted();
+      relayer.failSend = true;
+      const failed = await relay(id);
+      expect(failed.statusCode).toBe(502);
+      expect(failed.json().message).toContain('may still have gone');
+      relayer.failSend = false;
+      expect((await relay(id)).json().code).toBe('already_relayed');
+      expect(relayer.sent).toHaveLength(0);
+    });
+
+    it('refuses a payment that is not from NEAR, not waiting, or another key\'s', async () => {
+      const base = await accepted({ pay_from: 'base', refund_to: REFUND });
+      expect((await relay(base.id)).json().code).toBe('relay_refused');
+      const quoted = await quote();
+      expect((await relay(quoted.id)).json().code).toBe('relay_refused');
+      const mine = await accepted({ amount_naira: 1000 });
+      const other = await agents.createKey('Other', 20_000);
+      expect((await relay(mine.id, other.key)).statusCode).toBe(404);
+    });
+
+    it('keeps a daily ceiling on what the relayer can spend', async () => {
+      const { id } = await accepted();
+      await pool.query(`insert into agent_payments (id, key_id, amount_kobo, usdc_minor, pay_in_minor, bank_name, account_number, account_name, pay_from, refund_to, quote_expires_at, relayed_at, status)
+        select gen_random_uuid(), key_id, 100, 1, 1, 'OPay', '8031234568', 'x', 'near', 'a.near', now(), now(), 'expired' from agent_payments, generate_series(1, 100) where id = $1`, [id]);
+      expect((await relay(id)).json().code).toBe('relayer_busy');
+    });
+
+    it('rejects a transfer it cannot read', async () => {
+      const { id } = await accepted();
+      relayer.delegate = null;
+      expect((await relay(id)).json().code).toBe('invalid_request');
     });
   });
 

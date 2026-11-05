@@ -56,6 +56,10 @@ const envSchema = z.object({
   TRUST_PROXY_HOPS: z.coerce.number().int().min(0).optional(),
   // Where people open the web app, for links we hand out. Defaults to the first of CORS_ORIGINS.
   PUBLIC_APP_URL: z.string().url().optional(),
+  // Pays NEAR gas so agents paying from NEAR need only USDC. Without these, agents pay their own gas.
+  NEAR_RELAYER_ACCOUNT_ID: z.string().min(2).optional(),
+  NEAR_RELAYER_PRIVATE_KEY: z.string().min(10).optional(),
+  NEAR_RPC_URL: z.string().url().default('https://rpc.mainnet.near.org'),
   // NEAR Intents' 1Click API. The key lowers the fee and is not required.
   ONECLICK_API_KEY: z.string().min(1).optional(),
   ONECLICK_BASE_URL: z.string().url().default('https://1click.chaindefuser.com'),

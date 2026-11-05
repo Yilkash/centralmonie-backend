@@ -1,6 +1,6 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { and, asc, count, eq, gte, inArray, lt, sql } from 'drizzle-orm';
+import { and, asc, count, eq, gte, inArray, isNull, lt, sql } from 'drizzle-orm';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { isAddress } from 'viem';
 import { Env } from '../config/env';
@@ -11,6 +11,7 @@ import { AuditService } from '../ops/audit.service';
 import { AGENT_STATUSES_THAT_COUNT, GuardsService } from '../ops/guards.service';
 import { AgentPayout, BankLookup, ExchangeRates, PaymentProvider } from '../providers/providers';
 import { CrossChain, PayFrom } from './cross-chain';
+import { NearRelayer, relayProblem, SignedDelegate } from './near-relay';
 
 const QUOTE_LIFETIME_MS = 10 * 60_000;
 /** What the agent is told. Limits hold the payment for this long, so it stays short. */
@@ -24,6 +25,8 @@ const KEEP_CHECKING_EXPIRED_MS = 24 * 60 * 60_000;
 const PAYING_TOO_LONG_MS = 24 * 60 * 60_000;
 /** Longer than the slowest setup can take (about 144 seconds), so this cannot fire on one still running. */
 const STUCK_CREATING_MS = 5 * 60_000;
+/** A ceiling on what the relayer can spend in a day, whoever is asking. */
+const RELAYS_PER_DAY = 100;
 const MAX_QUOTES_A_DAY = 200;
 /** The partner fixes the naira when the payment is created. A smaller gap than this is ordinary rate movement. */
 const PRICE_TOLERANCE = 0.995;
@@ -107,6 +110,7 @@ export class AgentApiService {
     private readonly crossChain: CrossChain,
     private readonly guards: GuardsService,
     private readonly audit: AuditService,
+    @Inject(NearRelayer) private readonly relayer: NearRelayer | null,
   ) {}
 
   get open(): boolean {
@@ -307,6 +311,45 @@ export class AgentApiService {
   private stillWatched(row: AgentPayment): boolean {
     if ((OPEN as readonly string[]).includes(row.status)) return true;
     return row.status === 'expired' && row.depositAddress !== null && Date.now() - row.updatedAt.getTime() < KEEP_CHECKING_EXPIRED_MS;
+  }
+
+  /**
+   * Pays the gas for an agent's signed USDC transfer. Claimed before sending, and never tried twice for one
+   * payment: if it fails partway the transfer may still have gone, and the agent can see that from the status.
+   */
+  async relay(key: AgentKey, id: string, signedDelegate: string): Promise<AgentPayment> {
+    if (!this.relayer) throw new AgentRefusal('relayer_unavailable', 'Gas-free sending is not available. Send the USDC from your own wallet.', 503);
+    const payment = await this.get(key, id);
+    let delegate: SignedDelegate;
+    try {
+      delegate = this.relayer.decode(signedDelegate);
+    } catch {
+      throw new AgentRefusal('invalid_request', 'The signed transfer could not be read.', 400);
+    }
+    const problem = relayProblem(delegate, payment);
+    if (problem) throw new AgentRefusal('relay_refused', problem, 422);
+    const [{ today } = { today: 0 }] = await this.db
+      .select({ today: count() })
+      .from(agentPayments)
+      .where(gte(agentPayments.relayedAt, sql`${startOfLagosDay}`));
+    if (today >= RELAYS_PER_DAY) throw new AgentRefusal('relayer_busy', 'Gas-free sending is busy today. Send the USDC from your own wallet.', 429);
+    const [claimed] = await this.db
+      .update(agentPayments)
+      .set({ relayedAt: new Date(), updatedAt: new Date() })
+      .where(and(eq(agentPayments.id, id), eq(agentPayments.status, 'awaiting_deposit'), isNull(agentPayments.relayedAt)))
+      .returning();
+    if (!claimed) throw new AgentRefusal('already_relayed', 'The relayer has already sent this payment. Check its status.', 409);
+    try {
+      await this.relayer.ensureRegistered(payment.depositAddress!);
+      const hash = await this.relayer.send(signedDelegate);
+      await this.audit.record('agent_api', 'agent_payment.relayed', id, { keyId: key.id, hash });
+      if (!hash) return claimed;
+      const [row] = await this.db.update(agentPayments).set({ transactions: [hash], updatedAt: new Date() }).where(eq(agentPayments.id, id)).returning();
+      return row ?? claimed;
+    } catch (error) {
+      this.logger.error(`relay for ${id} failed: ${(error as Error).message.slice(0, 200)}`);
+      throw new AgentRefusal('relay_failed', 'The relayer could not confirm the transfer, and it may still have gone. Check the status before doing anything else.', 502);
+    }
   }
 
   /** For the background job. */

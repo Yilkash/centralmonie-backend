@@ -1,3 +1,6 @@
+import { ConfigService } from '@nestjs/config';
+import { Env } from '../config/env';
+import { LiveNearRelayer, NearRelayer } from './near-relay';
 import { Module, OnModuleInit } from '@nestjs/common';
 import { OpsModule } from '../ops/ops.module';
 import { PaymentsModule } from '../payments/payments.module';
@@ -17,6 +20,15 @@ import { CrossChainModule } from './cross-chain.module';
     PayLinksService,
     AgentKeyGuard,
     X402Guard,
+    {
+      provide: NearRelayer,
+      inject: [ConfigService],
+      useFactory: (config: ConfigService<Env, true>): NearRelayer | null => {
+        const account = config.get('NEAR_RELAYER_ACCOUNT_ID', { infer: true });
+        const key = config.get('NEAR_RELAYER_PRIVATE_KEY', { infer: true });
+        return account && key ? new LiveNearRelayer(account, key, config.get('NEAR_RPC_URL', { infer: true })) : null;
+      },
+    },
   ],
   exports: [PayLinksService],
 })

@@ -1,0 +1,1 @@
+ALTER TABLE "agent_payments" ADD COLUMN "relayed_at" timestamp with time zone;

@@ -127,6 +127,13 @@
       "when": 1793885497691,
       "tag": "0017_bent_mindworm",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1793887305784,
+      "tag": "0018_thick_mephisto",
+      "breakpoints": true
     }
   ]
 }

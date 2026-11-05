@@ -146,7 +146,7 @@ export async function runAgent(options: RunOptions): Promise<RunResult> {
     sent = true;
     log(`Sending ${payment.pay_usdc} USDC to the one-time deposit address ${payment.deposit_address}`);
     try {
-      const txHash = await wallet.sendUsdc(payment.deposit_address, usdcToMinor(payment.pay_usdc));
+      const txHash = await wallet.sendUsdc(payment.deposit_address, usdcToMinor(payment.pay_usdc), payment.id);
       api.deposited?.(payment.id, txHash);
     } catch (error) {
       log(`Could not confirm the send: ${(error as Error).message.slice(0, 160)}`);
