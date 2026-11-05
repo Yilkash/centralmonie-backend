@@ -783,6 +783,18 @@ describe('Agent API', () => {
       expect((await payNaira(link.id)).json().code).toBe('already_paid');
     });
 
+    it('gives each payer network its own naira allowance, so one person cannot block everyone', async () => {
+      const big = () => links.create(user, { amountNaira: 50_000, usdcAddress: WALLET });
+      expect((await payNaira((await big()).id, '10.1.1.1')).statusCode).toBe(200);
+      expect((await payNaira((await big()).id, '10.1.1.1')).statusCode).toBe(200);
+      const third = await payNaira((await big()).id, '10.1.1.1');
+      expect(third.json().code).toBe('over_wallet_limit');
+      // Another network can still pay, to a receiver that has not had its own day's limit.
+      const other = await links.create(user, { amountNaira: 50_000, usdcAddress: '0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC' });
+      const fresh = await payNaira(other.id, '10.2.2.2');
+      expect(fresh.json().code ?? fresh.statusCode).toBe(200);
+    });
+
     it('does not offer naira when the receiver gets naira, or the amount is too small', async () => {
       const bank = await links.create(user, { amountNaira: 5000, bankName: 'OPay', accountNumber: '8031234568' });
       expect((await open(bank.id)).json().naira_available).toBe(false);

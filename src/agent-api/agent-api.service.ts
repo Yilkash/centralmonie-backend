@@ -115,8 +115,9 @@ export function validRefundAddress(payFrom: PayFrom, address: string): boolean {
 
 /** Paying naira by bank transfer instead of crypto. Only for a receiver of USDC on Base, through a pay link. */
 export const NAIRA = 'naira';
-/** Naira payers have no wallet, so they share one daily allowance under this name. */
+/** Naira payers have no wallet to count by, so each network gets its own daily allowance under a name like this. */
 export const NAIRA_PAYER = 'naira-bank-transfer';
+export const nairaPayer = (clientIp: string | undefined) => `${NAIRA_PAYER}:${ipGroup(clientIp ?? 'unknown')}`;
 
 export interface QuoteInput {
   amountNaira: number;
@@ -225,6 +226,8 @@ export class AgentApiService {
       if (input.payToken && input.payToken !== 'USDC') throw new AgentRefusal('token_unavailable', 'Paying in naira needs no token choice.', 422);
     } else if (!validRefundAddress(input.payFrom as PayFrom, input.refundTo)) throw new AgentRefusal('invalid_refund_address', `That is not a valid ${input.payFrom} address to refund.`, 400);
 
+    // Counted per network, so one person starting many naira payments cannot use up the allowance for everyone.
+    const refundTo = naira ? nairaPayer(input.clientIp) : input.refundTo;
     const keyless = key.id === KEYLESS_KEY_ID;
     if (keyless) {
       this.countIp('quote', input.clientIp ?? 'unknown');
@@ -234,7 +237,7 @@ export class AgentApiService {
         .where(and(eq(agentPayments.keyId, KEYLESS_KEY_ID), gte(agentPayments.createdAt, sql`${startOfLagosDay}`)));
       if (today >= KEYLESS.quotesPerDay) throw new AgentRefusal('too_many_requests', 'Paying without a key is busy today. Try again tomorrow.', 429);
       if (amountKobo > KEYLESS.perPaymentKobo) throw new AgentRefusal('over_payment_limit', `Without an API key, the most for one payment is ${formatNaira(KEYLESS.perPaymentKobo)}.`, 422);
-      await this.assertKeylessCaps(amountKobo, input.refundTo, input.accountNumber, this.db);
+      await this.assertKeylessCaps(amountKobo, refundTo, input.accountNumber, this.db);
     }
 
     const [{ made } = { made: 0 }] = keyless ? [] : await this.db
@@ -244,7 +247,7 @@ export class AgentApiService {
     if (made >= MAX_QUOTES_A_DAY) throw new AgentRefusal('too_many_quotes', 'This key has asked for too many quotes today.', 429);
 
     await this.assertAllowed(key, amountKobo, this.db);
-    if (naira) return this.quoteNaira(key, input, amountKobo);
+    if (naira) return this.quoteNaira(key, { ...input, refundTo }, amountKobo);
     if (input.payFrom === 'near' && (await this.crossChain.nearAccountMissing(input.refundTo))) throw new AgentRefusal('invalid_refund_address', `The NEAR account ${input.refundTo} does not exist. Check the spelling.`, 400);
 
     const rate = await this.rates.nairaPerUsdc().catch(() => {
@@ -353,7 +356,7 @@ export class AgentApiService {
         payFrom: NAIRA,
         payToken: 'USDC',
         deliverTo: input.deliverTo!,
-        refundTo: NAIRA_PAYER,
+        refundTo: input.refundTo,
         payerName: input.payerName ?? null,
         payerEmail: input.payerEmail ?? null,
         purpose: input.purpose ?? null,
