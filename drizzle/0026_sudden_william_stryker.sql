@@ -1,0 +1,1 @@
+ALTER TABLE "agent_payments" ADD COLUMN "naira_account" jsonb;

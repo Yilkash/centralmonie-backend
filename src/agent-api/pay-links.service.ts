@@ -6,7 +6,7 @@ import { Env } from '../config/env';
 import { DATABASE, Database } from '../database/database.module';
 import { AgentPayment, agentPayments, merchantKeys, PayLink, payLinks, User } from '../database/schema';
 import { BankLookup } from '../providers/providers';
-import { AgentApiService, AgentRefusal, maskName } from './agent-api.service';
+import { AgentApiService, AgentRefusal, maskName, NAIRA } from './agent-api.service';
 import { addressRefusal } from '../chain/address-check';
 import { isNearAccount, USDC_CHAINS } from '../chain/usdc-chains';
 import { CrossChain, PayFrom, PayToken } from './cross-chain';
@@ -45,7 +45,7 @@ export interface MerchantLink {
 }
 
 export interface PayerDetails {
-  payFrom: PayFrom;
+  payFrom: PayFrom | typeof NAIRA;
   payToken?: PayToken;
   refundTo: string;
   payerName?: string;
@@ -124,11 +124,16 @@ export class PayLinksService {
   }
 
   /** What a payer sees, with its latest payment. Anyone with the link can read this, so the name is partly hidden. */
-  async view(id: string): Promise<{ link: PayLink; payment: AgentPayment | null; open: boolean; merchantName: string | null }> {
+  /** Naira by bank transfer is offered only when it is switched on and the receiver gets USDC on Base. */
+  nairaAvailable(link: PayLink): boolean {
+    return this.config.get('NAIRA_IN_ENABLED', { infer: true }) && Boolean(link.usdcAddress);
+  }
+
+  async view(id: string): Promise<{ link: PayLink; payment: AgentPayment | null; open: boolean; merchantName: string | null; nairaAvailable: boolean }> {
     const link = await this.find(id);
     const payment = link.paymentId ? await this.agents.get(await this.agents.keylessKey(), link.paymentId) : null;
     const [shop] = link.merchantKeyId ? await this.db.select({ name: merchantKeys.name }).from(merchantKeys).where(eq(merchantKeys.id, link.merchantKeyId)) : [];
-    return { link, payment, merchantName: shop?.name ?? null, open: this.agents.keylessOpen && !link.cancelledAt && link.expiresAt.getTime() > Date.now() && payment?.status !== 'paid' };
+    return { link, payment, merchantName: shop?.name ?? null, nairaAvailable: this.nairaAvailable(link), open: this.agents.keylessOpen && !link.cancelledAt && link.expiresAt.getTime() > Date.now() && payment?.status !== 'paid' };
   }
 
   /** The user's own links, newest first, each with its latest payment. */
@@ -168,6 +173,7 @@ export class PayLinksService {
     if (link.cancelledAt) throw new AgentRefusal('link_cancelled', 'This invoice was cancelled. Please ask the person who sent it.', 410);
     if (!open) throw new AgentRefusal('link_expired', 'This pay link has expired.', 410);
     if (payment && !CAN_RETRY.has(payment.status) && !lapsed(payment)) return payment;
+    if (payer.payFrom === NAIRA && !this.nairaAvailable(link)) throw new AgentRefusal('naira_unavailable', 'This invoice cannot be paid in naira. Please pay with USDC or USDT.', 422);
     const key = await this.agents.keylessKey();
     const quote = await this.agents.quote(key, {
       amountNaira: link.amountKobo / 100,
@@ -215,8 +221,9 @@ function proofLinks(payment: AgentPayment): { label: string; url: string }[] {
   return links;
 }
 
-export const presentPublicLink = ({ link, payment, open, merchantName = null }: { link: PayLink; payment: AgentPayment | null; open: boolean; merchantName?: string | null }) => ({
+export const presentPublicLink = ({ link, payment, open, merchantName = null, nairaAvailable = false }: { link: PayLink; payment: AgentPayment | null; open: boolean; merchantName?: string | null; nairaAvailable?: boolean }) => ({
   id: link.id,
+  naira_available: nairaAvailable,
   merchant: merchantName,
   return_url: link.returnUrl,
   expires_at: link.expiresAt,
@@ -239,6 +246,11 @@ export const presentPublicLink = ({ link, payment, open, merchantName = null }: 
     pay_token: payment.payToken,
     pay_usdc: (payment.payInMinor / 1_000_000).toFixed(6),
     receiver_gets_usdc: payment.deliverTo ? (payment.usdcMinor / 1_000_000).toFixed(2) : null,
+    // The bank account to transfer into, only while it can still be paid, like a crypto address.
+    naira_account:
+      payment.status === 'awaiting_deposit' && !lapsed(payment) && payment.nairaAccount
+        ? { bank_name: payment.nairaAccount.bankName, account_number: payment.nairaAccount.accountNumber, account_name: payment.nairaAccount.accountName, amount_naira: payment.nairaAccount.amountKobo / 100 }
+        : null,
     deposit_address: payment.status === 'awaiting_deposit' && !lapsed(payment) ? payment.depositAddress : null,
     deposit_deadline: payment.status === 'awaiting_deposit' && !lapsed(payment) ? payment.depositDeadline : null,
     failure_reason: lapsed(payment) ? 'No payment arrived in time.' : payment.failureReason,

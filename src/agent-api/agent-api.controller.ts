@@ -6,7 +6,7 @@ import { AgentKey, AgentPayment, User } from '../database/schema';
 import { formatNaira, formatUsdc } from '../money/money';
 import { AdminGuard } from '../ops/admin.controller';
 import { PAY_FROM, PayFrom } from './cross-chain';
-import { AgentApiService, AgentRefusal, KEYLESS_KEY_ID, maskName } from './agent-api.service';
+import { AgentApiService, AgentRefusal, KEYLESS_KEY_ID, maskName, NAIRA, NAIRA_PAYER } from './agent-api.service';
 import { PayLinksService, presentLink, presentOwnLink, presentPublicLink } from './pay-links.service';
 import { decodeSignature, encode, firstChallenge, provesPayment, quotedChallenge, settlement, tokenProblem } from './x402';
 
@@ -287,7 +287,15 @@ const payLinkBody = z.object({
   due_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullish(),
   line_items: z.array(z.object({ description: z.string().trim().min(1).max(120), amount_naira: z.number().int().positive() })).max(20).nullish(),
 });
-const payerBody = z.object({ pay_from: z.enum(Object.keys(PAY_FROM) as [PayFrom, ...PayFrom[]]), pay_token: z.enum(['USDC', 'USDT']).default('USDC'), refund_to: z.string().trim().min(2).max(100), payer_name: z.string().trim().max(120).nullish() });
+const payerBody = z
+  .object({
+    pay_from: z.enum([NAIRA, ...(Object.keys(PAY_FROM) as PayFrom[])] as [typeof NAIRA, ...PayFrom[]]),
+    pay_token: z.enum(['USDC', 'USDT']).default('USDC'),
+    // A naira payer pays from a bank, so there is no crypto to refund.
+    refund_to: z.string().trim().min(2).max(100).optional(),
+    payer_name: z.string().trim().max(120).nullish(),
+  })
+  .refine((body) => body.pay_from === NAIRA || body.refund_to, { message: 'A refund address is needed', path: ['refund_to'] });
 
 @Controller('v1/pay-links')
 @UseFilters(AgentRefusalFilter)
@@ -334,7 +342,7 @@ export class PublicPayLinksController {
   async pay(@Param('id', ParseUUIDPipe) id: string, @Body() body: unknown, @Req() request: { ip: string }) {
     const parsed = payerBody.safeParse(body);
     if (!parsed.success) throw invalid(parsed.error);
-    await this.links.pay(id, { payFrom: parsed.data.pay_from, payToken: parsed.data.pay_token, refundTo: parsed.data.refund_to, clientIp: request.ip, ...(parsed.data.payer_name ? { payerName: parsed.data.payer_name } : {}) });
+    await this.links.pay(id, { payFrom: parsed.data.pay_from, payToken: parsed.data.pay_token, refundTo: parsed.data.pay_from === NAIRA ? NAIRA_PAYER : parsed.data.refund_to!, clientIp: request.ip, ...(parsed.data.payer_name ? { payerName: parsed.data.payer_name } : {}) });
     return presentPublicLink(await this.links.view(id));
   }
 }

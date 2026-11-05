@@ -183,6 +183,13 @@
       "when": 1793913862589,
       "tag": "0025_sturdy_leopardon",
       "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
+      "when": 1793916917196,
+      "tag": "0026_sudden_william_stryker",
+      "breakpoints": true
     }
   ]
 }

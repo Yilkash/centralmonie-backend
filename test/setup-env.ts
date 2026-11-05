@@ -11,3 +11,4 @@ process.env.WORKER_ENABLED = 'false';
 process.env.ADMIN_TOKEN = 'admin-token-for-tests-only-0001';
 process.env.SPONSORSHIP_TOKEN = 'sponsor-token-for-tests-only-001';
 process.env.PAYMENTS_MODE = 'simulated';
+process.env.NAIRA_IN_ENABLED = 'true';

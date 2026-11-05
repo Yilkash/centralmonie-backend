@@ -52,6 +52,8 @@ const envSchema = z.object({
   AGENT_API_ENABLED: z.enum(['true', 'false']).default('false').transform((value) => value === 'true'),
   // Lets agents pay over x402 with no API key when real money is on. In test mode it is always open.
   X402_KEYLESS_ENABLED: z.enum(['true', 'false']).default('false').transform((value) => value === 'true'),
+  /** Lets a pay link payer pay naira by bank transfer when the receiver gets USDC on Base. Off until switched on. */
+  NAIRA_IN_ENABLED: z.enum(['true', 'false']).default('false').transform((value) => value === 'true'),
   // How many proxies sit in front of the backend. Read as a real environment variable, before any .env file loads.
   TRUST_PROXY_HOPS: z.coerce.number().int().min(0).optional(),
   // Where people open the web app, for links we hand out. Defaults to the first of CORS_ORIGINS.

@@ -13,7 +13,7 @@ import { AppModule } from '../src/app.module';
 import { applyMigrations } from '../src/database/migrate';
 import { SwitchesService } from '../src/ops/switches.service';
 import { WalletService } from '../src/wallet/wallet.service';
-import { AgentPayout, BankLookup, ExchangeRates, PaymentProvider, PaymentRequest, PaymentState } from '../src/providers/providers';
+import { AgentPayout, BankLookup, ExchangeRates, NairaOnramp, OnrampState, PaymentProvider, PaymentRequest, PaymentState } from '../src/providers/providers';
 
 const DATABASE_URL = process.env.DATABASE_URL!;
 const REFUND = '0x393eA6fbd50b821CdE7EdC1b936c567dbb15c26d';
@@ -68,6 +68,24 @@ class FakeBanks extends BankLookup {
   }
 }
 
+class FakeOnramp extends NairaOnramp {
+  state: OnrampState = 'waiting';
+  orders: { reference: string; amountKobo: number; walletAddress: string }[] = [];
+  failNext = 0;
+  expiresAt = () => new Date(Date.now() + 30 * 60_000).toISOString();
+  async nairaOnramp(input: { reference: string; amountKobo: number; walletAddress: string }) {
+    if (this.failNext-- > 0) throw new Error('partner down');
+    this.orders.push(input);
+    return { reference: input.reference, amountKobo: input.amountKobo, usdcMinor: 3_602_305, rate: '1388', bankName: 'Safehaven', accountNumber: '6010681891', accountName: '10kobo Customer', expiresAt: this.expiresAt() };
+  }
+  async onrampState() {
+    return this.state;
+  }
+  async onrampTerms() {
+    return { nairaPerUsdc: 1388, minimumKobo: 150_000 };
+  }
+}
+
 class FakeRelayer extends NearRelayer {
   sent: string[] = [];
   registered: string[] = [];
@@ -95,6 +113,7 @@ describe('Agent API', () => {
   const payout = new FakePayout();
   const banks = new FakeBanks();
   const relayer = new FakeRelayer();
+  const onramp = new FakeOnramp();
   let key: string;
 
   const call = (method: 'GET' | 'POST', url: string, body?: object, token: string | null = key) =>
@@ -111,6 +130,7 @@ describe('Agent API', () => {
       .overrideProvider(AgentPayout).useValue(payout)
       .overrideProvider(BankLookup).useValue(banks)
       .overrideProvider(NearRelayer).useValue(relayer)
+      .overrideProvider(NairaOnramp).useValue(onramp)
       .overrideProvider(ExchangeRates).useValue({ nairaPerUsdc: async () => 1400 })
       .compile();
     app = moduleRef.createNestApplication<NestFastifyApplication>(createAdapter());
@@ -131,6 +151,10 @@ describe('Agent API', () => {
     payout.destinationKobo = null;
     payout.expiresAt = null;
     banks.down = false;
+    onramp.state = 'waiting';
+    onramp.orders = [];
+    onramp.failNext = 0;
+    onramp.expiresAt = () => new Date(Date.now() + 30 * 60_000).toISOString();
     banks.blips = 0;
     key = (await agents.createKey('Test agent', 20_000)).key;
   });
@@ -704,6 +728,92 @@ describe('Agent API', () => {
       await expect(merchants.createKey({ userEmail: 'owner@shop.example', name: 'x', payout: bank, returnOrigins: ['https://shop.example/path'] })).rejects.toThrow('start of an address');
       await expect(merchants.createKey({ userEmail: 'nobody@shop.example', name: 'x', payout: bank })).rejects.toThrow('No 10kobo user');
       await expect(merchants.createKey({ userEmail: 'owner@shop.example', name: 'x', payout: bank, webhookUrl: 'http://localhost:3010/hook' })).resolves.toMatchObject({ key: expect.stringMatching(/^mk_/) });
+    });
+  });
+
+  describe('paying in naira by bank transfer', () => {
+    const WALLET = '0x70997970C51812dc3A010C7d01b50e0d17dc79C8';
+    let links: PayLinksService;
+    const user = { id: '', walletAddress: WALLET } as unknown as User;
+    const open = (id: string) => app.inject({ method: 'GET', url: `/v1/public/pay-links/${id}` });
+    const payNaira = (id: string, ip = '10.9.9.9') => app.inject({ method: 'POST', url: `/v1/public/pay-links/${id}/pay`, remoteAddress: ip, payload: { pay_from: 'naira' } });
+    const usdcInvoice = () => links.create(user, { amountNaira: 5000, usdcAddress: WALLET, note: 'Design work' });
+
+    beforeEach(async () => {
+      links = app.get(PayLinksService, { strict: false });
+      await pool.query('TRUNCATE users CASCADE');
+      user.id = (await pool.query(`insert into users (provider_subject, wallet_address) values ('did:privy:naira', $1) returning id`, [WALLET])).rows[0].id;
+    });
+
+    it('lets a payer transfer naira when the receiver gets USDC on Base, and the partner sends the USDC straight there', async () => {
+      const link = await usdcInvoice();
+      expect((await open(link.id)).json()).toMatchObject({ naira_available: true, receives: 'USDC on Base' });
+      const response = await payNaira(link.id);
+      expect(response.statusCode).toBe(200);
+      const payment = response.json().payment;
+      expect(payment).toMatchObject({ status: 'awaiting_deposit', pay_from: 'naira', deposit_address: null, receiver_gets_usdc: '3.60', naira_account: { bank_name: 'Safehaven', account_number: '6010681891', account_name: '10kobo Customer', amount_naira: 5000 } });
+      expect(new Date(payment.deposit_deadline).getTime()).toBeGreaterThan(Date.now());
+      expect(onramp.orders).toEqual([{ reference: payment.id, amountKobo: 500_000, walletAddress: WALLET }]);
+      expect(crossChain.quotes).toHaveLength(0);
+      expect(payout.deposits).toHaveLength(0);
+      // A refresh gives the same account, so one payer never gets two.
+      expect((await payNaira(link.id)).json().payment.id).toBe(payment.id);
+      expect(onramp.orders).toHaveLength(1);
+
+      onramp.state = 'processing';
+      expect((await open(link.id)).json().payment).toMatchObject({ status: 'processing', naira_account: null });
+      onramp.state = 'completed';
+      const paid = (await open(link.id)).json();
+      expect(paid).toMatchObject({ paid: true, open: false, payment: { status: 'paid' } });
+      expect((await payNaira(link.id)).json().code).toBe('already_paid');
+    });
+
+    it('does not offer naira when the receiver gets naira, or the amount is too small', async () => {
+      const bank = await links.create(user, { amountNaira: 5000, bankName: 'OPay', accountNumber: '8031234568' });
+      expect((await open(bank.id)).json().naira_available).toBe(false);
+      const refused = await payNaira(bank.id);
+      expect(refused.statusCode).toBe(422);
+      expect(refused.json().code).toBe('naira_unavailable');
+      const small = await links.create(user, { amountNaira: 1000, usdcAddress: WALLET });
+      expect((await payNaira(small.id)).json()).toMatchObject({ code: 'below_minimum', message: 'The smallest naira payment is ₦1,500.' });
+      expect(onramp.orders).toHaveLength(0);
+    });
+
+    it('still needs a refund address for crypto, but not for naira', async () => {
+      const link = await usdcInvoice();
+      const missing = await app.inject({ method: 'POST', url: `/v1/public/pay-links/${link.id}/pay`, remoteAddress: '10.9.9.8', payload: { pay_from: 'base' } });
+      expect(missing.statusCode).toBe(400);
+    });
+
+    it('stops showing the bank account when its time is up, and lets the payer start again', async () => {
+      const link = await usdcInvoice();
+      const first = (await payNaira(link.id)).json().payment;
+      await pool.query(`update agent_payments set deposit_deadline = now() - interval '1 second' where id = $1`, [first.id]);
+      expect((await open(link.id)).json().payment).toMatchObject({ status: 'expired', naira_account: null });
+      const second = (await payNaira(link.id)).json().payment;
+      expect(second.id).not.toBe(first.id);
+      expect(second.naira_account.account_number).toBe('6010681891');
+      onramp.state = 'expired';
+      await agents.reconcile();
+      expect((await pool.query('select status from agent_payments where id = $1', [first.id])).rows[0].status).toBe('expired');
+    });
+
+    it('says nothing was paid when the partner cannot give an account, and works on the next try', async () => {
+      const link = await usdcInvoice();
+      onramp.failNext = 1;
+      const failed = await payNaira(link.id);
+      expect(failed.statusCode).toBe(503);
+      expect(failed.json()).toMatchObject({ code: 'setup_failed', message: 'We could not set up a bank transfer just now. Nothing was paid. Please try again.' });
+      expect((await payNaira(link.id)).json().payment.status).toBe('awaiting_deposit');
+    });
+
+    it('hands a failed transfer to a person instead of guessing', async () => {
+      const link = await usdcInvoice();
+      const payment = (await payNaira(link.id)).json().payment;
+      onramp.state = 'failed';
+      await agents.reconcile();
+      const row = (await pool.query('select status, failure_reason from agent_payments where id = $1', [payment.id])).rows[0];
+      expect(row).toMatchObject({ status: 'needs_support', failure_reason: expect.stringContaining('Do not pay again') });
     });
   });
 

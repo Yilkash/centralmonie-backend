@@ -9,7 +9,7 @@ import { AgentKey, agentKeys, AgentPayment, agentPayments } from '../database/sc
 import { formatNaira, koboToUsdcMinor } from '../money/money';
 import { AuditService } from '../ops/audit.service';
 import { AGENT_STATUSES_THAT_COUNT, GuardsService } from '../ops/guards.service';
-import { AgentPayout, BankLookup, ExchangeRates, PaymentProvider } from '../providers/providers';
+import { AgentPayout, BankLookup, ExchangeRates, NairaOnramp, PaymentProvider } from '../providers/providers';
 import { isNearAccount } from '../chain/usdc-chains';
 import { CrossChain, PayFrom, PayToken, USDT_ON } from './cross-chain';
 import { NearRelayer, relayProblem, SignedDelegate } from './near-relay';
@@ -113,11 +113,16 @@ export function validRefundAddress(payFrom: PayFrom, address: string): boolean {
   return isAddress(address);
 }
 
+/** Paying naira by bank transfer instead of crypto. Only for a receiver of USDC on Base, through a pay link. */
+export const NAIRA = 'naira';
+/** Naira payers have no wallet, so they share one daily allowance under this name. */
+export const NAIRA_PAYER = 'naira-bank-transfer';
+
 export interface QuoteInput {
   amountNaira: number;
   bankName: string;
   accountNumber: string;
-  payFrom: PayFrom;
+  payFrom: PayFrom | typeof NAIRA;
   refundTo: string;
   payerName?: string;
   payerEmail?: string;
@@ -145,6 +150,7 @@ export class AgentApiService {
     private readonly guards: GuardsService,
     private readonly audit: AuditService,
     @Inject(NearRelayer) private readonly relayer: NearRelayer | null,
+    @Inject(NairaOnramp) private readonly onramp: NairaOnramp | null,
   ) {}
 
   get open(): boolean {
@@ -204,8 +210,13 @@ export class AgentApiService {
   /** Reserves nothing and moves nothing. The agent sees the bank's name for the account before it commits. */
   async quote(key: AgentKey, input: QuoteInput): Promise<AgentPayment> {
     const amountKobo = input.amountNaira * 100;
-    if (input.payToken === 'USDT' && !USDT_ON[input.payFrom]) throw new AgentRefusal('token_unavailable', `USDT cannot be used from ${input.payFrom}. Use USDC, or pay from NEAR, Ethereum or Solana.`, 422);
-    if (!validRefundAddress(input.payFrom, input.refundTo)) throw new AgentRefusal('invalid_refund_address', `That is not a valid ${input.payFrom} address to refund.`, 400);
+    if (input.payToken === 'USDT' && !USDT_ON[input.payFrom as PayFrom]) throw new AgentRefusal('token_unavailable', `USDT cannot be used from ${input.payFrom}. Use USDC, or pay from NEAR, Ethereum or Solana.`, 422);
+    const naira = input.payFrom === NAIRA;
+    if (naira) {
+      // The partner sends USDC to one Base address. NEAR and other chains come later, through NEAR Intents.
+      if (!this.onramp || !input.deliverTo || !isAddress(input.deliverTo)) throw new AgentRefusal('naira_unavailable', 'Paying in naira is not available for this payment.', 422);
+      if (input.payToken && input.payToken !== 'USDC') throw new AgentRefusal('token_unavailable', 'Paying in naira needs no token choice.', 422);
+    } else if (!validRefundAddress(input.payFrom as PayFrom, input.refundTo)) throw new AgentRefusal('invalid_refund_address', `That is not a valid ${input.payFrom} address to refund.`, 400);
 
     const keyless = key.id === KEYLESS_KEY_ID;
     if (keyless) {
@@ -226,6 +237,7 @@ export class AgentApiService {
     if (made >= MAX_QUOTES_A_DAY) throw new AgentRefusal('too_many_quotes', 'This key has asked for too many quotes today.', 429);
 
     await this.assertAllowed(key, amountKobo, this.db);
+    if (naira) return this.quoteNaira(key, input, amountKobo);
     if (input.payFrom === 'near' && (await this.crossChain.nearAccountMissing(input.refundTo))) throw new AgentRefusal('invalid_refund_address', `The NEAR account ${input.refundTo} does not exist. Check the spelling.`, 400);
 
     const rate = await this.rates.nairaPerUsdc().catch(() => {
@@ -237,7 +249,7 @@ export class AgentApiService {
 
     const accountName = input.deliverTo ?? (await this.bankName(input));
     const { payInMinor } = await this.crossChain
-      .priceCheck({ payFrom: input.payFrom, usdcMinor, recipient: input.deliverTo ?? this.config.get('COLLECTION_ADDRESS', { infer: true }) ?? input.refundTo, refundTo: input.refundTo, deadline: new Date(Date.now() + DEPOSIT_WINDOW_MS), payToken: input.payToken ?? 'USDC', toNear: Boolean(input.deliverTo && isNearAccount(input.deliverTo)) })
+      .priceCheck({ payFrom: input.payFrom as PayFrom, usdcMinor, recipient: input.deliverTo ?? this.config.get('COLLECTION_ADDRESS', { infer: true }) ?? input.refundTo, refundTo: input.refundTo, deadline: new Date(Date.now() + DEPOSIT_WINDOW_MS), payToken: input.payToken ?? 'USDC', toNear: Boolean(input.deliverTo && isNearAccount(input.deliverTo)) })
       .catch((error: Error) => {
         this.logger.warn(`price check failed: ${error.message.slice(0, 200)}`);
         const hint = input.payFrom === 'near' ? ' Check that the NEAR account is spelled right.' : '';
@@ -313,7 +325,73 @@ export class AgentApiService {
     return this.setUp(claimed.row);
   }
 
+  /** Prices a naira payment at the partner's buying rate. Nothing is asked of the bank yet. */
+  private async quoteNaira(key: AgentKey, input: QuoteInput, amountKobo: number): Promise<AgentPayment> {
+    const terms = await this.onramp!.onrampTerms().catch(() => {
+      throw new AgentRefusal('rate_unavailable', 'We could not get a rate just now. Nothing was sent. Please try again.', 503);
+    });
+    if (amountKobo < terms.minimumKobo) throw new AgentRefusal('below_minimum', `The smallest naira payment is ${formatNaira(terms.minimumKobo)}.`, 422);
+    const usdcMinor = Math.floor((amountKobo / 100 / terms.nairaPerUsdc) * 1_000_000);
+    const [row] = await this.db
+      .insert(agentPayments)
+      .values({
+        id: randomUUID(),
+        keyId: key.id,
+        amountKobo,
+        usdcMinor,
+        payInMinor: usdcMinor,
+        bankName: input.bankName,
+        accountNumber: input.accountNumber,
+        accountName: input.deliverTo!,
+        payFrom: NAIRA,
+        payToken: 'USDC',
+        deliverTo: input.deliverTo!,
+        refundTo: NAIRA_PAYER,
+        payerName: input.payerName ?? null,
+        payerEmail: input.payerEmail ?? null,
+        purpose: input.purpose ?? null,
+        clientIp: input.clientIp ?? null,
+        quoteExpiresAt: new Date(Date.now() + QUOTE_LIFETIME_MS),
+      })
+      .returning();
+    return row!;
+  }
+
+  /**
+   * Asks the partner for a temporary bank account. When the naira lands there, the partner sends USDC straight to the
+   * receiver, so 10kobo never holds it. Like the crypto route, a failure before any account is shown leaves nothing at risk.
+   */
+  private async setUpNaira(payment: AgentPayment): Promise<AgentPayment> {
+    try {
+      const order = await this.onramp!.nairaOnramp({ reference: payment.id, amountKobo: payment.amountKobo, walletAddress: payment.deliverTo! });
+      const expiresAt = order.expiresAt ? new Date(order.expiresAt) : null;
+      // Without a deadline we could not show a true countdown, so this account is not handed out.
+      if (!expiresAt || Number.isNaN(expiresAt.getTime()) || expiresAt.getTime() <= Date.now()) throw new Error('The partner gave no usable deadline');
+      const [row] = await this.db
+        .update(agentPayments)
+        .set({
+          status: 'awaiting_deposit',
+          usdcMinor: order.usdcMinor,
+          payInMinor: order.usdcMinor,
+          payoutAddress: payment.deliverTo,
+          nairaAccount: { bankName: order.bankName, accountNumber: order.accountNumber, accountName: order.accountName, amountKobo: order.amountKobo, rate: order.rate },
+          depositDeadline: expiresAt,
+          updatedAt: new Date(),
+        })
+        .where(and(eq(agentPayments.id, payment.id), eq(agentPayments.status, 'creating')))
+        .returning();
+      if (!row) throw new Error('This payment changed while it was being set up');
+      await this.audit.record('agent_api', 'agent_payment.accepted', payment.id, { keyId: payment.keyId, kobo: payment.amountKobo, usdcMinor: order.usdcMinor, payFrom: NAIRA });
+      return row;
+    } catch (error) {
+      this.logger.warn(`naira payment ${payment.id} could not be set up: ${(error as Error).message.slice(0, 200)}`);
+      await this.db.update(agentPayments).set({ status: 'quoted', acceptedAt: null, updatedAt: new Date() }).where(and(eq(agentPayments.id, payment.id), eq(agentPayments.status, 'creating')));
+      throw new AgentRefusal('setup_failed', 'We could not set up a bank transfer just now. Nothing was paid. Please try again.', 503);
+    }
+  }
+
   private async setUp(payment: AgentPayment): Promise<AgentPayment> {
+    if (payment.payFrom === NAIRA) return this.setUpNaira(payment);
     let refused: AgentRefusal | null = null;
     try {
       const refundOnBase = isAddress(payment.refundTo) ? payment.refundTo : null;
@@ -364,7 +442,7 @@ export class AgentApiService {
 
   private stillWatched(row: AgentPayment): boolean {
     if ((OPEN as readonly string[]).includes(row.status)) return true;
-    return row.status === 'expired' && row.depositAddress !== null && Date.now() - row.updatedAt.getTime() < KEEP_CHECKING_EXPIRED_MS;
+    return row.status === 'expired' && (row.depositAddress !== null || row.nairaAccount !== null) && Date.now() - row.updatedAt.getTime() < KEEP_CHECKING_EXPIRED_MS;
   }
 
   /**
@@ -442,7 +520,29 @@ export class AgentApiService {
     }
   }
 
+  /** The partner's word on a naira payment. "unknown" changes nothing. */
+  private async nextNairaState(payment: AgentPayment): Promise<Partial<AgentPayment> | null> {
+    const state = await this.onramp!.onrampState(payment.id);
+    const gone = (payment.depositDeadline?.getTime() ?? 0) + (EXPIRE_AFTER_MS - DEPOSIT_WINDOW_MS) <= Date.now();
+    switch (state) {
+      case 'waiting':
+        if (payment.status === 'expired') return null;
+        return gone ? { status: 'expired', failureReason: 'No transfer arrived in time.' } : null;
+      case 'expired':
+        return payment.status === 'expired' ? null : { status: 'expired', failureReason: 'No transfer arrived in time.' };
+      case 'processing':
+        return payment.status === 'processing' ? null : { status: 'processing', failureReason: null };
+      case 'completed':
+        return { status: 'paid', paidAt: new Date(), failureReason: null };
+      case 'failed':
+        return { status: 'needs_support', failureReason: 'The bank transfer did not complete. A person is checking it with our partner. Do not pay again.' };
+      default:
+        return null;
+    }
+  }
+
   private async nextState(payment: AgentPayment): Promise<Partial<AgentPayment> | null> {
+    if (payment.payFrom === NAIRA) return this.onramp ? this.nextNairaState(payment) : null;
     let transactions = payment.transactions;
     if (payment.status !== 'paying') {
       const state = await this.crossChain.status(payment.depositAddress!);

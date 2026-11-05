@@ -345,8 +345,10 @@ export const agentPayments = pgTable(
     accountName: text('account_name').notNull(),
     payFrom: text('pay_from').notNull(),
     payToken: text('pay_token').notNull().default('USDC'),
-    /** Set when USDC goes straight to this NEAR account, with no bank payout. */
+    /** Set when USDC goes straight to this NEAR account or Base address, with no bank payout. */
     deliverTo: text('deliver_to'),
+    /** For a payer paying naira by bank transfer: the partner's temporary account to pay into. */
+    nairaAccount: jsonb('naira_account').$type<{ bankName: string | null; accountNumber: string; accountName: string | null; amountKobo: number; rate: string }>(),
     refundTo: text('refund_to').notNull(),
     quoteExpiresAt: timestamp('quote_expires_at', { withTimezone: true }).notNull(),
     payoutAddress: text('payout_address'),
