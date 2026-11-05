@@ -18,6 +18,8 @@ export interface RunOptions {
   task: string;
   invoice: string;
   log?: (line: string) => void;
+  /** The same steps in a form a dashboard can draw. */
+  event?: (event: { type: string } & Record<string, unknown>) => void;
   pollMs?: number;
   waitMs?: number;
   maxTurns?: number;
@@ -122,6 +124,7 @@ export class Guard {
 export async function runAgent(options: RunOptions): Promise<RunResult> {
   const { model, api, wallet, task, invoice } = options;
   const log = options.log ?? (() => undefined);
+  const emit = options.event ?? (() => undefined);
   const guard = new Guard(options.budgetUsdc);
   const pollMs = options.pollMs ?? 5000;
   const waitMs = options.waitMs ?? 20 * 60_000;
@@ -132,6 +135,7 @@ export async function runAgent(options: RunOptions): Promise<RunResult> {
     const refused = guard.refusal(quoteId);
     if (refused) {
       log(`GUARD refused: ${refused}`);
+      emit({ type: 'guard_refused', reason: refused });
       return refused;
     }
     const payment = await api.accept(quoteId);
@@ -139,25 +143,32 @@ export async function runAgent(options: RunOptions): Promise<RunResult> {
     const dearer = guard.overBudget(payment.pay_usdc);
     if (dearer) {
       log(`GUARD refused: ${dearer}`);
+      emit({ type: 'guard_refused', reason: dearer });
       return dearer;
     }
     if (payment.status !== 'awaiting_deposit' || !payment.deposit_address) return `This payment is ${payment.status}, so there is nothing to send. Nothing was sent.`;
     guard.markPaid();
     sent = true;
     log(`Sending ${payment.pay_usdc} USDC to the one-time deposit address ${payment.deposit_address}`);
+    emit({ type: 'sending', usdc: payment.pay_usdc, to: payment.deposit_address });
     try {
       const txHash = await wallet.sendUsdc(payment.deposit_address, usdcToMinor(payment.pay_usdc), payment.id);
       api.deposited?.(payment.id, txHash);
     } catch (error) {
       log(`Could not confirm the send: ${(error as Error).message.slice(0, 160)}`);
+      emit({ type: 'send_unconfirmed' });
       return 'Could not confirm whether the USDC was sent, so a person must check. It will not be sent again.';
     }
+    emit({ type: 'sent' });
     const until = Date.now() + waitMs;
     let current = payment;
     while (!DONE.has(current.status) && Date.now() < until) {
       await new Promise((resolve) => setTimeout(resolve, pollMs));
       current = await api.status(payment.id).catch(() => current);
-      if (current.status !== lastPayment?.status) log(`Payment status: ${current.status}`);
+      if (current.status !== lastPayment?.status) {
+        log(`Payment status: ${current.status}`);
+        emit({ type: 'status', status: current.status });
+      }
       lastPayment = current;
     }
     return JSON.stringify(current);
@@ -168,11 +179,13 @@ export async function runAgent(options: RunOptions): Promise<RunResult> {
       if (options.allowedAccounts && !options.allowedAccounts.includes(String(input.account_number))) {
         const refused = 'That account is not one the owner allows. Nothing was sent.';
         log(`GUARD refused: ${refused}`);
+        emit({ type: 'guard_refused', reason: refused });
         return refused;
       }
       const quote = await api.quote({ amount_naira: Number(input.amount_naira), bank_name: String(input.bank_name), account_number: String(input.account_number) });
       guard.remember(quote);
       log(`Quote: ${quote.amount} to "${quote.account_name}" (${quote.bank_name} ${quote.account_number}) costs ${quote.pay_usdc} USDC`);
+      emit({ type: 'quote', amount: quote.amount, name: quote.account_name, bank: quote.bank_name, account: quote.account_number, usdc: quote.pay_usdc });
       return JSON.stringify(quote);
     }
     if (name === 'pay_quote') return pay(String(input.quote_id));
@@ -192,7 +205,12 @@ export async function runAgent(options: RunOptions): Promise<RunResult> {
       return { outcome: lastPayment?.status === 'paid' ? 'paid' : 'no_decision', reason: 'The AI model could not be reached.', ...(lastPayment ? { payment: lastPayment } : {}) };
     }
     messages.push({ role: 'assistant', content });
-    for (const block of content) if (block.type === 'text' && block.text.trim()) log(`Agent: ${block.text.trim()}`);
+    for (const block of content) {
+      if (block.type === 'text' && block.text.trim()) {
+        log(`Agent: ${block.text.trim()}`);
+        emit({ type: 'thinking', text: block.text.trim() });
+      }
+    }
     const calls = content.filter((block): block is Extract<Block, { type: 'tool_use' }> => block.type === 'tool_use');
     if (calls.length === 0) return { outcome: 'no_decision', reason: 'The model stopped without finishing.', ...(lastPayment ? { payment: lastPayment } : {}) };
 
@@ -211,6 +229,7 @@ export async function runAgent(options: RunOptions): Promise<RunResult> {
       } catch (error) {
         const message = error instanceof ApiRefusal ? `${error.code}: ${error.message}` : 'The request failed. Nothing was sent.';
         log(`Refused: ${message}`);
+        emit({ type: 'api_refused', reason: error instanceof ApiRefusal ? error.message : message });
         results.push({ type: 'tool_result', tool_use_id: call.id, content: message, is_error: true });
       }
     }

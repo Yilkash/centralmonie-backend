@@ -8,7 +8,7 @@ FRONTEND="$PWD/../10kobo-frontend"
 export DATABASE_URL='postgres://tenkobo:localdev@localhost:54445/tenkobo_demo'
 docker exec tenkobo-pg psql -U tenkobo -d postgres -tc "select 1 from pg_database where datname='tenkobo_demo'" | grep -q 1 || docker exec tenkobo-pg psql -U tenkobo -d postgres -qc 'CREATE DATABASE tenkobo_demo'
 npm run -s db:migrate >/dev/null || { echo 'The database could not be prepared. Is Docker running?'; exit 1; }
-PORT=4012 PAYMENTS_MODE=simulated IDENTITY_PROVIDER=test WORKER_ENABLED=true CORS_ORIGINS=http://localhost:3012 PUBLIC_APP_URL=http://localhost:3012 npx ts-node --transpile-only src/main.ts >/tmp/10kobo-demo-backend.log 2>&1 &
+PORT=4012 PAYMENTS_MODE=simulated IDENTITY_PROVIDER=test DEMO_AGENT_ENABLED=true WORKER_ENABLED=true CORS_ORIGINS=http://localhost:3012 PUBLIC_APP_URL=http://localhost:3012 npx ts-node --transpile-only src/main.ts >/tmp/10kobo-demo-backend.log 2>&1 &
 API=$!
 (cd "$FRONTEND" && NEXT_DIST_DIR=.next-demo NEXT_PUBLIC_IDENTITY=test NEXT_PUBLIC_TEST_EMAIL=demo@10kobo.test NEXT_PUBLIC_TEST_WALLET=0x393eA6fbd50b821CdE7EdC1b936c567dbb15c26d NEXT_PUBLIC_API_URL=http://localhost:4012 exec npx next dev -p 3012 >/tmp/10kobo-demo-web.log 2>&1) &
 WEB=$!
@@ -20,6 +20,7 @@ cat <<EOM
 
   Test copy is ready. NO REAL MONEY moves here.
 
+  Agent dashboard: http://localhost:3012/agent
   Pay link page:  $LINK
   Test web app:   http://localhost:3012
   AI agent:       ./scripts/demo-agent.sh normal

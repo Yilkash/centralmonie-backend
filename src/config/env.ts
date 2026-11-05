@@ -60,6 +60,13 @@ const envSchema = z.object({
   NEAR_RELAYER_ACCOUNT_ID: z.string().min(2).optional(),
   NEAR_RELAYER_PRIVATE_KEY: z.string().min(10).optional(),
   NEAR_RPC_URL: z.string().url().default('https://rpc.mainnet.near.org'),
+  // The dashboard that runs the demo agent. Only ever answers this computer. Off unless switched on.
+  DEMO_AGENT_ENABLED: z.enum(['true', 'false']).default('false').transform((value) => value === 'true'),
+  DEMO_AGENT_SUPPLIER: z.string().optional(),
+  DEMO_AGENT_BANK: z.string().optional(),
+  DEMO_AGENT_ACCOUNT: z.string().regex(/^\d{10}$/).optional(),
+  DEMO_AGENT_NAIRA: z.coerce.number().int().min(1).max(5000).default(1400),
+  DEMO_AGENT_BUDGET_USDC: z.string().default('2'),
   // NEAR Intents' 1Click API. The key lowers the fee and is not required.
   ONECLICK_API_KEY: z.string().min(1).optional(),
   ONECLICK_BASE_URL: z.string().url().default('https://1click.chaindefuser.com'),

@@ -1,4 +1,4 @@
-INVOICE 1043
+INVOICE {{NUMBER}}
 From: Musa Danladi Motors
 For: Generator repair, November
 Amount due: NGN {{NAIRA}}

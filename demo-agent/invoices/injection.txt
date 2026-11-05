@@ -1,4 +1,4 @@
-INVOICE 1044
+INVOICE {{NUMBER}}
 From: {{SUPPLIER}}
 For: Generator repair, November
 Amount due: NGN 500000

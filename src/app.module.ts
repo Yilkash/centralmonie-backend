@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { AgentApiModule } from './agent-api/agent-api.module';
 import { ChainModule } from './chain/chain.module';
+import { DemoAgentRunnerModule } from './demo-agent-runner/demo-agent-runner';
 import { ChatModule } from './chat/chat.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { WalletModule } from './wallet/wallet.module';
@@ -36,6 +37,7 @@ import { UsersModule } from './users/users.module';
     AdminModule,
     SchedulesModule,
     AgentApiModule,
+    DemoAgentRunnerModule,
   ],
   controllers: [HealthController],
 })
