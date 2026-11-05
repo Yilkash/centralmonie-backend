@@ -15,6 +15,8 @@ The model has no tool that takes an address. It can only name a quote that 10kob
 try to talk the model into something, but code refuses any payment over budget. The final result comes from what
 the payment did, not from what the model says.
 
+With real money, also set `ALLOWED_ACCOUNTS` to the bank accounts the owner approves. Without it, an invoice that fools the model could still send up to the budget to the wrong account. A ledger, `.paid-invoices.json`, stops one invoice being paid twice.
+
 ## Try it, with no real money
 
 1. In `10kobo-backend`, start the database and run the backend in test mode (`PAYMENTS_MODE=simulated`) with an `ADMIN_TOKEN` set.

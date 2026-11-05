@@ -52,6 +52,8 @@ const envSchema = z.object({
   AGENT_API_ENABLED: z.enum(['true', 'false']).default('false').transform((value) => value === 'true'),
   // Lets agents pay over x402 with no API key when real money is on. In test mode it is always open.
   X402_KEYLESS_ENABLED: z.enum(['true', 'false']).default('false').transform((value) => value === 'true'),
+  // How many proxies sit in front of the backend. Read as a real environment variable, before any .env file loads.
+  TRUST_PROXY_HOPS: z.coerce.number().int().min(0).optional(),
   // NEAR Intents' 1Click API. The key lowers the fee and is not required.
   ONECLICK_API_KEY: z.string().min(1).optional(),
   ONECLICK_BASE_URL: z.string().url().default('https://1click.chaindefuser.com'),
@@ -109,6 +111,10 @@ export function validateEnv(raw: Record<string, unknown>): Env {
     if (result.data.USDC_ADDRESS.toLowerCase() !== MAINNET_USDC) throw new Error('Real money needs USDC_ADDRESS set to USDC on Base');
     if (/sepolia/i.test(result.data.CHAIN_RPC_URL)) throw new Error('Real money needs CHAIN_RPC_URL set to a Base mainnet RPC');
     if (result.data.PAYSCRIBE_BASE_URL?.includes('sandbox')) throw new Error('Real money needs the live PAYSCRIBE_BASE_URL');
+  }
+  // Behind a proxy with this unset, every caller looks like one address, and anyone could use up the limit for all.
+  if (result.data.PAYMENTS_MODE === 'chain' && result.data.X402_KEYLESS_ENABLED && result.data.TRUST_PROXY_HOPS === undefined) {
+    throw new Error('X402_KEYLESS_ENABLED needs TRUST_PROXY_HOPS set, even to 0');
   }
   if (result.data.PAYMENTS_MODE === 'chain' && !result.data.COLLECTION_ADDRESS) {
     throw new Error('PAYMENTS_MODE=chain needs COLLECTION_ADDRESS');

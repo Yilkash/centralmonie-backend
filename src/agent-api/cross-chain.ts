@@ -85,7 +85,7 @@ export class OneClickCrossChain extends CrossChain {
   }
 
   private async ask(request: CrossChainRequest, dry: boolean): Promise<CrossChainQuote> {
-    const answer = await this.call<{ quote?: { depositAddress?: string; amountIn?: string } }>('POST', '/v0/quote', {
+    const answer = await this.call<{ quote?: { depositAddress?: string; amountIn?: string; amountOut?: string } }>('POST', '/v0/quote', {
       dry,
       swapType: 'EXACT_OUTPUT',
       slippageTolerance: SLIPPAGE_BPS,
@@ -101,6 +101,8 @@ export class OneClickCrossChain extends CrossChain {
     });
     const payInMinor = Number(answer.quote?.amountIn);
     if (!Number.isSafeInteger(payInMinor) || payInMinor < request.usdcMinor) throw new Error('NEAR Intents gave an unusable amount');
+    // It must deliver at least what the bank partner is waiting for, or the payout would never start.
+    if (answer.quote?.amountOut !== undefined && Number(answer.quote.amountOut) < request.usdcMinor) throw new Error('NEAR Intents would deliver too little');
     if (!dry && !answer.quote?.depositAddress) throw new Error('NEAR Intents gave no deposit address');
     return { depositAddress: answer.quote?.depositAddress ?? null, payInMinor };
   }

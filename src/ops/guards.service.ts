@@ -38,7 +38,7 @@ export class GuardsService {
     const [agents] = await db
       .select({ used: sql<string>`coalesce(sum(${agentPayments.amountKobo}), 0)` })
       .from(agentPayments)
-      .where(sql`${inArray(agentPayments.status, [...AGENT_STATUSES_THAT_COUNT])} and ${agentPayments.createdAt} >= ${startOfLagosDay}`);
+      .where(sql`${inArray(agentPayments.status, [...AGENT_STATUSES_THAT_COUNT])} and ${agentPayments.acceptedAt} >= ${startOfLagosDay}`);
     if (Number(row!.used) + Number(agents!.used) + addedKobo > cap) return 'Payments are busy right now. Nothing was sent. Please try again later.';
     return null;
   }

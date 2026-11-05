@@ -58,11 +58,13 @@ const SWITCH = Symbol('switch');
     },
     {
       provide: AgentPayout,
-      inject: [SWITCH],
-      useFactory: (switch_: SwitchProvider | null): AgentPayout =>
-        switch_
-          ? { deposit: (request) => switch_.deposit(request), status: (reference) => switch_.status(reference, reference) }
-          : new SimulatedAgentPayout(),
+      inject: [SWITCH, ConfigService],
+      useFactory: (switch_: SwitchProvider | null, config: ConfigService<Env, true>): AgentPayout => {
+        if (switch_) return { deposit: (request) => switch_.deposit(request), status: (reference) => switch_.status(reference, reference) };
+        // A real route to a made-up payout address would burn real USDC and report it as paid.
+        if (config.get('PAYMENTS_MODE', { infer: true }) === 'chain' && config.get('AGENT_API_ENABLED', { infer: true })) throw new Error('AGENT_API_ENABLED with PAYMENTS_MODE=chain needs a Switch key');
+        return new SimulatedAgentPayout();
+      },
     },
     { provide: ExchangeRates, inject: [SWITCH], useFactory: (switch_: SwitchProvider | null) => switch_ ?? new SimulatedExchangeRates() },
     { provide: BankLookup, inject: [SWITCH], useFactory: (switch_: SwitchProvider | null) => switch_ ?? new SimulatedBankLookup() },

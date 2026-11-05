@@ -74,7 +74,7 @@ export function tokenProblem(secret: string, payment: AgentPayment, resource: st
 }
 
 export function firstChallenge(payment: AgentPayment, url: string) {
-  return { x402Version: 2, resource: { url, description: `Pay ${payment.accountName} in naira`, mimeType: 'application/json' }, accepts: [unquoted(payment)] };
+  return { x402Version: 2, resource: { url, description: "Pay a Nigerian bank account in naira", mimeType: 'application/json' }, accepts: [unquoted(payment)] };
 }
 
 export function quotedChallenge(secret: string, payment: AgentPayment, url: string, resource: string) {
@@ -83,7 +83,7 @@ export function quotedChallenge(secret: string, payment: AgentPayment, url: stri
   const entry = unquoted(payment);
   return {
     x402Version: 2,
-    resource: { url, description: `Pay ${payment.accountName} in naira`, mimeType: 'application/json' },
+    resource: { url, description: "Pay a Nigerian bank account in naira", mimeType: 'application/json' },
     accepts: [{ ...entry, amount: String(payment.payInMinor), payTo: payment.depositAddress!, extra: { ...entry.extra, refundDeadline: deadline.toISOString(), operationToken: operationToken(secret, payment, resource, expiry) } }],
   };
 }

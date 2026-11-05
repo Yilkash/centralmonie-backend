@@ -113,6 +113,13 @@
       "when": 1793883100156,
       "tag": "0015_legal_grey_gargoyle",
       "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "7",
+      "when": 1793883969917,
+      "tag": "0016_mature_captain_britain",
+      "breakpoints": true
     }
   ]
 }

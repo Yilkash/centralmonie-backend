@@ -47,6 +47,11 @@ describe('OneClickCrossChain', () => {
     await expect(client(jest.fn().mockResolvedValue(reply(200, { quote: { depositAddress: '0xd', amountIn: '5' } }))).quote(request)).rejects.toThrow('unusable');
   });
 
+  it('refuses a quote that would deliver less than the partner needs', async () => {
+    const short = jest.fn().mockResolvedValue(reply(200, { quote: { depositAddress: '0xd', amountIn: '1052400', amountOut: '1049999' } }));
+    await expect(client(short).quote(request)).rejects.toThrow('too little');
+  });
+
   it.each([
     ['PENDING_DEPOSIT', 'waiting'],
     ['KNOWN_DEPOSIT_TX', 'moving'],

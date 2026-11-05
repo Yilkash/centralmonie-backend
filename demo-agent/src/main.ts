@@ -1,5 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
-import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { runAgent, type Model } from './agent.ts';
 import { TenKoboApi, X402Api } from './api.ts';
 import { NearWallet, SimulatedWallet, type Wallet } from './wallet.ts';
@@ -23,7 +24,7 @@ if (!invoicePath) {
   process.exit(1);
 }
 const real = flags.includes('--real');
-const env = settings(process.env.AGENT_ENV_FILE, ['ANTHROPIC_API_KEY', 'AGENT_MODEL', 'TENKOBO_API_URL', 'TENKOBO_API_KEY', 'NEAR_AGENT_ACCOUNT_ID', 'NEAR_AGENT_PRIVATE_KEY', 'INVOICE_SUPPLIER', 'INVOICE_BANK', 'INVOICE_ACCOUNT', 'INVOICE_NAIRA', 'BUDGET_USDC']);
+const env = settings(process.env.AGENT_ENV_FILE, ['ANTHROPIC_API_KEY', 'AGENT_MODEL', 'TENKOBO_API_URL', 'TENKOBO_API_KEY', 'NEAR_AGENT_ACCOUNT_ID', 'NEAR_AGENT_PRIVATE_KEY', 'INVOICE_SUPPLIER', 'INVOICE_BANK', 'INVOICE_ACCOUNT', 'INVOICE_NAIRA', 'BUDGET_USDC', 'ALLOWED_ACCOUNTS']);
 const need = (name: string): string => {
   const value = env[name];
   if (!value) throw new Error(`${name} is not set`);
@@ -34,7 +35,7 @@ const anthropic = new Anthropic({ apiKey: need('ANTHROPIC_API_KEY') });
 const model: Model = async ({ system, tools, messages }) =>
   (await anthropic.messages.create({ model: env.AGENT_MODEL ?? 'claude-haiku-5-5', max_tokens: 2000, system, tools, messages: messages as Anthropic.MessageParam[] })) as unknown as { content: never[] };
 
-const wallet: Wallet = real ? new NearWallet(need('NEAR_AGENT_ACCOUNT_ID'), need('NEAR_AGENT_PRIVATE_KEY')) : new SimulatedWallet();
+const realWallet: Wallet = real ? new NearWallet(need('NEAR_AGENT_ACCOUNT_ID'), need('NEAR_AGENT_PRIVATE_KEY')) : new SimulatedWallet();
 const common = { baseUrl: env.TENKOBO_API_URL ?? 'http://localhost:4010', payFrom: 'near', refundTo: env.NEAR_AGENT_ACCOUNT_ID ?? 'demo-agent.near' };
 const api = flags.includes('--x402')
   ? new X402Api({ ...common, ...(env.TENKOBO_API_KEY ? { key: env.TENKOBO_API_KEY } : {}), payer: { payer_name: '10kobo demo agent', payer_email: 'demo@example.com', purpose: 'Supplier invoice' } })
@@ -46,13 +47,32 @@ const fill = (text: string) =>
     .replaceAll('{{ACCOUNT}}', env.INVOICE_ACCOUNT ?? '8031234568')
     .replaceAll('{{NAIRA}}', env.INVOICE_NAIRA ?? '1400');
 
+const invoice = fill(readFileSync(invoicePath, 'utf8'));
+
+// With real money, one invoice pays once, even if this program is run again. Written before the send: if the
+// send fails midway it may still have gone, so a person decides. Delete the entry to pay it again on purpose.
+const LEDGER = '.paid-invoices.json';
+const invoiceId = createHash('sha256').update(invoice).digest('hex');
+const ledger: string[] = existsSync(LEDGER) ? JSON.parse(readFileSync(LEDGER, 'utf8')) : [];
+if (real && ledger.includes(invoiceId)) {
+  console.log('This invoice has already been sent a payment. Nothing was sent.');
+  process.exit(1);
+}
+const wallet: Wallet = {
+  sendUsdc: (to, usdcMinor) => {
+    if (real) writeFileSync(LEDGER, JSON.stringify([...ledger, invoiceId]));
+    return realWallet.sendUsdc(to, usdcMinor);
+  },
+};
+
 const result = await runAgent({
   model,
   api,
   wallet,
+  ...(env.ALLOWED_ACCOUNTS ? { allowedAccounts: env.ALLOWED_ACCOUNTS.split(',').map((item) => item.trim()) } : {}),
   budgetUsdc: env.BUDGET_USDC ?? '2',
   task: "Pay this month's supplier invoice.",
-  invoice: fill(readFileSync(invoicePath, 'utf8')),
+  invoice,
   log: (line) => console.log(line),
   ...(real ? {} : { pollMs: 200 }),
 });

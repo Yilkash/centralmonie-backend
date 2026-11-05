@@ -1,6 +1,6 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { and, count, eq, gte, inArray, lt, sql } from 'drizzle-orm';
+import { and, asc, count, eq, gte, inArray, lt, sql } from 'drizzle-orm';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { isAddress } from 'viem';
 import { Env } from '../config/env';
@@ -13,8 +13,17 @@ import { AgentPayout, BankLookup, ExchangeRates, PaymentProvider } from '../prov
 import { CrossChain, PayFrom } from './cross-chain';
 
 const QUOTE_LIFETIME_MS = 10 * 60_000;
-const DEPOSIT_WINDOW_MS = 30 * 60_000;
-const STUCK_CREATING_MS = 2 * 60_000;
+/** What the agent is told. Limits hold the payment for this long, so it stays short. */
+const DEPOSIT_WINDOW_MS = 20 * 60_000;
+/** NEAR Intents' own deadline is later, so a deposit sent at the last moment still completes. */
+const ROUTE_DEADLINE_MS = 30 * 60_000;
+const SHORTEST_ROUTE_MS = 10 * 60_000;
+/** Only after this do we call it expired, and for a day after that we keep looking in case money still moved. */
+const EXPIRE_AFTER_MS = 35 * 60_000;
+const KEEP_CHECKING_EXPIRED_MS = 24 * 60 * 60_000;
+const PAYING_TOO_LONG_MS = 24 * 60 * 60_000;
+/** Longer than the slowest setup can take (about 144 seconds), so this cannot fire on one still running. */
+const STUCK_CREATING_MS = 5 * 60_000;
 const MAX_QUOTES_A_DAY = 200;
 /** The partner fixes the naira when the payment is created. A smaller gap than this is ordinary rate movement. */
 const PRICE_TOLERANCE = 0.995;
@@ -28,6 +37,8 @@ const KEYLESS = {
   perAccountDayKobo: 100_000 * 100,
   totalDayKobo: 200_000 * 100,
   quotesPerIpHour: 30,
+  acceptsPerIpHour: 10,
+  quotesPerDay: 2000,
 };
 
 const startOfLagosDay = sql`(date_trunc('day', now() at time zone 'Africa/Lagos') at time zone 'Africa/Lagos')`;
@@ -48,6 +59,18 @@ export class AgentRefusal extends Error {
 /** Test mode moves nothing, so it is open. With real money, it needs its own switch as well. */
 export function agentApiOpen(mode: 'simulated' | 'chain', enabled: boolean): boolean {
   return mode === 'simulated' || enabled;
+}
+
+/** IPv6 hands out whole /64 blocks, so one caller can hold billions of addresses. */
+export function ipGroup(ip: string): string {
+  if (!ip.includes(':') || ip.startsWith('::ffff:')) return ip;
+  const [head = ''] = ip.split('::');
+  return head.split(':').slice(0, 4).join(':');
+}
+
+/** Keeps enough to compare with an invoice, without handing out names to anyone who asks about an account. */
+export function maskName(name: string): string {
+  return name.split(/\s+/).filter(Boolean).map((word) => word.slice(0, 2) + '*'.repeat(Math.max(word.length - 2, 0))).join(' ');
 }
 
 export function validRefundAddress(payFrom: PayFrom, address: string): boolean {
@@ -106,14 +129,19 @@ export class AgentApiService {
   }
 
   /** In memory, so a restart clears it. It slows abuse of the bank lookup: the money limits are elsewhere. */
-  private countIp(ip: string): void {
+  private countIp(kind: 'quote' | 'accept', ip: string): void {
     const now = Date.now();
-    if (this.ipWindows.size > 10_000) this.ipWindows.clear();
-    const window = this.ipWindows.get(ip);
+    if (this.ipWindows.size > 10_000) {
+      for (const [key, value] of this.ipWindows) if (value.until <= now) this.ipWindows.delete(key);
+    }
+    // When full, new addresses share one counter: filling the map must not clear anyone's count.
+    const tracked = `${kind}:${ipGroup(ip)}`;
+    const key = this.ipWindows.size > 10_000 && !this.ipWindows.has(tracked) ? `${kind}:overflow` : tracked;
+    const window = this.ipWindows.get(key);
     const current = window && window.until > now ? window : { until: now + 3_600_000, count: 0 };
     current.count += 1;
-    this.ipWindows.set(ip, current);
-    if (current.count > KEYLESS.quotesPerIpHour) throw new AgentRefusal('too_many_quotes', 'Too many quotes from this address. Try again later.', 429);
+    this.ipWindows.set(key, current);
+    if (current.count > (kind === 'quote' ? KEYLESS.quotesPerIpHour : KEYLESS.acceptsPerIpHour)) throw new AgentRefusal('too_many_requests', 'Too many requests from this address. Try again later.', 429);
   }
 
   /** The key is returned here and never again. */
@@ -142,7 +170,12 @@ export class AgentApiService {
 
     const keyless = key.id === KEYLESS_KEY_ID;
     if (keyless) {
-      this.countIp(input.clientIp ?? 'unknown');
+      this.countIp('quote', input.clientIp ?? 'unknown');
+      const [{ today } = { today: 0 }] = await this.db
+        .select({ today: count() })
+        .from(agentPayments)
+        .where(and(eq(agentPayments.keyId, KEYLESS_KEY_ID), gte(agentPayments.createdAt, sql`${startOfLagosDay}`)));
+      if (today >= KEYLESS.quotesPerDay) throw new AgentRefusal('too_many_requests', 'Paying without a key is busy today. Try again tomorrow.', 429);
       if (amountKobo > KEYLESS.perPaymentKobo) throw new AgentRefusal('over_payment_limit', `Without an API key, the most for one payment is ${formatNaira(KEYLESS.perPaymentKobo)}.`, 422);
       await this.assertKeylessCaps(amountKobo, input.refundTo, input.accountNumber, this.db);
     }
@@ -155,17 +188,18 @@ export class AgentApiService {
 
     await this.assertAllowed(key, amountKobo, this.db);
 
-    const accountName = await this.banks.accountName(input.bankName, input.accountNumber).catch(() => {
-      throw new AgentRefusal('bank_unavailable', 'We could not check that account just now. Nothing was sent. Please try again.', 503);
-    });
-    if (!accountName) throw new AgentRefusal('account_not_found', 'We could not find that account. Check the bank and the account number.', 404);
-
     const rate = await this.rates.nairaPerUsdc().catch(() => {
       throw new AgentRefusal('rate_unavailable', 'We could not get a rate just now. Nothing was sent. Please try again.', 503);
     });
     const usdcMinor = koboToUsdcMinor(amountKobo, rate);
     const minimum = this.provider.minimumUsdcMinor('bank');
     if (usdcMinor < minimum) throw new AgentRefusal('below_minimum', `The smallest payment is about ${formatNaira(Math.ceil((minimum * rate) / 10_000 / 100) * 100)}.`, 422);
+
+    // Last of the checks: this asks the bank, and tells the caller a name.
+    const accountName = await this.banks.accountName(input.bankName, input.accountNumber).catch(() => {
+      throw new AgentRefusal('bank_unavailable', 'We could not check that account just now. Nothing was sent. Please try again.', 503);
+    });
+    if (!accountName) throw new AgentRefusal('account_not_found', 'We could not find that account. Check the bank and the account number.', 404);
 
     const { payInMinor } = await this.crossChain
       .priceCheck({ payFrom: input.payFrom, usdcMinor, recipient: this.config.get('COLLECTION_ADDRESS', { infer: true }) ?? input.refundTo, refundTo: input.refundTo, deadline: new Date(Date.now() + DEPOSIT_WINDOW_MS) })
@@ -201,7 +235,7 @@ export class AgentApiService {
    * Accepting twice gives the same payment, so an agent can safely retry after a lost connection. The
    * limits are checked under a lock on the key, so two requests at once cannot both use the last of them.
    */
-  async accept(key: AgentKey, id: string): Promise<AgentPayment> {
+  async accept(key: AgentKey, id: string, clientIp?: string): Promise<AgentPayment> {
     const claimed = await this.db.transaction(async (tx) => {
       await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${key.id}))`);
       const [row] = await tx.select().from(agentPayments).where(and(eq(agentPayments.id, id), eq(agentPayments.keyId, key.id)));
@@ -213,9 +247,10 @@ export class AgentApiService {
         await tx.update(agentPayments).set({ status: 'expired', updatedAt: new Date() }).where(eq(agentPayments.id, id));
         return { row: null, fresh: false };
       }
+      if (key.id === KEYLESS_KEY_ID) this.countIp('accept', clientIp ?? row.clientIp ?? 'unknown');
       await this.assertAllowed(key, row.amountKobo, tx);
       if (key.id === KEYLESS_KEY_ID) await this.assertKeylessCaps(row.amountKobo, row.refundTo, row.accountNumber, tx);
-      const [updated] = await tx.update(agentPayments).set({ status: 'creating', updatedAt: new Date() }).where(eq(agentPayments.id, id)).returning();
+      const [updated] = await tx.update(agentPayments).set({ status: 'creating', acceptedAt: new Date(), updatedAt: new Date() }).where(eq(agentPayments.id, id)).returning();
       return { row: updated!, fresh: true };
     });
     if (!claimed.row) throw new AgentRefusal('quote_expired', 'This quote has expired. Ask for a new one.', 410);
@@ -237,23 +272,28 @@ export class AgentApiService {
       if (deposit.destinationKobo !== null && deposit.destinationKobo < payment.amountKobo * PRICE_TOLERANCE) {
         // Nothing can reach the partner's address without the deposit address below, so nothing is at risk.
         refused = new AgentRefusal('price_changed', 'The rate moved. Nothing was sent. Ask for a new quote.', 409);
-        await this.db.update(agentPayments).set({ status: 'expired', updatedAt: new Date() }).where(eq(agentPayments.id, payment.id));
+        await this.db.update(agentPayments).set({ status: 'expired', acceptedAt: null, updatedAt: new Date() }).where(and(eq(agentPayments.id, payment.id), eq(agentPayments.status, 'creating')));
         throw refused;
       }
-      const deadline = new Date(Date.now() + DEPOSIT_WINDOW_MS);
-      const quote = await this.crossChain.quote({ payFrom: payment.payFrom as PayFrom, usdcMinor: payment.usdcMinor, recipient: deposit.address, refundTo: payment.refundTo, deadline });
+      // The route must end before the partner's address stops accepting, with time left for the USDC to arrive.
+      const partnerEnds = deposit.expiresAt ? new Date(deposit.expiresAt).getTime() - 5 * 60_000 : Number.POSITIVE_INFINITY;
+      const routeEnds = Math.min(Date.now() + ROUTE_DEADLINE_MS, partnerEnds);
+      if (routeEnds - Date.now() < SHORTEST_ROUTE_MS) throw new Error('The partner gave too little time for the deposit');
+      const deadline = new Date(Math.min(Date.now() + DEPOSIT_WINDOW_MS, routeEnds - 5 * 60_000));
+      const quote = await this.crossChain.quote({ payFrom: payment.payFrom as PayFrom, usdcMinor: payment.usdcMinor, recipient: deposit.address, refundTo: payment.refundTo, deadline: new Date(routeEnds) });
       const [row] = await this.db
         .update(agentPayments)
         .set({ status: 'awaiting_deposit', payoutAddress: deposit.address, payoutKobo: deposit.destinationKobo, depositAddress: quote.depositAddress, payInMinor: quote.payInMinor, depositDeadline: deadline, updatedAt: new Date() })
-        .where(eq(agentPayments.id, payment.id))
+        .where(and(eq(agentPayments.id, payment.id), eq(agentPayments.status, 'creating')))
         .returning();
+      if (!row) throw new Error('This payment changed while it was being set up');
       await this.audit.record('agent_api', 'agent_payment.accepted', payment.id, { keyId: payment.keyId, kobo: payment.amountKobo, usdcMinor: payment.usdcMinor, payFrom: payment.payFrom });
       return row!;
     } catch (error) {
       if (error === refused && refused) throw refused;
       this.logger.warn(`agent payment ${payment.id} could not be set up: ${(error as Error).message.slice(0, 200)}`);
       // No deposit address went out, so the agent cannot have paid. The same id may safely ask again.
-      await this.db.update(agentPayments).set({ status: 'quoted', updatedAt: new Date() }).where(eq(agentPayments.id, payment.id));
+      await this.db.update(agentPayments).set({ status: 'quoted', acceptedAt: null, updatedAt: new Date() }).where(and(eq(agentPayments.id, payment.id), eq(agentPayments.status, 'creating')));
       throw new AgentRefusal('setup_failed', 'We could not set up this payment. Nothing was sent. Please try again.', 503);
     }
   }
@@ -261,17 +301,23 @@ export class AgentApiService {
   async get(key: AgentKey, id: string): Promise<AgentPayment> {
     const [row] = await this.db.select().from(agentPayments).where(and(eq(agentPayments.id, id), eq(agentPayments.keyId, key.id)));
     if (!row) throw new AgentRefusal('not_found', 'No such payment.', 404);
-    return (OPEN as readonly string[]).includes(row.status) ? this.refresh(row) : row;
+    return this.stillWatched(row) ? this.refresh(row) : row;
+  }
+
+  private stillWatched(row: AgentPayment): boolean {
+    if ((OPEN as readonly string[]).includes(row.status)) return true;
+    return row.status === 'expired' && row.depositAddress !== null && Date.now() - row.updatedAt.getTime() < KEEP_CHECKING_EXPIRED_MS;
   }
 
   /** For the background job. */
   async reconcile(): Promise<void> {
     await this.db
       .update(agentPayments)
-      .set({ status: 'quoted', updatedAt: new Date() })
+      .set({ status: 'quoted', acceptedAt: null, updatedAt: new Date() })
       .where(and(eq(agentPayments.status, 'creating'), lt(agentPayments.updatedAt, new Date(Date.now() - STUCK_CREATING_MS))));
-    const open = await this.db.select().from(agentPayments).where(inArray(agentPayments.status, [...OPEN])).limit(50);
-    for (const payment of open) await this.refresh(payment);
+    // Oldest check first, so a slow partner cannot leave the same rows at the back every time.
+    const open = await this.db.select().from(agentPayments).where(inArray(agentPayments.status, [...OPEN, 'expired'])).orderBy(asc(agentPayments.updatedAt)).limit(100);
+    for (const payment of open.filter((row) => this.stillWatched(row)).slice(0, 50)) await this.refresh(payment);
   }
 
   /** Only ever reads where the money is, so it is safe to run at any time. If it cannot ask, nothing changes. */
@@ -300,7 +346,9 @@ export class AgentApiService {
       transactions = state.transactions.length > 0 ? state.transactions : transactions;
       switch (state.status) {
         case 'waiting':
-          return payment.depositDeadline && payment.depositDeadline.getTime() <= Date.now() ? { status: 'expired', failureReason: 'No payment arrived in time.' } : null;
+          if (payment.status === 'expired') return null;
+          // Measured from acceptance, so a deposit sent at the last moment has time to be seen.
+          return payment.depositDeadline && payment.depositDeadline.getTime() + (EXPIRE_AFTER_MS - DEPOSIT_WINDOW_MS) <= Date.now() ? { status: 'expired', failureReason: 'No payment arrived in time.' } : null;
         case 'underpaid':
           return payment.depositDeadline && payment.depositDeadline.getTime() <= Date.now()
             ? { status: 'processing', failureReason: 'Less than the amount asked for arrived. It should be refunded.', transactions }
@@ -318,7 +366,11 @@ export class AgentApiService {
     const paid = await this.payout.status(payment.id);
     if (paid.state === 'completed') return { status: 'paid', paidAt: new Date(), failureReason: null, transactions };
     if (paid.state === 'failed') return { status: 'needs_support', failureReason: 'The USDC arrived, but the bank payment failed. Do not send again.', transactions };
-    return payment.status === 'paying' ? null : { status: 'paying', failureReason: null, transactions };
+    if (payment.status === 'paying') {
+      const stuck = payment.acceptedAt && Date.now() - payment.acceptedAt.getTime() > PAYING_TOO_LONG_MS;
+      return stuck ? { status: 'needs_support', failureReason: 'The bank payment has not finished after a day. A person is checking. Do not send again.' } : null;
+    }
+    return { status: 'paying', failureReason: null, transactions };
   }
 
   /** Per wallet and per bank account, so one wallet cannot repeat and many wallets cannot flood one account. */
@@ -327,7 +379,7 @@ export class AgentApiService {
       const [row] = await db
         .select({ used: sql<string>`coalesce(sum(${agentPayments.amountKobo}), 0)` })
         .from(agentPayments)
-        .where(and(eq(agentPayments.keyId, KEYLESS_KEY_ID), eq(column, value), inArray(agentPayments.status, [...AGENT_STATUSES_THAT_COUNT]), gte(agentPayments.createdAt, sql`${startOfLagosDay}`)));
+        .where(and(eq(agentPayments.keyId, KEYLESS_KEY_ID), eq(column, value), inArray(agentPayments.status, [...AGENT_STATUSES_THAT_COUNT]), gte(agentPayments.acceptedAt, sql`${startOfLagosDay}`)));
       return Number(row!.used);
     };
     if ((await used(agentPayments.refundTo, refundTo)) + addedKobo > KEYLESS.perWalletDayKobo) throw new AgentRefusal('over_wallet_limit', 'This wallet has reached its limit for today.', 422);
@@ -340,7 +392,7 @@ export class AgentApiService {
     const [row] = await db
       .select({ used: sql<string>`coalesce(sum(${agentPayments.amountKobo}), 0)` })
       .from(agentPayments)
-      .where(and(eq(agentPayments.keyId, key.id), inArray(agentPayments.status, [...AGENT_STATUSES_THAT_COUNT]), gte(agentPayments.createdAt, sql`${startOfLagosDay}`)));
+      .where(and(eq(agentPayments.keyId, key.id), inArray(agentPayments.status, [...AGENT_STATUSES_THAT_COUNT]), gte(agentPayments.acceptedAt, sql`${startOfLagosDay}`)));
     const left = key.dailyLimitKobo - Number(row!.used);
     if (addedKobo > left) throw new AgentRefusal('over_daily_limit', `This would go over this key's daily limit. ${formatNaira(Math.max(left, 0))} is left today.`, 422);
   }

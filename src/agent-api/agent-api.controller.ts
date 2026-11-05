@@ -4,7 +4,7 @@ import { AgentKey, AgentPayment } from '../database/schema';
 import { formatNaira, formatUsdc } from '../money/money';
 import { AdminGuard } from '../ops/admin.controller';
 import { PAY_FROM, PayFrom } from './cross-chain';
-import { AgentApiService, AgentRefusal, KEYLESS_KEY_ID } from './agent-api.service';
+import { AgentApiService, AgentRefusal, KEYLESS_KEY_ID, maskName } from './agent-api.service';
 import { decodeSignature, encode, firstChallenge, provesPayment, quotedChallenge, settlement, tokenProblem } from './x402';
 
 const quoteBody = z.object({
@@ -21,6 +21,9 @@ const keyBody = z.object({ name: z.string().trim().min(2).max(80), daily_limit_n
 
 const money = (minor: number) => (minor / 1_000_000).toFixed(6);
 
+/** The bank's name for an account goes in full only to a key we issued. */
+const shownName = (payment: AgentPayment) => (payment.keyId === KEYLESS_KEY_ID ? maskName(payment.accountName) : payment.accountName);
+
 export const presentPayment = (payment: AgentPayment) => ({
   id: payment.id,
   status: payment.status,
@@ -31,10 +34,11 @@ export const presentPayment = (payment: AgentPayment) => ({
   pay_from: payment.payFrom,
   bank_name: payment.bankName,
   account_number: `****${payment.accountNumber.slice(-4)}`,
-  account_name: payment.accountName,
+  account_name: shownName(payment),
   ...(payment.status === 'quoted' ? { quote_expires_at: payment.quoteExpiresAt } : {}),
-  deposit_address: payment.depositAddress,
-  deposit_deadline: payment.depositDeadline,
+  // Only while it can still be paid. A finished or expired payment must never look payable.
+  deposit_address: payment.status === 'awaiting_deposit' ? payment.depositAddress : null,
+  deposit_deadline: payment.status === 'awaiting_deposit' ? payment.depositDeadline : null,
   transactions: payment.transactions,
   failure_reason: payment.failureReason,
   created_at: payment.createdAt,
@@ -44,7 +48,7 @@ export const presentPayment = (payment: AgentPayment) => ({
         receipt: {
           reference: payment.id,
           paid: formatNaira(payment.payoutKobo ?? payment.amountKobo),
-          to: `${payment.accountName}, ${payment.bankName} ****${payment.accountNumber.slice(-4)}`,
+          to: `${shownName(payment)}, ${payment.bankName} ****${payment.accountNumber.slice(-4)}`,
           funded_with: formatUsdc(payment.usdcMinor),
           paid_at: payment.paidAt,
           transactions: payment.transactions,
@@ -180,7 +184,7 @@ export class AgentX402Controller {
     @CurrentKey() key: AgentKey,
     @Param('id', ParseUUIDPipe) id: string,
     @Headers('payment-signature') signature: string | undefined,
-    @Req() request: { protocol: string; hostname: string },
+    @Req() request: { protocol: string; hostname: string; ip: string },
     @Res({ passthrough: true }) reply: X402Reply,
   ) {
     const path = `/v1/agent/x402/pay/${id}`;
@@ -208,7 +212,14 @@ export class AgentX402Controller {
     if (signed.payload.type === 'quote') {
       const current = await this.agents.get(key, id);
       if (signed.payload.refundTo !== current.refundTo) throw new AgentRefusal('invalid_refund_address', 'refundTo must be the refund address given in the quote.', 400);
-      const accepted = await this.agents.accept(key, id);
+      const accepted = await this.agents.accept(key, id, request.ip);
+      // Asked again after it finished or expired: say what happened, and never offer an address to pay.
+      if (accepted.status !== 'awaiting_deposit') {
+        const result = settlement(accepted, '');
+        reply.header('PAYMENT-RESPONSE', encode(result));
+        if (!result.success) reply.status(402);
+        return { settlement: result, payment: presentPayment(accepted) };
+      }
       return challenge(quotedChallenge(key.keyHash, accepted, url, path), accepted);
     }
 

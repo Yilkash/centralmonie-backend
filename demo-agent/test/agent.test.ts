@@ -135,6 +135,25 @@ describe('the demo agent', () => {
     assert.equal((await run(dropsAfterPaying)).outcome, 'paid');
   });
 
+  it('refuses any account the owner did not allow, even if the invoice names it', async () => {
+    const result = await runAgent({ model: scripted([use('get_quote', QUOTE)], [use('pay_quote', { quote_id: 'q1' })], [use('finish', { outcome: 'failed', reason: 'x' })]), api, wallet, budgetUsdc: '2', allowedAccounts: ['8000000000'], task: 't', invoice: 'i', pollMs: 1 });
+    assert.equal(api.quotes.length, 0);
+    assert.equal(wallet.sent.length, 0);
+    assert.equal(result.outcome, 'failed');
+  });
+
+  it('sends nothing when a payment is no longer waiting for money', async () => {
+    api.acceptAnswer = quoted({ status: 'paid', deposit_address: null });
+    await run(scripted([use('get_quote', QUOTE)], [use('pay_quote', { quote_id: 'q1' })], [use('finish', { outcome: 'failed', reason: 'x' })]));
+    assert.equal(wallet.sent.length, 0);
+  });
+
+  it('cannot report refused once money has been sent', async () => {
+    api.finalAnswer = quoted({ status: 'refunded', deposit_address: '0xdeposit' });
+    const result = await run(scripted([use('get_quote', QUOTE)], [use('pay_quote', { quote_id: 'q1' })], [use('finish', { outcome: 'refused', reason: 'x' })]));
+    assert.equal(result.outcome, 'failed');
+  });
+
   it('gives no decision if the model stops early, or runs out of steps', async () => {
     assert.equal((await run(scripted([{ type: 'text', text: 'hmm' }]))).outcome, 'no_decision');
     const looping: Model = async () => ({ content: [use('get_quote', QUOTE)] });

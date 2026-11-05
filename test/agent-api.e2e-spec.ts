@@ -1,7 +1,7 @@
 import { NestFastifyApplication } from '@nestjs/platform-fastify';
 import { Test } from '@nestjs/testing';
 import { Pool } from 'pg';
-import { AgentApiService, agentApiOpen, KEYLESS_KEY_ID, validRefundAddress } from '../src/agent-api/agent-api.service';
+import { AgentApiService, agentApiOpen, ipGroup, KEYLESS_KEY_ID, maskName, validRefundAddress } from '../src/agent-api/agent-api.service';
 import { operationToken, tokenProblem } from '../src/agent-api/x402';
 import { AgentPayment } from '../src/database/schema';
 import { CrossChain, CrossChainRequest, CrossChainState } from '../src/agent-api/cross-chain';
@@ -36,9 +36,10 @@ class FakePayout extends AgentPayout {
   deposits: PaymentRequest[] = [];
   state: PaymentState = { state: 'pending' };
   destinationKobo: number | null = null;
+  expiresAt: string | null = null;
   async deposit(request: PaymentRequest) {
     this.deposits.push(request);
-    return { address: '0xswitch', usdcMinor: request.usdcMinor, destinationKobo: this.destinationKobo ?? request.amountKobo };
+    return { address: '0xswitch', usdcMinor: request.usdcMinor, destinationKobo: this.destinationKobo ?? request.amountKobo, expiresAt: this.expiresAt };
   }
   async status() {
     return this.state;
@@ -86,12 +87,14 @@ describe('Agent API', () => {
 
   beforeEach(async () => {
     await pool.query('TRUNCATE agent_keys CASCADE');
+    (agents as unknown as { ipWindows: Map<string, unknown> }).ipWindows.clear();
     crossChain.state = { status: 'waiting', transactions: [] };
     crossChain.quotes = [];
     crossChain.failNext = 0;
     payout.deposits = [];
     payout.state = { state: 'pending' };
     payout.destinationKobo = null;
+    payout.expiresAt = null;
     banks.down = false;
     key = (await agents.createKey('Test agent', 20_000)).key;
   });
@@ -384,7 +387,7 @@ describe('Agent API', () => {
     it('slows repeated quotes from one address', async () => {
       const ip = '10.9.9.9';
       for (let n = 0; n < 30; n++) await start({ amount_naira: 1000 }, ip);
-      expect((await start({ amount_naira: 1000 }, ip)).json().code).toBe('too_many_quotes');
+      expect((await start({ amount_naira: 1000 }, ip)).json().code).toBe('too_many_requests');
       expect((await start({ amount_naira: 1000 }, '10.9.9.10')).statusCode).toBe(402);
     });
 
@@ -414,6 +417,132 @@ describe('Agent API', () => {
       expect(keyless.statusCode).toBe(404);
       const theirs = (await start()).json().payment.id;
       expect((await call('GET', `/v1/agent/payments/${theirs}`)).statusCode).toBe(404);
+    });
+  });
+
+  describe('what the security review found', () => {
+    it('counts a payment on the day it is accepted, so quotes saved from yesterday cannot pass the limit', async () => {
+      const [a, b] = [await quote({ amount_naira: 15_000 }), await quote({ amount_naira: 15_000 })];
+      await pool.query(`update agent_payments set created_at = now() - interval '2 days'`);
+      expect((await call('POST', '/v1/agent/payments', { quote_id: a.id })).statusCode).toBe(200);
+      const second = await call('POST', '/v1/agent/payments', { quote_id: b.id });
+      expect(second.statusCode).toBe(422);
+      expect(second.json().code).toBe('over_daily_limit');
+    });
+
+    it.each(['paid', 'refunded', 'expired', 'needs_support'])('never offers an address to pay once a payment is %s', async (final) => {
+      const { id } = await accepted();
+      await pool.query(`update agent_payments set status = $1 where id = $2`, [final, id]);
+      const again = (await call('POST', '/v1/agent/payments', { quote_id: id })).json();
+      expect(again.deposit_address).toBeNull();
+      expect((await status(id)).deposit_address).toBeNull();
+      const x402 = await app.inject({ method: 'POST', url: `/v1/agent/x402/pay/${id}`, headers: { authorization: `Bearer ${key}`, 'payment-signature': Buffer.from(JSON.stringify({ x402Version: 2, resource: { url: `http://localhost/v1/agent/x402/pay/${id}` }, payload: { type: 'quote', refundTo: 'agent.near' } })).toString('base64') } });
+      expect(x402.headers['payment-required']).toBeUndefined();
+      expect(x402.body).not.toContain('0xdeposit');
+    });
+
+    it('does not call a payment expired at the deadline it told the agent, but gives it time to be seen', async () => {
+      const { id } = await accepted();
+      await pool.query(`update agent_payments set deposit_deadline = now() - interval '1 minute'`);
+      expect((await status(id)).status).toBe('awaiting_deposit');
+    });
+
+    it('gives the route a later deadline than the agent, so a last-moment deposit still completes', async () => {
+      const { deposit_deadline: told } = await accepted();
+      expect(crossChain.quotes[0]!.deadline.getTime()).toBeGreaterThan(new Date(told).getTime() + 5 * 60_000);
+    });
+
+    it('notices money that moves after a payment expired, including from the background job', async () => {
+      const { id } = await accepted();
+      await pool.query(`update agent_payments set status = 'expired', deposit_deadline = now() - interval '1 hour'`);
+      expect((await status(id)).status).toBe('expired');
+      crossChain.state = { status: 'moving', transactions: ['0xa'] };
+      await agents.reconcile();
+      expect((await pool.query('select status from agent_payments where id = $1', [id])).rows[0].status).toBe('processing');
+      crossChain.state = { status: 'delivered', transactions: ['0xa'] };
+      payout.state = { state: 'completed' };
+      expect((await status(id)).status).toBe('paid');
+    });
+
+    it('stops watching an expired payment after a day', async () => {
+      const { id } = await accepted();
+      await pool.query(`update agent_payments set status = 'expired', updated_at = now() - interval '2 days'`);
+      crossChain.state = { status: 'delivered', transactions: [] };
+      expect((await status(id)).status).toBe('expired');
+    });
+
+    it('asks for a person when a bank payment has not finished after a day', async () => {
+      const { id } = await accepted();
+      crossChain.state = { status: 'delivered', transactions: [] };
+      expect((await status(id)).status).toBe('paying');
+      await pool.query(`update agent_payments set accepted_at = now() - interval '2 days'`);
+      const body = await status(id);
+      expect(body.status).toBe('needs_support');
+      expect(body.failure_reason).toContain('Do not send again');
+    });
+
+    it('refuses a partner window too short for the route', async () => {
+      payout.expiresAt = new Date(Date.now() + 8 * 60_000).toISOString();
+      const first = await quote();
+      const response = await call('POST', '/v1/agent/payments', { quote_id: first.id });
+      expect(response.json().code).toBe('setup_failed');
+      expect(crossChain.quotes).toHaveLength(0);
+    });
+
+    it('ends the route before the partner window closes', async () => {
+      const ends = Date.now() + 20 * 60_000;
+      payout.expiresAt = new Date(ends).toISOString();
+      await accepted();
+      expect(crossChain.quotes[0]!.deadline.getTime()).toBeLessThanOrEqual(ends - 5 * 60_000 + 1000);
+    });
+
+    it('lets a setup that finishes late change nothing once its payment was reset', async () => {
+      const first = await quote();
+      const realQuote = crossChain.quote.bind(crossChain);
+      jest.spyOn(crossChain, 'quote').mockImplementationOnce(async (request) => {
+        await pool.query(`update agent_payments set status = 'quoted', accepted_at = null where id = $1`, [first.id]);
+        return realQuote(request);
+      });
+      const response = await call('POST', '/v1/agent/payments', { quote_id: first.id });
+      expect(response.statusCode).toBe(503);
+      const row = (await pool.query('select status, deposit_address from agent_payments where id = $1', [first.id])).rows[0];
+      expect(row).toEqual({ status: 'quoted', deposit_address: null });
+    });
+
+    it('gives keyless callers a partly hidden name, everywhere, and a keyed agent the full one', async () => {
+      const keyless = await app.inject({ method: 'POST', url: '/v1/agent/x402/pay', payload: { ...REQUEST, payer_name: 'Ada Motors', payer_email: 'ada@example.com', purpose: 'Invoice 1' } });
+      expect(keyless.json().payment.account_name).toBe('Ad* Be***');
+      expect(keyless.body).not.toContain('Ada Bello');
+      expect((await quote()).account_name).toBe('Ada Bello');
+    });
+
+    it('does not ask the bank about an account until the other checks pass', async () => {
+      const provider = app.get(PaymentProvider, { strict: false });
+      const lookup = jest.spyOn(banks, 'accountName');
+      const spy = jest.spyOn(provider, 'minimumUsdcMinor').mockReturnValue(1_000_000);
+      await call('POST', '/v1/agent/quotes', { ...REQUEST, amount_naira: 500 });
+      spy.mockRestore();
+      expect(lookup).not.toHaveBeenCalled();
+      lookup.mockRestore();
+    });
+
+    it('limits accepts per address, so one caller cannot hold everyone\'s allowance', async () => {
+      const ip = '10.5.5.5';
+      const start = (n: number) => app.inject({ method: 'POST', url: '/v1/agent/x402/pay', remoteAddress: ip, payload: { ...REQUEST, amount_naira: 1000, account_number: `80312350${String(n).padStart(2, '0')}`, refund_to: `r${n}.near`, payer_name: 'Ada Motors', payer_email: 'ada@example.com', purpose: 'Invoice 1' } });
+      const accept = async (n: number) => {
+        const { id } = (await start(n)).json().payment;
+        return app.inject({ method: 'POST', url: `/v1/agent/x402/pay/${id}`, remoteAddress: ip, headers: { 'payment-signature': Buffer.from(JSON.stringify({ x402Version: 2, resource: { url: `http://localhost/v1/agent/x402/pay/${id}` }, payload: { type: 'quote', refundTo: `r${n}.near` } })).toString('base64') } });
+      };
+      for (let n = 0; n < 10; n++) expect((await accept(n)).statusCode).toBe(402);
+      expect((await accept(10)).json().code).toBe('too_many_requests');
+    });
+
+    it('keeps a daily ceiling on keyless quotes', async () => {
+      await agents.keylessKey();
+      await pool.query(`insert into agent_payments (id, key_id, amount_kobo, usdc_minor, pay_in_minor, bank_name, account_number, account_name, pay_from, refund_to, quote_expires_at)
+        select gen_random_uuid(), $1, 100, 1, 1, 'OPay', '8031234568', 'x', 'near', 'a.near', now() from generate_series(1, 2000)`, [KEYLESS_KEY_ID]);
+      const response = await app.inject({ method: 'POST', url: '/v1/agent/x402/pay', payload: { ...REQUEST, payer_name: 'Ada Motors', payer_email: 'ada@example.com', purpose: 'Invoice 1' } });
+      expect(response.json().code).toBe('too_many_requests');
     });
   });
 
@@ -453,7 +582,7 @@ describe('Agent API', () => {
     it('expires when nothing arrives by the deadline, freeing the limit', async () => {
       const { id } = await accepted({ amount_naira: 20_000 });
       expect((await call('POST', '/v1/agent/quotes', { ...REQUEST, amount_naira: 5000 })).json().code).toBe('over_daily_limit');
-      await pool.query(`update agent_payments set deposit_deadline = now() - interval '1 minute'`);
+      await pool.query(`update agent_payments set deposit_deadline = now() - interval '20 minutes'`);
       expect((await status(id)).status).toBe('expired');
       expect((await call('POST', '/v1/agent/quotes', { ...REQUEST, amount_naira: 5000 })).statusCode).toBe(200);
     });
@@ -500,6 +629,18 @@ describe('Agent API in test mode, with no keys and no overrides', () => {
 });
 
 describe('Agent API rules', () => {
+  it('groups IPv6 addresses by block, and leaves IPv4 alone', () => {
+    expect(ipGroup('2001:db8:1:2:3:4:5:6')).toBe('2001:db8:1:2');
+    expect(ipGroup('2001:db8:1:2:ffff:4:5:6')).toBe(ipGroup('2001:db8:1:2:3:4:5:6'));
+    expect(ipGroup('10.0.0.1')).toBe('10.0.0.1');
+    expect(ipGroup('::ffff:10.0.0.1')).toBe('::ffff:10.0.0.1');
+  });
+
+  it('hides most of a name, and keeps short words readable', () => {
+    expect(maskName('Ada Bello')).toBe('Ad* Be***');
+    expect(maskName('Bo  Li')).toBe('Bo Li');
+  });
+
   it('keeps an operation token bound to its payment and resource, and lets it expire', () => {
     const payment = { payFrom: 'near', depositAddress: '0xdeposit', payoutAddress: '0xswitch', usdcMinor: 1_050_000 } as AgentPayment;
     const later = Math.floor(Date.now() / 1000) + 100;
