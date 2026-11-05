@@ -126,7 +126,7 @@ export class PayLinksService {
   /** What a payer sees, with its latest payment. Anyone with the link can read this, so the name is partly hidden. */
   /** Naira by bank transfer is offered only when it is switched on and the receiver gets USDC on Base. */
   nairaAvailable(link: PayLink): boolean {
-    return this.config.get('NAIRA_IN_ENABLED', { infer: true }) && Boolean(link.usdcAddress);
+    return this.config.get('NAIRA_IN_ENABLED', { infer: true }) && this.agents.nairaReady && Boolean(link.usdcAddress);
   }
 
   async view(id: string): Promise<{ link: PayLink; payment: AgentPayment | null; open: boolean; merchantName: string | null; nairaAvailable: boolean }> {

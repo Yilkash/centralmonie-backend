@@ -157,6 +157,11 @@ export class AgentApiService {
     return agentApiOpen(this.config.get('PAYMENTS_MODE', { infer: true }), this.config.get('AGENT_API_ENABLED', { infer: true }));
   }
 
+  /** A naira partner is connected, so a bank transfer can be offered. */
+  get nairaReady(): boolean {
+    return this.onramp !== null;
+  }
+
   get keylessOpen(): boolean {
     return this.config.get('PAYMENTS_MODE', { infer: true }) === 'simulated' || (this.open && this.config.get('X402_KEYLESS_ENABLED', { infer: true }));
   }
