@@ -5,15 +5,18 @@ import { OpsModule } from '../ops/ops.module';
 import { PaymentsModule } from '../payments/payments.module';
 import { WorkerService } from '../payments/worker.service';
 import { ProvidersModule } from '../providers/providers.module';
-import { AgentApiController, AgentKeyGuard, AgentKeysController, AgentX402Controller, X402Guard } from './agent-api.controller';
+import { AuthModule } from '../auth/auth.module';
+import { AgentApiController, AgentKeyGuard, AgentKeysController, AgentX402Controller, PayLinksController, PublicPayLinksController, X402Guard } from './agent-api.controller';
 import { AgentApiService } from './agent-api.service';
+import { PayLinksService } from './pay-links.service';
 import { CrossChain, OneClickCrossChain, SimulatedCrossChain } from './cross-chain';
 
 @Module({
-  imports: [OpsModule, PaymentsModule, ProvidersModule],
-  controllers: [AgentApiController, AgentX402Controller, AgentKeysController],
+  imports: [AuthModule, OpsModule, PaymentsModule, ProvidersModule],
+  controllers: [AgentApiController, AgentX402Controller, AgentKeysController, PayLinksController, PublicPayLinksController],
   providers: [
     AgentApiService,
+    PayLinksService,
     AgentKeyGuard,
     X402Guard,
     {
@@ -25,6 +28,7 @@ import { CrossChain, OneClickCrossChain, SimulatedCrossChain } from './cross-cha
           : new OneClickCrossChain(config.get('ONECLICK_API_KEY', { infer: true }), config.get('ONECLICK_BASE_URL', { infer: true })),
     },
   ],
+  exports: [PayLinksService],
 })
 export class AgentApiModule implements OnModuleInit {
   constructor(

@@ -364,3 +364,23 @@ export const agentPayments = pgTable(
 
 export type AgentKey = typeof agentKeys.$inferSelect;
 export type AgentPayment = typeof agentPayments.$inferSelect;
+
+/** A link someone can pay from any chain, with naira going to the bank account of the user who made it. */
+export const payLinks = pgTable(
+  'pay_links',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+    amountKobo: bigint('amount_kobo', { mode: 'number' }).notNull(),
+    bankName: text('bank_name').notNull(),
+    accountNumber: text('account_number').notNull(),
+    accountName: text('account_name').notNull(),
+    note: text('note'),
+    paymentId: uuid('payment_id').references(() => agentPayments.id),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [index('pay_links_user_idx').on(table.userId, table.createdAt)],
+);
+
+export type PayLink = typeof payLinks.$inferSelect;

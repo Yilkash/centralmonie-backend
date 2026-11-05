@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { AgentApiModule } from '../agent-api/agent-api.module';
 import { ContactsModule } from '../contacts/contacts.module';
 import { DepositsModule } from '../deposits/deposits.module';
 import { PlansModule } from '../plans/plans.module';
@@ -10,7 +11,7 @@ import { AgentToolbox } from './agent-tools';
 import { ClaudeModelClient, ModelClient } from './model-client';
 
 @Module({
-  imports: [ContactsModule, DepositsModule, PlansModule, ProvidersModule, WalletModule, SchedulesModule],
+  imports: [AgentApiModule, ContactsModule, DepositsModule, PlansModule, ProvidersModule, WalletModule, SchedulesModule],
   providers: [AgentChatResponder, AgentToolbox, { provide: ModelClient, useClass: ClaudeModelClient }],
   exports: [AgentChatResponder],
 })

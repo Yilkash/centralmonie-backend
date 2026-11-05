@@ -1,10 +1,13 @@
 import { Body, CanActivate, Controller, createParamDecorator, Delete, ExecutionContext, Get, Headers, HttpCode, HttpException, Injectable, NotFoundException, Param, ParseUUIDPipe, Post, Req, Res, UseFilters, UseGuards, Catch, ExceptionFilter, ArgumentsHost } from '@nestjs/common';
 import { z } from 'zod';
-import { AgentKey, AgentPayment } from '../database/schema';
+import { AuthGuard } from '../auth/auth.guard';
+import { CurrentUser } from '../auth/current-user.decorator';
+import { AgentKey, AgentPayment, User } from '../database/schema';
 import { formatNaira, formatUsdc } from '../money/money';
 import { AdminGuard } from '../ops/admin.controller';
 import { PAY_FROM, PayFrom } from './cross-chain';
 import { AgentApiService, AgentRefusal, KEYLESS_KEY_ID, maskName } from './agent-api.service';
+import { PayLinksService, presentLink, presentPublicLink } from './pay-links.service';
 import { decodeSignature, encode, firstChallenge, provesPayment, quotedChallenge, settlement, tokenProblem } from './x402';
 
 const quoteBody = z.object({
@@ -254,5 +257,45 @@ export class AgentKeysController {
   async revoke(@Param('id', ParseUUIDPipe) id: string) {
     if (!(await this.agents.revokeKey(id))) throw new NotFoundException('No such key.');
     return { revoked: true };
+  }
+}
+
+const payLinkBody = z.object({ amount_naira: z.number().int().positive(), bank_name: z.string().trim().min(2).max(80), account_number: z.string().regex(/^\d{10}$/), note: z.string().trim().max(200).nullish() });
+const payerBody = z.object({ pay_from: z.enum(Object.keys(PAY_FROM) as [PayFrom, ...PayFrom[]]), refund_to: z.string().trim().min(2).max(100), payer_name: z.string().trim().max(120).nullish() });
+
+@Controller('v1/pay-links')
+@UseFilters(AgentRefusalFilter)
+@UseGuards(AuthGuard)
+export class PayLinksController {
+  constructor(private readonly links: PayLinksService) {}
+
+  @Post()
+  @HttpCode(200)
+  async create(@CurrentUser() user: User, @Body() body: unknown) {
+    const parsed = payLinkBody.safeParse(body);
+    if (!parsed.success) throw invalid(parsed.error);
+    const link = await this.links.create(user, { amountNaira: parsed.data.amount_naira, bankName: parsed.data.bank_name, accountNumber: parsed.data.account_number, note: parsed.data.note ?? null });
+    return presentLink(link, this.links.url(link));
+  }
+}
+
+/** For whoever opens a link. No sign-in, so they see only what they need to pay. */
+@Controller('v1/public/pay-links')
+@UseFilters(AgentRefusalFilter)
+export class PublicPayLinksController {
+  constructor(private readonly links: PayLinksService) {}
+
+  @Get(':id')
+  async get(@Param('id', ParseUUIDPipe) id: string) {
+    return presentPublicLink(await this.links.view(id));
+  }
+
+  @Post(':id/pay')
+  @HttpCode(200)
+  async pay(@Param('id', ParseUUIDPipe) id: string, @Body() body: unknown, @Req() request: { ip: string }) {
+    const parsed = payerBody.safeParse(body);
+    if (!parsed.success) throw invalid(parsed.error);
+    await this.links.pay(id, { payFrom: parsed.data.pay_from, refundTo: parsed.data.refund_to, clientIp: request.ip, ...(parsed.data.payer_name ? { payerName: parsed.data.payer_name } : {}) });
+    return presentPublicLink(await this.links.view(id));
   }
 }

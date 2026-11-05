@@ -2,8 +2,9 @@ import { NestFastifyApplication } from '@nestjs/platform-fastify';
 import { Test } from '@nestjs/testing';
 import { Pool } from 'pg';
 import { AgentApiService, agentApiOpen, ipGroup, KEYLESS_KEY_ID, maskName, validRefundAddress } from '../src/agent-api/agent-api.service';
+import { PayLinksService } from '../src/agent-api/pay-links.service';
 import { operationToken, tokenProblem } from '../src/agent-api/x402';
-import { AgentPayment } from '../src/database/schema';
+import { AgentPayment, User } from '../src/database/schema';
 import { CrossChain, CrossChainRequest, CrossChainState } from '../src/agent-api/cross-chain';
 import { configureApp, createAdapter } from '../src/app';
 import { AppModule } from '../src/app.module';
@@ -417,6 +418,71 @@ describe('Agent API', () => {
       expect(keyless.statusCode).toBe(404);
       const theirs = (await start()).json().payment.id;
       expect((await call('GET', `/v1/agent/payments/${theirs}`)).statusCode).toBe(404);
+    });
+  });
+
+  describe('pay links', () => {
+    const user = { id: '', walletAddress: null } as unknown as User;
+    let links: PayLinksService;
+    const open = (id: string) => app.inject({ method: 'GET', url: `/v1/public/pay-links/${id}` });
+    const payLink = (id: string, body: object = { pay_from: 'arbitrum', refund_to: REFUND }, ip = '10.7.7.7') => app.inject({ method: 'POST', url: `/v1/public/pay-links/${id}/pay`, remoteAddress: ip, payload: body });
+
+    beforeEach(async () => {
+      links = app.get(PayLinksService, { strict: false });
+      await pool.query('TRUNCATE users CASCADE');
+      user.id = (await pool.query(`insert into users (provider_subject) values ('did:privy:links') returning id`)).rows[0].id;
+    });
+
+    it('shows a payer what they need and no more, and a link needs no sign-in', async () => {
+      const link = await links.create(user, { amountNaira: 5000, bankName: 'OPay', accountNumber: '8031234568', note: 'Rent' });
+      expect(links.url(link)).toContain(`/pay/${link.id}`);
+      const response = await open(link.id);
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toMatchObject({ amount_naira: 5000, to: 'Ad* Be***', account_number: '****4568', note: 'Rent', open: true, paid: false, payment: null });
+      expect(response.body).not.toContain('Ada Bello');
+      expect(response.body).not.toContain('8031234568');
+    });
+
+    it('takes a payment from any chain through to paid, then closes', async () => {
+      const link = await links.create(user, { amountNaira: 5000, bankName: 'OPay', accountNumber: '8031234568' });
+      const paying = (await payLink(link.id)).json();
+      expect(paying.payment).toMatchObject({ status: 'awaiting_deposit', pay_from: 'arbitrum', deposit_address: '0xdeposit' });
+      expect(crossChain.quotes[0]).toMatchObject({ payFrom: 'arbitrum', refundTo: REFUND });
+      crossChain.state = { status: 'delivered', transactions: ['0xa'] };
+      payout.state = { state: 'completed' };
+      expect((await open(link.id)).json()).toMatchObject({ paid: true, open: false, payment: { status: 'paid', deposit_address: null } });
+      const again = await payLink(link.id);
+      expect(again.statusCode).toBe(409);
+      expect(again.json().code).toBe('already_paid');
+    });
+
+    it('gives the same payment on a refresh, and allows a new one after it expires', async () => {
+      const link = await links.create(user, { amountNaira: 5000, bankName: 'OPay', accountNumber: '8031234568' });
+      const first = (await payLink(link.id)).json().payment.id;
+      expect((await payLink(link.id)).json().payment.id).toBe(first);
+      expect(payout.deposits).toHaveLength(1);
+      await pool.query(`update agent_payments set status = 'expired' where id = $1`, [first]);
+      expect((await payLink(link.id)).json().payment.id).not.toBe(first);
+    });
+
+    it('refuses an expired link, a bad account, too much, a bad refund address and an unknown link', async () => {
+      const link = await links.create(user, { amountNaira: 5000, bankName: 'OPay', accountNumber: '8031234568' });
+      expect((await payLink(link.id, { pay_from: 'near', refund_to: 'NOT VALID!' })).json().code).toBe('invalid_refund_address');
+      await pool.query('update pay_links set expires_at = now() - interval \'1 minute\' where id = $1', [link.id]);
+      expect((await payLink(link.id)).json().code).toBe('link_expired');
+      await expect(links.create(user, { amountNaira: 5000, bankName: 'OPay', accountNumber: '8031230000' })).rejects.toThrow('could not find');
+      await expect(links.create(user, { amountNaira: 50_001, bankName: 'OPay', accountNumber: '8031234568' })).rejects.toThrow('most for one pay link');
+      expect((await open('00000000-0000-4000-8000-000000000000')).statusCode).toBe(404);
+    });
+
+    it('needs sign-in to make a link, and uses the same limits as paying without a key', async () => {
+      expect((await app.inject({ method: 'POST', url: '/v1/pay-links', payload: { amount_naira: 5000, bank_name: 'OPay', account_number: '8031234568' } })).statusCode).toBe(401);
+      for (const n of [1, 2]) {
+        const link = await links.create(user, { amountNaira: 50_000, bankName: 'OPay', accountNumber: '8031234568' });
+        expect((await payLink(link.id, { pay_from: 'arbitrum', refund_to: n === 1 ? REFUND : '0x70997970C51812dc3A010C7d01b50e0d17dc79C8' })).statusCode).toBe(200);
+      }
+      const third = await links.create(user, { amountNaira: 1000, bankName: 'OPay', accountNumber: '8031234568' });
+      expect((await payLink(third.id, { pay_from: 'arbitrum', refund_to: '0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC' })).json().code).toBe('over_account_limit');
     });
   });
 

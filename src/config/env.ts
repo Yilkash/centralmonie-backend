@@ -54,6 +54,8 @@ const envSchema = z.object({
   X402_KEYLESS_ENABLED: z.enum(['true', 'false']).default('false').transform((value) => value === 'true'),
   // How many proxies sit in front of the backend. Read as a real environment variable, before any .env file loads.
   TRUST_PROXY_HOPS: z.coerce.number().int().min(0).optional(),
+  // Where people open the web app, for links we hand out. Defaults to the first of CORS_ORIGINS.
+  PUBLIC_APP_URL: z.string().url().optional(),
   // NEAR Intents' 1Click API. The key lowers the fee and is not required.
   ONECLICK_API_KEY: z.string().min(1).optional(),
   ONECLICK_BASE_URL: z.string().url().default('https://1click.chaindefuser.com'),

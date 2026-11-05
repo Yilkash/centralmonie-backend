@@ -42,7 +42,7 @@ function setUp(responses: (ModelResponse | Error)[], outcome: ToolOutcome = { re
 describe('AgentChatResponder', () => {
   it('offers no tool that can approve or send', () => {
     const names = AGENT_TOOLS.map((tool) => tool.name);
-    expect(names).toEqual(['list_contacts', 'list_data_plans', 'get_balance', 'list_activity', 'propose_plan', 'propose_schedule', 'list_schedules', 'propose_cancel', 'propose_contact', 'start_deposit']);
+    expect(names).toEqual(['list_contacts', 'list_data_plans', 'get_balance', 'list_activity', 'propose_plan', 'propose_schedule', 'list_schedules', 'propose_cancel', 'propose_contact', 'start_deposit', 'make_request_link']);
     expect(names.some((name) => /approve|send|pay|execute|transfer/.test(name))).toBe(false);
   });
 

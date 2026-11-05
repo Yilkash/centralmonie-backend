@@ -1,4 +1,6 @@
 import { HttpException } from '@nestjs/common';
+import { AgentRefusal } from '../agent-api/agent-api.service';
+import { PayLinksService } from '../agent-api/pay-links.service';
 import { NairaDepositsService } from '../deposits/deposits.service';
 import Anthropic from '@anthropic-ai/sdk';
 import { Injectable } from '@nestjs/common';
@@ -176,6 +178,23 @@ export const AGENT_TOOLS: Anthropic.Tool[] = [
       additionalProperties: false,
     },
   },
+  {
+    name: 'make_request_link',
+    description:
+      "Makes a link the user can send to someone, so that person can pay from any blockchain, in USDC, and the user's bank account receives naira. Moves no money. Use when the user wants to be paid or to request money, for example from someone abroad. Ask for the bank and account number if you do not have them.",
+    strict: true,
+    input_schema: {
+      type: 'object',
+      properties: {
+        amount_naira: { type: 'integer', description: 'Whole naira the bank account should receive' },
+        bank_name: { type: 'string' },
+        account_number: { type: 'string', description: 'Exactly 10 digits' },
+        note: { ...nullable('string'), description: 'What it is for, shown to the payer. Null if none was given.' },
+      },
+      required: ['amount_naira', 'bank_name', 'account_number', 'note'],
+      additionalProperties: false,
+    },
+  },
 ];
 
 const planInput = z.object({
@@ -267,6 +286,7 @@ export class AgentToolbox {
     private readonly wallet: WalletService,
     private readonly schedules: SchedulesService,
     private readonly deposits: NairaDepositsService,
+    private readonly payLinks: PayLinksService,
   ) {}
 
   /** The user comes from the signed-in session, never from the model, so it cannot act for anyone else. */
@@ -293,11 +313,13 @@ export class AgentToolbox {
           return await this.proposeContact(user, input);
         case 'start_deposit':
           return await this.startDeposit(user, input);
+        case 'make_request_link':
+          return await this.createPayLink(user, input);
         default:
           return { result: `Unknown tool: ${name}`, isError: true };
       }
     } catch (error) {
-      if (error instanceof PlanRefused || error instanceof ContactRefused) return { result: error.message, isError: true };
+      if (error instanceof PlanRefused || error instanceof ContactRefused || error instanceof AgentRefusal) return { result: error.message, isError: true };
       if (error instanceof HttpException) return { result: error.message, isError: true };
       if (error instanceof z.ZodError) return { result: 'Those details are not in the expected form.', isError: true };
       throw error;
@@ -404,6 +426,14 @@ export class AgentToolbox {
           ? `The bank account, the exact amount of ${amount} and a countdown are showing below. No money has arrived yet.`
           : `The user already has a ${amount} deposit waiting, so that one is showing below. To change the amount they cancel it and ask again.`,
       depositId: deposit.id,
+    };
+  }
+
+  private async createPayLink(user: User, input: unknown): Promise<ToolOutcome> {
+    const details = z.object({ amount_naira: z.number().int().positive(), bank_name: z.string().min(2), account_number: z.string(), note: z.string().nullable() }).parse(input);
+    const link = await this.payLinks.create(user, { amountNaira: details.amount_naira, bankName: details.bank_name, accountNumber: details.account_number, note: details.note });
+    return {
+      result: `Pay link made for ${formatNaira(link.amountKobo)} to ${link.accountName}, ${link.bankName}. Give the user this exact link to send to the payer, and say they can pay from any supported blockchain: ${this.payLinks.url(link)}`,
     };
   }
 
