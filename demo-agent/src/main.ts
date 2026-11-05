@@ -1,7 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { readFileSync } from 'node:fs';
 import { runAgent, type Model } from './agent.ts';
-import { TenKoboApi } from './api.ts';
+import { TenKoboApi, X402Api } from './api.ts';
 import { NearWallet, SimulatedWallet, type Wallet } from './wallet.ts';
 
 // Reads only the settings it names, so the rest of an env file never reaches this program.
@@ -19,7 +19,7 @@ function settings(path: string | undefined, names: string[]): Record<string, str
 
 const [invoicePath, ...flags] = process.argv.slice(2);
 if (!invoicePath) {
-  console.log('Usage: npm run demo -- invoices/normal.txt [--real]');
+  console.log('Usage: npm run demo -- invoices/normal.txt [--x402] [--real]');
   process.exit(1);
 }
 const real = flags.includes('--real');
@@ -35,7 +35,8 @@ const model: Model = async ({ system, tools, messages }) =>
   (await anthropic.messages.create({ model: env.AGENT_MODEL ?? 'claude-haiku-5-5', max_tokens: 2000, system, tools, messages: messages as Anthropic.MessageParam[] })) as unknown as { content: never[] };
 
 const wallet: Wallet = real ? new NearWallet(need('NEAR_AGENT_ACCOUNT_ID'), need('NEAR_AGENT_PRIVATE_KEY')) : new SimulatedWallet();
-const api = new TenKoboApi({ baseUrl: env.TENKOBO_API_URL ?? 'http://localhost:4010', key: need('TENKOBO_API_KEY'), payFrom: 'near', refundTo: env.NEAR_AGENT_ACCOUNT_ID ?? 'demo-agent.near' });
+const apiOptions = { baseUrl: env.TENKOBO_API_URL ?? 'http://localhost:4010', key: need('TENKOBO_API_KEY'), payFrom: 'near', refundTo: env.NEAR_AGENT_ACCOUNT_ID ?? 'demo-agent.near' };
+const api = flags.includes('--x402') ? new X402Api(apiOptions) : new TenKoboApi(apiOptions);
 const fill = (text: string) =>
   text
     .replaceAll('{{SUPPLIER}}', env.INVOICE_SUPPLIER ?? 'SIMULATED HOLDER 4568')

@@ -5,13 +5,13 @@ import { OpsModule } from '../ops/ops.module';
 import { PaymentsModule } from '../payments/payments.module';
 import { WorkerService } from '../payments/worker.service';
 import { ProvidersModule } from '../providers/providers.module';
-import { AgentApiController, AgentKeyGuard, AgentKeysController } from './agent-api.controller';
+import { AgentApiController, AgentKeyGuard, AgentKeysController, AgentX402Controller } from './agent-api.controller';
 import { AgentApiService } from './agent-api.service';
 import { CrossChain, OneClickCrossChain, SimulatedCrossChain } from './cross-chain';
 
 @Module({
   imports: [OpsModule, PaymentsModule, ProvidersModule],
-  controllers: [AgentApiController, AgentKeysController],
+  controllers: [AgentApiController, AgentX402Controller, AgentKeysController],
   providers: [
     AgentApiService,
     AgentKeyGuard,

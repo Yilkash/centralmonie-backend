@@ -1,10 +1,11 @@
-import { Body, CanActivate, Controller, createParamDecorator, Delete, ExecutionContext, Get, HttpCode, HttpException, Injectable, NotFoundException, Param, ParseUUIDPipe, Post, UseFilters, UseGuards, Catch, ExceptionFilter, ArgumentsHost } from '@nestjs/common';
+import { Body, CanActivate, Controller, createParamDecorator, Delete, ExecutionContext, Get, Headers, HttpCode, HttpException, Injectable, NotFoundException, Param, ParseUUIDPipe, Post, Req, Res, UseFilters, UseGuards, Catch, ExceptionFilter, ArgumentsHost } from '@nestjs/common';
 import { z } from 'zod';
 import { AgentKey, AgentPayment } from '../database/schema';
 import { formatNaira, formatUsdc } from '../money/money';
 import { AdminGuard } from '../ops/admin.controller';
 import { PAY_FROM, PayFrom } from './cross-chain';
 import { AgentApiService, AgentRefusal } from './agent-api.service';
+import { decodeSignature, encode, firstChallenge, provesPayment, quotedChallenge, settlement, tokenProblem } from './x402';
 
 const quoteBody = z.object({
   amount_naira: z.number().int().positive().max(100_000_000),
@@ -104,6 +105,72 @@ export class AgentApiController {
   @Get('payments/:id')
   async get(@CurrentKey() key: AgentKey, @Param('id', ParseUUIDPipe) id: string) {
     return presentPayment(await this.agents.get(key, id));
+  }
+}
+
+interface X402Reply {
+  status(code: number): X402Reply;
+  header(name: string, value: string): X402Reply;
+}
+
+/**
+ * The same payment, for an agent that speaks x402. No PAYMENT-SIGNATURE: says what is on offer. A quote
+ * payload: accepts the quote and says where to pay. A deposit payload: reports where the money is.
+ */
+@Controller('v1/agent/x402')
+@UseFilters(AgentRefusalFilter)
+@UseGuards(AgentKeyGuard)
+export class AgentX402Controller {
+  constructor(private readonly agents: AgentApiService) {}
+
+  @Post('pay/:id')
+  @HttpCode(200)
+  async pay(
+    @CurrentKey() key: AgentKey,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Headers('payment-signature') signature: string | undefined,
+    @Req() request: { protocol: string; hostname: string },
+    @Res({ passthrough: true }) reply: X402Reply,
+  ) {
+    const path = `/v1/agent/x402/pay/${id}`;
+    const url = `${request.protocol}://${request.hostname}${path}`;
+    const challenge = (body: { x402Version: number }, payment: AgentPayment) => {
+      reply.status(402).header('PAYMENT-REQUIRED', encode(body));
+      return { ...body, payment: presentPayment(payment) };
+    };
+
+    if (!signature) {
+      const current = await this.agents.get(key, id);
+      return challenge(firstChallenge(current, url), current);
+    }
+
+    const signed = decodeSignature(signature);
+    if (!signed) throw new AgentRefusal('invalid_request', 'PAYMENT-SIGNATURE is not a valid x402 payload.', 400);
+    let resourcePath: string | null = null;
+    try {
+      resourcePath = new URL(signed.resource.url).pathname;
+    } catch {
+      resourcePath = null;
+    }
+    if (resourcePath !== path) throw new AgentRefusal('invalid_request', 'The payload is for a different resource.', 400);
+
+    if (signed.payload.type === 'quote') {
+      const current = await this.agents.get(key, id);
+      if (signed.payload.refundTo !== current.refundTo) throw new AgentRefusal('invalid_refund_address', 'refundTo must be the refund address given in the quote.', 400);
+      const accepted = await this.agents.accept(key, id);
+      return challenge(quotedChallenge(key.keyHash, accepted, url, path), accepted);
+    }
+
+    const before = await this.agents.get(key, id);
+    if (!before.depositAddress || signed.payload.depositAddress !== before.depositAddress) throw new AgentRefusal('invalid_exact_near_intents_token_invalid', 'That is not the deposit address for this payment.', 402);
+    const problem = tokenProblem(key.keyHash, before, path, signed.payload.operationToken);
+    if (problem) throw new AgentRefusal(problem, 'That operation token is not valid for this payment.', 402);
+    if (!provesPayment(before, signed.payload.txHash)) throw new AgentRefusal('invalid_exact_near_intents_deposit_not_found', 'That transaction did not pay this deposit address.', 402);
+
+    const result = settlement(before, signed.payload.txHash);
+    reply.header('PAYMENT-RESPONSE', encode(result));
+    if (!result.success) reply.status(402);
+    return { settlement: result, payment: presentPayment(before) };
   }
 }
 

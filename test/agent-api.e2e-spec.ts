@@ -2,6 +2,8 @@ import { NestFastifyApplication } from '@nestjs/platform-fastify';
 import { Test } from '@nestjs/testing';
 import { Pool } from 'pg';
 import { AgentApiService, agentApiOpen, validRefundAddress } from '../src/agent-api/agent-api.service';
+import { operationToken, tokenProblem } from '../src/agent-api/x402';
+import { AgentPayment } from '../src/database/schema';
 import { CrossChain, CrossChainRequest, CrossChainState } from '../src/agent-api/cross-chain';
 import { configureApp, createAdapter } from '../src/app';
 import { AppModule } from '../src/app.module';
@@ -233,6 +235,92 @@ describe('Agent API', () => {
     });
   });
 
+  describe('x402', () => {
+    const decode = (value: string | string[] | number | undefined) => JSON.parse(Buffer.from(String(value), 'base64').toString());
+    const pay = (id: string, signature?: object, token: string = key) =>
+      app.inject({ method: 'POST', url: `/v1/agent/x402/pay/${id}`, headers: { authorization: `Bearer ${token}`, ...(signature ? { 'payment-signature': Buffer.from(JSON.stringify(signature)).toString('base64') } : {}) } });
+    const signed = (id: string, payload: object, url = `http://localhost/v1/agent/x402/pay/${id}`) => ({ x402Version: 2, resource: { url }, accepted: {}, payload });
+
+    const started = async () => {
+      const { id } = await quote();
+      const offer = await pay(id);
+      const second = await pay(id, signed(id, { type: 'quote', refundTo: 'agent.near' }));
+      return { id, offer, second, entry: decode(second.headers['payment-required']).accepts[0] };
+    };
+
+    it('offers first with nothing to pay yet, and moves nothing', async () => {
+      const { id } = await quote();
+      const offer = await pay(id);
+      expect(offer.statusCode).toBe(402);
+      const body = decode(offer.headers['payment-required']);
+      expect(body.x402Version).toBe(2);
+      expect(body.accepts[0]).toMatchObject({ scheme: 'exact', network: 'near:mainnet', amount: '', payTo: '', extra: { assetTransferMethod: 'near-intents', paymentFlow: 'upfront', destination: { network: 'eip155:8453', amount: '3571429' } } });
+      expect(payout.deposits).toHaveLength(0);
+    });
+
+    it('a quote payload gives the amount and address, and still does not count as paid', async () => {
+      const { second, entry } = await started();
+      expect(second.statusCode).toBe(402);
+      expect(entry).toMatchObject({ amount: '3573829', payTo: '0xdeposit', extra: { destination: { recipient: '0xswitch' } } });
+      expect(entry.extra.operationToken).toMatch(/^k1\./);
+      expect(entry.extra.refundDeadline).toBeTruthy();
+      expect(payout.deposits).toHaveLength(1);
+    });
+
+    it('a deposit payload reports pending, then settles with a receipt, without showing the token', async () => {
+      const { id, entry } = await started();
+      const deposit = signed(id, { type: 'deposit', operationToken: entry.extra.operationToken, depositAddress: '0xdeposit', txHash: '0xa' });
+      crossChain.state = { status: 'moving', transactions: ['0xa'] };
+      const pending = await pay(id, deposit);
+      expect(pending.statusCode).toBe(402);
+      expect(decode(pending.headers['payment-response'])).toMatchObject({ success: false, errorReason: 'settlement_pending', transaction: '0xa' });
+      crossChain.state = { status: 'delivered', transactions: ['0xa', '0xb'] };
+      payout.state = { state: 'completed' };
+      const done = await pay(id, deposit);
+      expect(done.statusCode).toBe(200);
+      expect(decode(done.headers['payment-response'])).toMatchObject({ success: true, network: 'eip155:8453', transaction: '0xb', amount: '3571429', extra: { originNetwork: 'near:mainnet', originTxHash: '0xa' } });
+      expect(done.json().payment.receipt.reference).toBe(id);
+      expect(done.headers['payment-response']).not.toContain(entry.extra.operationToken);
+      expect(payout.deposits).toHaveLength(1);
+    });
+
+    it('reports a failure when the money was refunded', async () => {
+      const { id, entry } = await started();
+      crossChain.state = { status: 'refunded', transactions: [] };
+      const failed = await pay(id, signed(id, { type: 'deposit', operationToken: entry.extra.operationToken, depositAddress: '0xdeposit', txHash: '0xa' }));
+      expect(failed.statusCode).toBe(402);
+      expect(decode(failed.headers['payment-response'])).toMatchObject({ success: false, errorReason: 'exact_near_intents_payment_failed', extra: { status: 'refunded', refundTo: 'agent.near' } });
+    });
+
+    it('refuses a bad token, a wrong address, a wrong transaction, a wrong refund address and a wrong resource', async () => {
+      const { id, entry } = await started();
+      const good = { type: 'deposit', operationToken: entry.extra.operationToken, depositAddress: '0xdeposit', txHash: '0xa' };
+      expect((await pay(id, signed(id, { ...good, operationToken: 'k1.9999999999.nope' }))).json().code).toBe('invalid_exact_near_intents_token_invalid');
+      expect((await pay(id, signed(id, { ...good, depositAddress: '0xother' }))).json().code).toBe('invalid_exact_near_intents_token_invalid');
+      crossChain.state = { status: 'moving', transactions: ['0xreal'] };
+      await status(id);
+      expect((await pay(id, signed(id, good))).json().code).toBe('invalid_exact_near_intents_deposit_not_found');
+      const other = await quote();
+      expect((await pay(other.id, signed(other.id, { type: 'quote', refundTo: 'someone.near' }))).json().code).toBe('invalid_refund_address');
+      expect((await pay(other.id, signed(other.id, { type: 'quote', refundTo: 'agent.near' }, 'http://localhost/elsewhere'))).statusCode).toBe(400);
+    });
+
+    it('rejects a payload it cannot read, and another key cannot use it', async () => {
+      const { id } = await quote();
+      const garbled = await app.inject({ method: 'POST', url: `/v1/agent/x402/pay/${id}`, headers: { authorization: `Bearer ${key}`, 'payment-signature': 'not base64 json' } });
+      expect(garbled.statusCode).toBe(400);
+      const other = await agents.createKey('Other', 20_000);
+      expect((await pay(id, undefined, other.key)).statusCode).toBe(404);
+    });
+
+    it('still enforces the key limit when a quote payload accepts', async () => {
+      const { id } = await quote({ amount_naira: 20_000 });
+      await accepted({ amount_naira: 5000 });
+      const refused = await pay(id, signed(id, { type: 'quote', refundTo: 'agent.near' }));
+      expect(refused.json().code).toBe('over_daily_limit');
+    });
+  });
+
   describe('following the money', () => {
     it('goes from waiting to moving to paying to paid, with a receipt', async () => {
       const { id } = await accepted();
@@ -316,6 +404,19 @@ describe('Agent API in test mode, with no keys and no overrides', () => {
 });
 
 describe('Agent API rules', () => {
+  it('keeps an operation token bound to its payment and resource, and lets it expire', () => {
+    const payment = { payFrom: 'near', depositAddress: '0xdeposit', payoutAddress: '0xswitch', usdcMinor: 1_050_000 } as AgentPayment;
+    const later = Math.floor(Date.now() / 1000) + 100;
+    const token = operationToken('secret', payment, '/resource', later);
+    expect(tokenProblem('secret', payment, '/resource', token)).toBeNull();
+    expect(tokenProblem('other', payment, '/resource', token)).toBe('invalid_exact_near_intents_token_invalid');
+    expect(tokenProblem('secret', payment, '/different', token)).toBe('invalid_exact_near_intents_token_invalid');
+    expect(tokenProblem('secret', { ...payment, usdcMinor: 2 }, '/resource', token)).toBe('invalid_exact_near_intents_token_invalid');
+    expect(tokenProblem('secret', payment, '/resource', `${token.slice(0, -1)}x`)).toBe('invalid_exact_near_intents_token_invalid');
+    expect(tokenProblem('secret', payment, '/resource', 'junk')).toBe('invalid_exact_near_intents_token_invalid');
+    expect(tokenProblem('secret', payment, '/resource', token, (later + 1) * 1000)).toBe('invalid_exact_near_intents_token_expired');
+  });
+
   it('is open in test mode, and with real money only when switched on', () => {
     expect(agentApiOpen('simulated', false)).toBe(true);
     expect(agentApiOpen('chain', false)).toBe(false);

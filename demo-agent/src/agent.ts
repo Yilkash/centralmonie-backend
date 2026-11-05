@@ -142,7 +142,7 @@ export async function runAgent(options: RunOptions): Promise<RunResult> {
     guard.markPaid();
     log(`Sending ${payment.pay_usdc} USDC to the one-time deposit address ${payment.deposit_address}`);
     try {
-      await wallet.sendUsdc(payment.deposit_address, usdcToMinor(payment.pay_usdc));
+      api.deposited?.(payment.id, await wallet.sendUsdc(payment.deposit_address, usdcToMinor(payment.pay_usdc)));
     } catch (error) {
       log(`Could not confirm the send: ${(error as Error).message.slice(0, 160)}`);
       return 'Could not confirm whether the USDC was sent, so a person must check. It will not be sent again.';
