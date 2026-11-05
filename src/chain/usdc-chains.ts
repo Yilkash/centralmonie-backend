@@ -14,6 +14,8 @@ export interface UsdcChain {
   /** USDC's own contract here, which is never a wallet. */
   usdc: string;
   aliases: string[];
+  /** Where anyone can look up a transaction on this chain. */
+  explorerTx: string;
   valid: (address: string) => boolean;
 }
 
@@ -38,13 +40,13 @@ export function isSolanaAddress(address: string): boolean {
 const evm = (address: string) => isAddress(address);
 
 export const USDC_CHAINS: Record<ChainKey, UsdcChain> = {
-  base: { key: 'base', name: 'Base', assetId: 'nep141:base-0x833589fcd6edb6e08f4c7c32d4f71b54bda02913.omft.near', usdc: '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913', aliases: ['base'], valid: evm },
-  near: { key: 'near', name: 'NEAR', assetId: 'nep141:17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1', usdc: '17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1', aliases: ['near', 'near protocol'], valid: isNearAccount },
-  arbitrum: { key: 'arbitrum', name: 'Arbitrum', assetId: 'nep141:arb-0xaf88d065e77c8cc2239327c5edb3a432268e5831.omft.near', usdc: '0xaf88d065e77c8cc2239327c5edb3a432268e5831', aliases: ['arbitrum', 'arb', 'arbitrum one'], valid: evm },
-  optimism: { key: 'optimism', name: 'Optimism', assetId: 'nep245:v2_1.omni.hot.tg:10_A2ewyUyDp6qsue1jqZsGypkCxRJ', usdc: '0x0b2c639c533813f4aa9d7837caf62653d097ff85', aliases: ['optimism', 'op'], valid: evm },
-  polygon: { key: 'polygon', name: 'Polygon', assetId: 'nep245:v2_1.omni.hot.tg:137_qiStmoQJDQPTebaPjgx5VBxZv6L', usdc: '0x3c499c542cef5e3811e1192ce70d8cc03d5c3359', aliases: ['polygon', 'matic', 'pol'], valid: evm },
-  avalanche: { key: 'avalanche', name: 'Avalanche', assetId: 'nep245:v2_1.omni.hot.tg:43114_3atVJH3r5c4GqiSYmg9fECvjc47o', usdc: '0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e', aliases: ['avalanche', 'avax'], valid: evm },
-  solana: { key: 'solana', name: 'Solana', assetId: 'nep141:sol-5ce3bf3a31af18be40ba30f721101b4341690186.omft.near', usdc: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', aliases: ['solana', 'sol'], valid: isSolanaAddress },
+  base: { key: 'base', name: 'Base', explorerTx: 'https://basescan.org/tx/', assetId: 'nep141:base-0x833589fcd6edb6e08f4c7c32d4f71b54bda02913.omft.near', usdc: '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913', aliases: ['base'], valid: evm },
+  near: { key: 'near', name: 'NEAR', explorerTx: 'https://nearblocks.io/txns/', assetId: 'nep141:17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1', usdc: '17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1', aliases: ['near', 'near protocol'], valid: isNearAccount },
+  arbitrum: { key: 'arbitrum', name: 'Arbitrum', explorerTx: 'https://arbiscan.io/tx/', assetId: 'nep141:arb-0xaf88d065e77c8cc2239327c5edb3a432268e5831.omft.near', usdc: '0xaf88d065e77c8cc2239327c5edb3a432268e5831', aliases: ['arbitrum', 'arb', 'arbitrum one'], valid: evm },
+  optimism: { key: 'optimism', name: 'Optimism', explorerTx: 'https://optimistic.etherscan.io/tx/', assetId: 'nep245:v2_1.omni.hot.tg:10_A2ewyUyDp6qsue1jqZsGypkCxRJ', usdc: '0x0b2c639c533813f4aa9d7837caf62653d097ff85', aliases: ['optimism', 'op'], valid: evm },
+  polygon: { key: 'polygon', name: 'Polygon', explorerTx: 'https://polygonscan.com/tx/', assetId: 'nep245:v2_1.omni.hot.tg:137_qiStmoQJDQPTebaPjgx5VBxZv6L', usdc: '0x3c499c542cef5e3811e1192ce70d8cc03d5c3359', aliases: ['polygon', 'matic', 'pol'], valid: evm },
+  avalanche: { key: 'avalanche', name: 'Avalanche', explorerTx: 'https://snowtrace.io/tx/', assetId: 'nep245:v2_1.omni.hot.tg:43114_3atVJH3r5c4GqiSYmg9fECvjc47o', usdc: '0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e', aliases: ['avalanche', 'avax'], valid: evm },
+  solana: { key: 'solana', name: 'Solana', explorerTx: 'https://solscan.io/tx/', assetId: 'nep141:sol-5ce3bf3a31af18be40ba30f721101b4341690186.omft.near', usdc: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', aliases: ['solana', 'sol'], valid: isSolanaAddress },
 };
 
 export const CHAIN_NAMES = Object.values(USDC_CHAINS).map((chain) => chain.name).join(', ');

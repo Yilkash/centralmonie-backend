@@ -101,7 +101,8 @@ describe('OneClickCrossChain', () => {
 
   it('collects the transactions, and fails on a status it does not know', async () => {
     const swapDetails = { originChainTxHashes: [{ hash: '0xa' }], nearTxHashes: ['b'], destinationChainTxHashes: [{ hash: '0xc' }] };
-    await expect(client(jest.fn().mockResolvedValue(reply(200, { status: 'SUCCESS', swapDetails }))).status('0xd')).resolves.toEqual({ status: 'delivered', transactions: ['0xa', 'b', '0xc'] });
+    await expect(client(jest.fn().mockResolvedValue(reply(200, { status: 'SUCCESS', swapDetails: { ...swapDetails, amountOut: '494598' } }))).status('0xd')).resolves.toMatchObject({ receivedMinor: 494598 });
+    await expect(client(jest.fn().mockResolvedValue(reply(200, { status: 'SUCCESS', swapDetails }))).status('0xd')).resolves.toEqual({ status: 'delivered', transactions: ['0xa', 'b', '0xc'], destinationTx: '0xc', receivedMinor: null });
     await expect(client(jest.fn().mockResolvedValue(reply(200, { status: 'NEW' }))).status('0xd')).rejects.toThrow('Unknown');
   });
 });

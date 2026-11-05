@@ -111,10 +111,10 @@ describe('USDC to another chain, on a fork of Base Sepolia', () => {
     expect((await paymentOf(id)).status).toBe('paying');
     await engine.reconcile();
     expect((await paymentOf(id)).status).toBe('paying');
-    route.state = { status: 'delivered', transactions: ['0xbase', '0xarbitrum'] };
+    route.state = { status: 'delivered', transactions: ['0xbase', '0xarbitrum'], destinationTx: '0xarbitrum', receivedMinor: 4_990_000 };
     await engine.reconcile();
-    expect(await paymentOf(id)).toMatchObject({ status: 'completed', providerReference: '0xarbitrum' });
-    expect((await notices()).join()).toContain('reached Friend on Arbitrum');
+    expect(await paymentOf(id)).toMatchObject({ status: 'completed', providerReference: '0xarbitrum', deliveredMinor: 4_990_000 });
+    expect((await notices()).join()).toContain('4.99 USDC reached Friend on Arbitrum');
     await engine.reconcile();
     expect((await notices()).filter((text) => text.includes('reached Friend'))).toHaveLength(1);
   });

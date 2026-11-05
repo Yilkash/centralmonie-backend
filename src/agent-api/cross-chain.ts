@@ -54,6 +54,9 @@ export type CrossChainStatus = 'waiting' | 'moving' | 'delivered' | 'underpaid' 
 export interface CrossChainState {
   status: CrossChainStatus;
   transactions: string[];
+  /** The delivery on the other chain, and how much arrived, once known. */
+  destinationTx?: string | null;
+  receivedMinor?: number | null;
 }
 
 /** Moves USDC between chains. Tests and test mode replace it, so nothing here needs real money to run. */
@@ -131,7 +134,13 @@ export class OneClickCrossChain extends CrossChain {
     if (!status) throw new Error(`Unknown NEAR Intents status: ${String(answer.status).slice(0, 40)}`);
     const details = answer.swapDetails ?? {};
     const hashes = (name: string) => (Array.isArray(details[name]) ? (details[name] as unknown[]).map((item) => hashOf(item)) : []);
-    return { status, transactions: [...hashes('originChainTxHashes'), ...hashes('nearTxHashes'), ...hashes('destinationChainTxHashes')].filter(Boolean) };
+    const received = Number(details.amountOut);
+    return {
+      status,
+      transactions: [...hashes('originChainTxHashes'), ...hashes('nearTxHashes'), ...hashes('destinationChainTxHashes')].filter(Boolean),
+      destinationTx: hashes('destinationChainTxHashes').filter(Boolean).at(-1) ?? null,
+      receivedMinor: Number.isSafeInteger(received) && received > 0 ? received : null,
+    };
   }
 
   private async ask(request: CrossChainRequest, dry: boolean): Promise<CrossChainQuote> {

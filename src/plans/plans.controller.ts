@@ -5,6 +5,7 @@ import { PinService } from '../pin/pin.service';
 import { AuthGuard } from '../auth/auth.guard';
 import { CurrentUser } from '../auth/current-user.decorator';
 import { User } from '../database/schema';
+import { ChainKey, USDC_CHAINS } from '../chain/usdc-chains';
 import { formatNaira, formatUsdc } from '../money/money';
 import { PlanRefused, PlansService, PlanView } from './plans.service';
 
@@ -31,6 +32,8 @@ export const presentPlan = (plan: PlanView) => ({
     receiver_gets: item.delivery ? formatUsdc(item.delivery.receiverMinor) : null,
     receiver_gets_exact: item.delivery ? (item.delivery.receiverMinor / 1_000_000).toFixed(6) : null,
     delivery_seconds: item.delivery?.seconds ?? null,
+    received: item.payment?.deliveredMinor ? formatUsdc(item.payment.deliveredMinor) : null,
+    delivery_tx_url: item.delivery && item.payment?.status === 'completed' && item.payment.providerReference ? `${USDC_CHAINS[item.delivery.chain as ChainKey]?.explorerTx ?? ''}${item.payment.providerReference}` : null,
     fee_warning: item.delivery ? item.usdcMinor - item.delivery.receiverMinor > item.usdcMinor * 0.02 : false,
     address_check: item.addressCheck,
     data_plan: item.dataPlan,

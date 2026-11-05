@@ -150,6 +150,8 @@ export const payments = pgTable(
     // Where the user's USDC goes first: the recipient for USDC, otherwise the collection or partner address.
     fundingAddress: text('funding_address'),
     // True when the money sits at our own collection address, so we can return it ourselves.
+    /** For USDC to another chain: what really arrived. */
+    deliveredMinor: bigint('delivered_minor', { mode: 'number' }),
     refundable: boolean('refundable').notNull().default(false),
     fundingTxHash: text('funding_tx_hash'),
     fundingFromBlock: bigint('funding_from_block', { mode: 'number' }),
