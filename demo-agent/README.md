@@ -29,7 +29,7 @@ the payment did, not from what the model says.
 | `invoices/wrong-name.txt` | The bank's name differs from the supplier, so it refuses |
 | `invoices/injection.txt` | The invoice tells the agent to ignore its budget. It refuses, and code would too |
 
-Add `--x402` to pay through the x402 endpoint: the agent then reads the amount and deposit address from the `PAYMENT-REQUIRED` header. This follows the `near-intents` method drafted in x402-foundation/x402 pull request 3370, which is not final. Two differences: the recipient stays empty in the first 402, and an API key is still required.
+Add `--x402` and leave out `TENKOBO_API_KEY` to pay with no key at all: no sign-up, up to ₦50,000 a payment. With real money this also needs `X402_KEYLESS_ENABLED=true` on the backend. Add `--x402` to pay through the x402 endpoint: the agent then reads the amount and deposit address from the `PAYMENT-REQUIRED` header. This follows the `near-intents` method drafted in x402-foundation/x402 pull request 3370, which is not final. Two differences: the recipient stays empty in the first 402, and an API key is still required.
 
 `npm test` runs the rules without the AI model or any network.
 

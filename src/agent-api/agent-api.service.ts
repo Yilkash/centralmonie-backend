@@ -20,6 +20,16 @@ const MAX_QUOTES_A_DAY = 200;
 const PRICE_TOLERANCE = 0.995;
 const OPEN = ['awaiting_deposit', 'processing', 'paying'] as const;
 
+/** The shared key behind every keyless payment, so they use the same code, limits and records as any other. */
+export const KEYLESS_KEY_ID = '00000000-0000-4000-8000-000000000402';
+const KEYLESS = {
+  perPaymentKobo: 50_000 * 100,
+  perWalletDayKobo: 100_000 * 100,
+  perAccountDayKobo: 100_000 * 100,
+  totalDayKobo: 200_000 * 100,
+  quotesPerIpHour: 30,
+};
+
 const startOfLagosDay = sql`(date_trunc('day', now() at time zone 'Africa/Lagos') at time zone 'Africa/Lagos')`;
 
 export const hashKey = (key: string) => createHash('sha256').update(key).digest('hex');
@@ -52,12 +62,17 @@ export interface QuoteInput {
   accountNumber: string;
   payFrom: PayFrom;
   refundTo: string;
+  payerName?: string;
+  payerEmail?: string;
+  purpose?: string;
+  clientIp?: string;
 }
 
 /** The way in for other AI agents. It uses no AI: ordinary code checks the request and tracks the money. */
 @Injectable()
 export class AgentApiService {
   private readonly logger = new Logger(AgentApiService.name);
+  private readonly ipWindows = new Map<string, { until: number; count: number }>();
 
   constructor(
     @Inject(DATABASE) private readonly db: Database,
@@ -73,6 +88,32 @@ export class AgentApiService {
 
   get open(): boolean {
     return agentApiOpen(this.config.get('PAYMENTS_MODE', { infer: true }), this.config.get('AGENT_API_ENABLED', { infer: true }));
+  }
+
+  get keylessOpen(): boolean {
+    return this.config.get('PAYMENTS_MODE', { infer: true }) === 'simulated' || (this.open && this.config.get('X402_KEYLESS_ENABLED', { infer: true }));
+  }
+
+  /** Its random hash is only ever a signing secret: nobody holds a key that matches it. */
+  async keylessKey(): Promise<AgentKey> {
+    await this.db
+      .insert(agentKeys)
+      .values({ id: KEYLESS_KEY_ID, name: 'Keyless x402', keyHash: hashKey(randomBytes(32).toString('hex')), dailyLimitKobo: KEYLESS.totalDayKobo })
+      .onConflictDoNothing();
+    const [row] = await this.db.select().from(agentKeys).where(eq(agentKeys.id, KEYLESS_KEY_ID));
+    if (row!.revokedAt) throw new AgentRefusal('unavailable', 'Paying without a key is stopped for now.', 503);
+    return row!;
+  }
+
+  /** In memory, so a restart clears it. It slows abuse of the bank lookup: the money limits are elsewhere. */
+  private countIp(ip: string): void {
+    const now = Date.now();
+    if (this.ipWindows.size > 10_000) this.ipWindows.clear();
+    const window = this.ipWindows.get(ip);
+    const current = window && window.until > now ? window : { until: now + 3_600_000, count: 0 };
+    current.count += 1;
+    this.ipWindows.set(ip, current);
+    if (current.count > KEYLESS.quotesPerIpHour) throw new AgentRefusal('too_many_quotes', 'Too many quotes from this address. Try again later.', 429);
   }
 
   /** The key is returned here and never again. */
@@ -99,7 +140,14 @@ export class AgentApiService {
     const amountKobo = input.amountNaira * 100;
     if (!validRefundAddress(input.payFrom, input.refundTo)) throw new AgentRefusal('invalid_refund_address', `That is not a valid ${input.payFrom} address to refund.`, 400);
 
-    const [{ made } = { made: 0 }] = await this.db
+    const keyless = key.id === KEYLESS_KEY_ID;
+    if (keyless) {
+      this.countIp(input.clientIp ?? 'unknown');
+      if (amountKobo > KEYLESS.perPaymentKobo) throw new AgentRefusal('over_payment_limit', `Without an API key, the most for one payment is ${formatNaira(KEYLESS.perPaymentKobo)}.`, 422);
+      await this.assertKeylessCaps(amountKobo, input.refundTo, input.accountNumber, this.db);
+    }
+
+    const [{ made } = { made: 0 }] = keyless ? [] : await this.db
       .select({ made: count() })
       .from(agentPayments)
       .where(and(eq(agentPayments.keyId, key.id), gte(agentPayments.createdAt, sql`${startOfLagosDay}`)));
@@ -139,6 +187,10 @@ export class AgentApiService {
         accountName,
         payFrom: input.payFrom,
         refundTo: input.refundTo,
+        payerName: input.payerName ?? null,
+        payerEmail: input.payerEmail ?? null,
+        purpose: input.purpose ?? null,
+        clientIp: input.clientIp ?? null,
         quoteExpiresAt: new Date(Date.now() + QUOTE_LIFETIME_MS),
       })
       .returning();
@@ -162,6 +214,7 @@ export class AgentApiService {
         return { row: null, fresh: false };
       }
       await this.assertAllowed(key, row.amountKobo, tx);
+      if (key.id === KEYLESS_KEY_ID) await this.assertKeylessCaps(row.amountKobo, row.refundTo, row.accountNumber, tx);
       const [updated] = await tx.update(agentPayments).set({ status: 'creating', updatedAt: new Date() }).where(eq(agentPayments.id, id)).returning();
       return { row: updated!, fresh: true };
     });
@@ -266,6 +319,19 @@ export class AgentApiService {
     if (paid.state === 'completed') return { status: 'paid', paidAt: new Date(), failureReason: null, transactions };
     if (paid.state === 'failed') return { status: 'needs_support', failureReason: 'The USDC arrived, but the bank payment failed. Do not send again.', transactions };
     return payment.status === 'paying' ? null : { status: 'paying', failureReason: null, transactions };
+  }
+
+  /** Per wallet and per bank account, so one wallet cannot repeat and many wallets cannot flood one account. */
+  private async assertKeylessCaps(addedKobo: number, refundTo: string, accountNumber: string, db: Pick<Database, 'select'>): Promise<void> {
+    const used = async (column: typeof agentPayments.refundTo | typeof agentPayments.accountNumber, value: string) => {
+      const [row] = await db
+        .select({ used: sql<string>`coalesce(sum(${agentPayments.amountKobo}), 0)` })
+        .from(agentPayments)
+        .where(and(eq(agentPayments.keyId, KEYLESS_KEY_ID), eq(column, value), inArray(agentPayments.status, [...AGENT_STATUSES_THAT_COUNT]), gte(agentPayments.createdAt, sql`${startOfLagosDay}`)));
+      return Number(row!.used);
+    };
+    if ((await used(agentPayments.refundTo, refundTo)) + addedKobo > KEYLESS.perWalletDayKobo) throw new AgentRefusal('over_wallet_limit', 'This wallet has reached its limit for today.', 422);
+    if ((await used(agentPayments.accountNumber, accountNumber)) + addedKobo > KEYLESS.perAccountDayKobo) throw new AgentRefusal('over_account_limit', 'This bank account has reached its limit for today.', 422);
   }
 
   private async assertAllowed(key: AgentKey, addedKobo: number, db: Pick<Database, 'select'>): Promise<void> {

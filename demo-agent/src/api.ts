@@ -86,19 +86,36 @@ interface Entry {
 export class X402Api implements PaymentApi {
   private readonly plain: TenKoboApi;
   private readonly baseUrl: string;
-  private readonly key: string;
+  private readonly key: string | undefined;
+  private readonly payFrom: string;
   private readonly refundTo: string;
+  private readonly payer: { payer_name: string; payer_email: string; purpose: string };
   private readonly tokens = new Map<string, { operationToken: string; depositAddress: string; txHash?: string }>();
 
-  constructor(options: { baseUrl: string; key: string; payFrom: string; refundTo: string }) {
-    this.plain = new TenKoboApi(options);
+  /** With no key it pays as a keyless agent, which must say who it is acting for. */
+  constructor(options: { baseUrl: string; key?: string; payFrom: string; refundTo: string; payer: { payer_name: string; payer_email: string; purpose: string } }) {
+    this.plain = new TenKoboApi({ ...options, key: options.key ?? '' });
     this.baseUrl = options.baseUrl;
     this.key = options.key;
+    this.payFrom = options.payFrom;
     this.refundTo = options.refundTo;
+    this.payer = options.payer;
   }
 
-  quote(request: QuoteRequest): Promise<Payment> {
-    return this.plain.quote(request);
+  async quote(request: QuoteRequest): Promise<Payment> {
+    const response = await fetch(`${this.baseUrl}/v1/agent/x402/pay`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...this.auth() },
+      body: JSON.stringify({ ...request, pay_from: this.payFrom, refund_to: this.refundTo, ...this.payer }),
+      signal: AbortSignal.timeout(90_000),
+    });
+    const body = (await response.json()) as { payment: Payment; code?: string; message?: string };
+    if (body.code) throw new ApiRefusal(body.code, body.message ?? 'Refused');
+    return body.payment;
+  }
+
+  private auth(): Record<string, string> {
+    return this.key ? { authorization: `Bearer ${this.key}` } : {};
   }
 
   async accept(quoteId: string): Promise<Payment> {
@@ -119,7 +136,7 @@ export class X402Api implements PaymentApi {
 
   async status(id: string): Promise<Payment> {
     const token = this.tokens.get(id);
-    if (!token?.txHash) return this.plain.status(id);
+    if (!token?.txHash) throw new Error('No deposit to report yet.');
     const { body } = await this.call(id, { type: 'deposit', operationToken: token.operationToken, depositAddress: token.depositAddress, txHash: token.txHash });
     return body.payment;
   }
@@ -134,7 +151,7 @@ export class X402Api implements PaymentApi {
   private async call(id: string, payload?: object): Promise<{ response: Response; body: { payment: Payment; code?: string; message?: string } }> {
     const url = `${this.baseUrl}/v1/agent/x402/pay/${encodeURIComponent(id)}`;
     const signature = payload && Buffer.from(JSON.stringify({ x402Version: 2, resource: { url }, payload })).toString('base64');
-    const response = await fetch(url, { method: 'POST', headers: { authorization: `Bearer ${this.key}`, ...(signature ? { 'payment-signature': signature } : {}) }, signal: AbortSignal.timeout(90_000) });
+    const response = await fetch(url, { method: 'POST', headers: { ...this.auth(), ...(signature ? { 'payment-signature': signature } : {}) }, signal: AbortSignal.timeout(90_000) });
     const body = (await response.json()) as { payment: Payment; code?: string; message?: string };
     if (body.code) throw new ApiRefusal(body.code, body.message ?? 'Refused');
     return { response, body };

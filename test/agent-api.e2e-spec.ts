@@ -1,7 +1,7 @@
 import { NestFastifyApplication } from '@nestjs/platform-fastify';
 import { Test } from '@nestjs/testing';
 import { Pool } from 'pg';
-import { AgentApiService, agentApiOpen, validRefundAddress } from '../src/agent-api/agent-api.service';
+import { AgentApiService, agentApiOpen, KEYLESS_KEY_ID, validRefundAddress } from '../src/agent-api/agent-api.service';
 import { operationToken, tokenProblem } from '../src/agent-api/x402';
 import { AgentPayment } from '../src/database/schema';
 import { CrossChain, CrossChainRequest, CrossChainState } from '../src/agent-api/cross-chain';
@@ -318,6 +318,102 @@ describe('Agent API', () => {
       await accepted({ amount_naira: 5000 });
       const refused = await pay(id, signed(id, { type: 'quote', refundTo: 'agent.near' }));
       expect(refused.json().code).toBe('over_daily_limit');
+    });
+  });
+
+  describe('x402 with no key', () => {
+    const start = (over: object = {}, ip = '10.0.0.1') =>
+      app.inject({ method: 'POST', url: '/v1/agent/x402/pay', remoteAddress: ip, payload: { ...REQUEST, payer_name: 'Ada Motors', payer_email: 'ada@example.com', purpose: 'Invoice 1042', ...over } });
+    const decode = (value: string | string[] | number | undefined) => JSON.parse(Buffer.from(String(value), 'base64').toString());
+    const signed = (id: string, payload: object) => ({ x402Version: 2, resource: { url: `http://localhost/v1/agent/x402/pay/${id}` }, payload });
+    const pay = (id: string, signature: object, token?: string) =>
+      app.inject({ method: 'POST', url: `/v1/agent/x402/pay/${id}`, headers: { ...(token ? { authorization: `Bearer ${token}` } : {}), 'payment-signature': Buffer.from(JSON.stringify(signature)).toString('base64') } });
+    const acceptKeyless = async (over: object, ip?: string) => {
+      const { id } = (await start(over, ip)).json().payment;
+      return pay(id, signed(id, { type: 'quote', refundTo: (over as { refund_to?: string }).refund_to ?? 'agent.near' }));
+    };
+
+    it('runs the whole journey with no key, keeping the details the agent gave', async () => {
+      const first = await start();
+      expect(first.statusCode).toBe(402);
+      const { id } = first.json().payment;
+      expect(decode(first.headers['payment-required']).accepts[0]).toMatchObject({ amount: '', payTo: '' });
+      expect(decode(first.headers['payment-required']).resource.url).toContain(`/v1/agent/x402/pay/${id}`);
+      const second = await pay(id, signed(id, { type: 'quote', refundTo: 'agent.near' }));
+      const entry = decode(second.headers['payment-required']).accepts[0];
+      expect(entry.payTo).toBe('0xdeposit');
+      crossChain.state = { status: 'delivered', transactions: ['0xa'] };
+      payout.state = { state: 'completed' };
+      const done = await pay(id, signed(id, { type: 'deposit', operationToken: entry.extra.operationToken, depositAddress: '0xdeposit', txHash: '0xa' }));
+      expect(done.statusCode).toBe(200);
+      const row = (await pool.query('select payer_name, payer_email, purpose, client_ip, status from agent_payments where id = $1', [id])).rows[0];
+      expect(row).toMatchObject({ payer_name: 'Ada Motors', payer_email: 'ada@example.com', purpose: 'Invoice 1042', client_ip: '10.0.0.1', status: 'paid' });
+    });
+
+    it('requires the details, and refuses over the limit for one payment', async () => {
+      const missing = await app.inject({ method: 'POST', url: '/v1/agent/x402/pay', payload: REQUEST });
+      expect(missing.statusCode).toBe(400);
+      expect(missing.json().code).toBe('invalid_request');
+      const big = await start({ amount_naira: 50_001 });
+      expect(big.json().code).toBe('over_payment_limit');
+      expect((await start({ amount_naira: 50_000 })).statusCode).toBe(402);
+    });
+
+    it('caps one wallet and one bank account per day', async () => {
+      expect((await acceptKeyless({ amount_naira: 50_000, account_number: '8031234001' })).statusCode).toBe(402);
+      expect((await acceptKeyless({ amount_naira: 50_000, account_number: '8031234002' })).statusCode).toBe(402);
+      expect((await start({ amount_naira: 1000, account_number: '8031234003' })).json().code).toBe('over_wallet_limit');
+      expect((await acceptKeyless({ amount_naira: 50_000, account_number: '8031234004', refund_to: 'b.near' })).statusCode).toBe(402);
+      expect((await acceptKeyless({ amount_naira: 50_000, account_number: '8031234004', refund_to: 'c.near' })).statusCode).toBe(402);
+      expect((await start({ amount_naira: 1000, account_number: '8031234004', refund_to: 'd.near' })).json().code).toBe('over_account_limit');
+    });
+
+    it('checks the wallet cap again at accepting, so quotes made together cannot pass it', async () => {
+      const a = (await start({ amount_naira: 50_000, account_number: '8031234005', refund_to: 'e.near' })).json().payment.id;
+      const b = (await start({ amount_naira: 50_000, account_number: '8031234006', refund_to: 'e.near' })).json().payment.id;
+      const c = (await start({ amount_naira: 50_000, account_number: '8031234007', refund_to: 'e.near' })).json().payment.id;
+      const answers = await Promise.all([a, b, c].map((id) => pay(id, signed(id, { type: 'quote', refundTo: 'e.near' }))));
+      expect(answers.map((item) => item.statusCode).sort()).toEqual([402, 402, 422]);
+    });
+
+    it('caps the total of all keyless payments in a day', async () => {
+      for (const n of [1, 2, 3, 4]) expect((await acceptKeyless({ amount_naira: 50_000, account_number: `803123410${n}`, refund_to: `w${n}.near` })).statusCode).toBe(402);
+      expect((await start({ amount_naira: 1000, account_number: '8031234200', refund_to: 'w5.near' })).json().code).toBe('over_daily_limit');
+    });
+
+    it('slows repeated quotes from one address', async () => {
+      const ip = '10.9.9.9';
+      for (let n = 0; n < 30; n++) await start({ amount_naira: 1000 }, ip);
+      expect((await start({ amount_naira: 1000 }, ip)).json().code).toBe('too_many_quotes');
+      expect((await start({ amount_naira: 1000 }, '10.9.9.10')).statusCode).toBe(402);
+    });
+
+    it('stops when paused, and when the keyless key is revoked', async () => {
+      const switches = app.get(SwitchesService, { strict: false });
+      await switches.set('bank', true);
+      try {
+        expect((await start()).json().code).toBe('paused');
+      } finally {
+        await switches.set('bank', false);
+      }
+      await start();
+      await agents.revokeKey(KEYLESS_KEY_ID);
+      expect((await start()).json().code).toBe('unavailable');
+    });
+
+    it('still uses a key when one is given, and refuses a wrong one', async () => {
+      const withKey = await app.inject({ method: 'POST', url: '/v1/agent/x402/pay', headers: { authorization: `Bearer ${key}` }, payload: REQUEST });
+      expect(withKey.statusCode).toBe(402);
+      const wrong = await app.inject({ method: 'POST', url: '/v1/agent/x402/pay', headers: { authorization: 'Bearer wrong' }, payload: REQUEST });
+      expect(wrong.statusCode).toBe(401);
+    });
+
+    it('keeps keyless payments out of a keyed agent, and the other way round', async () => {
+      const mine = await quote();
+      const keyless = await pay(mine.id, signed(mine.id, { type: 'quote', refundTo: 'agent.near' }));
+      expect(keyless.statusCode).toBe(404);
+      const theirs = (await start()).json().payment.id;
+      expect((await call('GET', `/v1/agent/payments/${theirs}`)).statusCode).toBe(404);
     });
   });
 

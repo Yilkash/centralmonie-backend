@@ -35,8 +35,10 @@ const model: Model = async ({ system, tools, messages }) =>
   (await anthropic.messages.create({ model: env.AGENT_MODEL ?? 'claude-haiku-5-5', max_tokens: 2000, system, tools, messages: messages as Anthropic.MessageParam[] })) as unknown as { content: never[] };
 
 const wallet: Wallet = real ? new NearWallet(need('NEAR_AGENT_ACCOUNT_ID'), need('NEAR_AGENT_PRIVATE_KEY')) : new SimulatedWallet();
-const apiOptions = { baseUrl: env.TENKOBO_API_URL ?? 'http://localhost:4010', key: need('TENKOBO_API_KEY'), payFrom: 'near', refundTo: env.NEAR_AGENT_ACCOUNT_ID ?? 'demo-agent.near' };
-const api = flags.includes('--x402') ? new X402Api(apiOptions) : new TenKoboApi(apiOptions);
+const common = { baseUrl: env.TENKOBO_API_URL ?? 'http://localhost:4010', payFrom: 'near', refundTo: env.NEAR_AGENT_ACCOUNT_ID ?? 'demo-agent.near' };
+const api = flags.includes('--x402')
+  ? new X402Api({ ...common, ...(env.TENKOBO_API_KEY ? { key: env.TENKOBO_API_KEY } : {}), payer: { payer_name: '10kobo demo agent', payer_email: 'demo@example.com', purpose: 'Supplier invoice' } })
+  : new TenKoboApi({ ...common, key: need('TENKOBO_API_KEY') });
 const fill = (text: string) =>
   text
     .replaceAll('{{SUPPLIER}}', env.INVOICE_SUPPLIER ?? 'SIMULATED HOLDER 4568')

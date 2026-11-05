@@ -4,7 +4,7 @@ import { AgentKey, AgentPayment } from '../database/schema';
 import { formatNaira, formatUsdc } from '../money/money';
 import { AdminGuard } from '../ops/admin.controller';
 import { PAY_FROM, PayFrom } from './cross-chain';
-import { AgentApiService, AgentRefusal } from './agent-api.service';
+import { AgentApiService, AgentRefusal, KEYLESS_KEY_ID } from './agent-api.service';
 import { decodeSignature, encode, firstChallenge, provesPayment, quotedChallenge, settlement, tokenProblem } from './x402';
 
 const quoteBody = z.object({
@@ -15,6 +15,8 @@ const quoteBody = z.object({
   refund_to: z.string().trim().min(2).max(100),
 });
 const paymentBody = z.object({ quote_id: z.string().uuid() });
+/** What a keyless agent must tell us. It can be false, so it is a record for follow-up and never a safety check. */
+const keylessFields = z.object({ payer_name: z.string().trim().min(2).max(120), payer_email: z.string().trim().email().max(160), purpose: z.string().trim().min(3).max(300) });
 const keyBody = z.object({ name: z.string().trim().min(2).max(80), daily_limit_naira: z.number().int().positive() });
 
 const money = (minor: number) => (minor / 1_000_000).toFixed(6);
@@ -77,6 +79,27 @@ export class AgentKeyGuard implements CanActivate {
   }
 }
 
+/** With a key, that key's limits. With no key, the shared keyless limits, if keyless paying is open. */
+@Injectable()
+export class X402Guard implements CanActivate {
+  constructor(private readonly agents: AgentApiService) {}
+
+  async canActivate(context: ExecutionContext): Promise<boolean> {
+    if (!this.agents.open) throw new AgentRefusal('unavailable', 'The Agent API is not open.', 503);
+    const request = context.switchToHttp().getRequest<{ headers: { authorization?: string }; agentKey?: AgentKey }>();
+    if (request.headers.authorization) {
+      const [scheme, token] = request.headers.authorization.split(' ');
+      const key = scheme === 'Bearer' && token ? await this.agents.keyFrom(token) : null;
+      if (!key) throw new AgentRefusal('invalid_key', 'That API key is not valid.', 401);
+      request.agentKey = key;
+      return true;
+    }
+    if (!this.agents.keylessOpen) throw new AgentRefusal('key_required', 'An API key is required.', 401);
+    request.agentKey = await this.agents.keylessKey();
+    return true;
+  }
+}
+
 @Controller('v1/agent')
 @UseFilters(AgentRefusalFilter)
 @UseGuards(AgentKeyGuard)
@@ -119,9 +142,37 @@ interface X402Reply {
  */
 @Controller('v1/agent/x402')
 @UseFilters(AgentRefusalFilter)
-@UseGuards(AgentKeyGuard)
+@UseGuards(X402Guard)
 export class AgentX402Controller {
   constructor(private readonly agents: AgentApiService) {}
+
+  /** Starts a payment and answers with the first 402, so an agent needs nothing from us beforehand. */
+  @Post('pay')
+  @HttpCode(200)
+  async start(
+    @CurrentKey() key: AgentKey,
+    @Body() body: unknown,
+    @Req() request: { protocol: string; hostname: string; ip: string },
+    @Res({ passthrough: true }) reply: X402Reply,
+  ) {
+    const parsed = quoteBody.safeParse(body);
+    if (!parsed.success) throw invalid(parsed.error);
+    const payer = keylessFields.safeParse(body);
+    if (key.id === KEYLESS_KEY_ID && !payer.success) throw invalid(payer.error);
+    const { amount_naira, bank_name, account_number, pay_from, refund_to } = parsed.data;
+    const payment = await this.agents.quote(key, {
+      amountNaira: amount_naira,
+      bankName: bank_name,
+      accountNumber: account_number,
+      payFrom: pay_from,
+      refundTo: refund_to,
+      clientIp: request.ip,
+      ...(payer.success ? { payerName: payer.data.payer_name, payerEmail: payer.data.payer_email, purpose: payer.data.purpose } : {}),
+    });
+    const offer = firstChallenge(payment, `${request.protocol}://${request.hostname}/v1/agent/x402/pay/${payment.id}`);
+    reply.status(402).header('PAYMENT-REQUIRED', encode(offer));
+    return { ...offer, payment: presentPayment(payment) };
+  }
 
   @Post('pay/:id')
   @HttpCode(200)

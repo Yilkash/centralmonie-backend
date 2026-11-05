@@ -5,7 +5,7 @@ import { OpsModule } from '../ops/ops.module';
 import { PaymentsModule } from '../payments/payments.module';
 import { WorkerService } from '../payments/worker.service';
 import { ProvidersModule } from '../providers/providers.module';
-import { AgentApiController, AgentKeyGuard, AgentKeysController, AgentX402Controller } from './agent-api.controller';
+import { AgentApiController, AgentKeyGuard, AgentKeysController, AgentX402Controller, X402Guard } from './agent-api.controller';
 import { AgentApiService } from './agent-api.service';
 import { CrossChain, OneClickCrossChain, SimulatedCrossChain } from './cross-chain';
 
@@ -15,6 +15,7 @@ import { CrossChain, OneClickCrossChain, SimulatedCrossChain } from './cross-cha
   providers: [
     AgentApiService,
     AgentKeyGuard,
+    X402Guard,
     {
       provide: CrossChain,
       inject: [ConfigService],

@@ -50,6 +50,8 @@ const envSchema = z.object({
   COMPANY_DAILY_CAP_NAIRA: z.coerce.number().int().positive().default(5_000_000),
   // Opens the Agent API when real money is on. In test mode it is always open, and moves nothing.
   AGENT_API_ENABLED: z.enum(['true', 'false']).default('false').transform((value) => value === 'true'),
+  // Lets agents pay over x402 with no API key when real money is on. In test mode it is always open.
+  X402_KEYLESS_ENABLED: z.enum(['true', 'false']).default('false').transform((value) => value === 'true'),
   // NEAR Intents' 1Click API. The key lowers the fee and is not required.
   ONECLICK_API_KEY: z.string().min(1).optional(),
   ONECLICK_BASE_URL: z.string().url().default('https://1click.chaindefuser.com'),

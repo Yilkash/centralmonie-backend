@@ -348,6 +348,11 @@ export const agentPayments = pgTable(
     depositDeadline: timestamp('deposit_deadline', { withTimezone: true }),
     transactions: jsonb('transactions').$type<string[]>().notNull().default([]),
     failureReason: text('failure_reason'),
+    // What a keyless agent told us about itself. Unverified: a record for follow-up, never a safety check.
+    payerName: text('payer_name'),
+    payerEmail: text('payer_email'),
+    purpose: text('purpose'),
+    clientIp: text('client_ip'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
     paidAt: timestamp('paid_at', { withTimezone: true }),
