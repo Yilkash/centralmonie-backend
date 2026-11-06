@@ -212,7 +212,8 @@ describe('Agent API', () => {
     it.each([
       [{ amount_naira: 0 }, 'invalid_request', 400],
       [{ account_number: '123' }, 'invalid_request', 400],
-      [{ pay_from: 'tron' }, 'invalid_request', 400],
+      [{ pay_from: 'stellar' }, 'invalid_request', 400],
+      [{ pay_from: 'tron', refund_to: '0x70997970C51812dc3A010C7d01b50e0d17dc79C8' }, 'invalid_refund_address', 400],
       [{ pay_from: 'base', refund_to: 'agent.near' }, 'invalid_refund_address', 400],
       [{ account_number: '8031230000' }, 'account_not_found', 404],
       [{ amount_naira: 25_000 }, 'over_daily_limit', 422],
@@ -220,6 +221,18 @@ describe('Agent API', () => {
       const response = await call('POST', '/v1/agent/quotes', { ...REQUEST, ...over });
       expect(response.statusCode).toBe(statusCode);
       expect(response.json().code).toBe(code);
+    });
+
+    it('lets a payer on Tron pay without choosing a token, because only USDT goes from there', async () => {
+      const body = await quote({ pay_from: 'tron', refund_to: 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t' });
+      expect(body).toMatchObject({ status: 'quoted', pay_from: 'tron' });
+      expect((await pool.query('select pay_token from agent_payments where id = $1', [body.id])).rows[0].pay_token).toBe('USDT');
+    });
+
+    it('keeps x402 to the networks it has standard names for', async () => {
+      const response = await call('POST', '/v1/agent/x402/pay', { ...REQUEST, pay_from: 'tron', refund_to: 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t' });
+      expect(response.statusCode).toBe(400);
+      expect(response.json().message).toContain('over x402');
     });
 
     it('refuses less than the partner minimum, and says what the minimum is', async () => {
@@ -1403,5 +1416,10 @@ describe('Agent API rules', () => {
     expect(validRefundAddress('near', 'agent.near')).toBe(true);
     expect(validRefundAddress('near', REFUND.toUpperCase())).toBe(false);
     expect(validRefundAddress('solana', 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v')).toBe(true);
+    expect(validRefundAddress('tron', 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t')).toBe(true);
+    expect(validRefundAddress('ton', 'UQABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4fIKLE')).toBe(true);
+    expect(validRefundAddress('sui', '0x' + 'ab'.repeat(32))).toBe(true);
+    expect(validRefundAddress('polygon', REFUND)).toBe(true);
+    expect(validRefundAddress('tron', REFUND)).toBe(false);
   });
 });

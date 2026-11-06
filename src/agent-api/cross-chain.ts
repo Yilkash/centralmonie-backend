@@ -1,21 +1,45 @@
 import { randomBytes } from 'node:crypto';
 
 /** Where an agent can pay from. Asset ids are from the NEAR Intents token list, checked on 4 Nov 2026. */
+/**
+ * Where a payer can pay from, and what NEAR Intents calls the token there. Stellar is missing because NEAR Intents
+ * would not quote Stellar to Base on 6 Nov 2026 ("Quoting for this pair is not available"). Tron and TON have only
+ * USDT. Tron (from $100) and BNB Chain (from $1,000) had temporary minimums that day.
+ */
 export const PAY_FROM = {
   base: 'nep141:base-0x833589fcd6edb6e08f4c7c32d4f71b54bda02913.omft.near',
   near: 'nep141:17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1',
   arbitrum: 'nep141:arb-0xaf88d065e77c8cc2239327c5edb3a432268e5831.omft.near',
   ethereum: 'nep141:eth-0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48.omft.near',
   solana: 'nep141:sol-5ce3bf3a31af18be40ba30f721101b4341690186.omft.near',
+  optimism: 'nep245:v2_1.omni.hot.tg:10_A2ewyUyDp6qsue1jqZsGypkCxRJ',
+  polygon: 'nep245:v2_1.omni.hot.tg:137_qiStmoQJDQPTebaPjgx5VBxZv6L',
+  avalanche: 'nep245:v2_1.omni.hot.tg:43114_3atVJH3r5c4GqiSYmg9fECvjc47o',
+  bsc: 'nep245:v2_1.omni.hot.tg:56_2w93GqMcEmQFDru84j3HZZWt557r',
+  gnosis: 'nep141:gnosis-0x2a22f9c3b484c3629090feed35f17ff8f88f76f0.omft.near',
+  monad: 'nep245:v2_1.omni.hot.tg:143_2dmLwYWkCQKyTjeUPAsGJuiVLbFx',
+  sui: 'nep141:sui-c1b81ecaf27933252d31a963bc5e9458f13c18ce.omft.near',
+  aptos: 'nep141:aptos-34ee497f210c5a511e8d5b53bc56d75b63612bb5.omft.near',
+  tron: 'nep141:tron-d28a265909efecdcee7c5028585214ea0b96f015.omft.near',
+  ton: 'nep245:v2_1.omni.hot.tg:1117_3tsdfyziyc7EJbP2aULWSKU4toBaAcN4FdTgfm5W1mC4ouR',
 } as const;
 export type PayFrom = keyof typeof PAY_FROM;
 
-/** USDT is accepted only where NEAR Intents lists it, checked on 5 Nov 2026. Each still needs a real delivery test. */
+/** USDT is accepted only where NEAR Intents lists it, checked on 5 and 6 Nov 2026. Each still needs a real delivery test. */
 export const USDT_ON: Partial<Record<PayFrom, string>> = {
   near: 'nep141:usdt.tether-token.near',
   ethereum: 'nep141:eth-0xdac17f958d2ee523a2206206994597c13d831ec7.omft.near',
   solana: 'nep141:sol-c800a4bd850783ccb82c2b2c7e84175443606352.omft.near',
+  bsc: 'nep245:v2_1.omni.hot.tg:56_2CMMyVTGZkeyNZTSvS5sarzfir6g',
+  tron: PAY_FROM.tron,
+  ton: PAY_FROM.ton,
 };
+
+/** Networks with no USDC route, where a payer always pays in USDT. */
+export const USDT_ONLY: ReadonlySet<PayFrom> = new Set<PayFrom>(['tron', 'ton']);
+
+/** Token decimals where they are not six. BNB Chain's USDC and USDT both use eighteen. */
+const PAY_DECIMALS: Partial<Record<PayFrom, number>> = { bsc: 18 };
 export type PayToken = 'USDC' | 'USDT';
 
 export interface CrossChainRequest {
@@ -110,6 +134,14 @@ export function inSixDecimals(raw: unknown, decimals: number): number | null {
   if (!/^\d+$/.test(text)) return null;
   const value = decimals >= 6 ? BigInt(text) / 10n ** BigInt(decimals - 6) : BigInt(text) * 10n ** BigInt(6 - decimals);
   return value > 0n && value <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(value) : null;
+}
+
+/** Like inSixDecimals, but rounded up: for what someone must pay, where a hair too little would fall short. */
+export function inSixDecimalsUp(raw: unknown, decimals: number): number | null {
+  if (decimals <= 6) return inSixDecimals(raw, decimals);
+  const down = inSixDecimals(raw, decimals);
+  if (down === null) return null;
+  return BigInt(String(raw)) % 10n ** BigInt(decimals - 6) === 0n ? down : down + 1;
 }
 
 /** NEAR Intents' "1.234567" written out, in six decimals. Status replies give this, and it does not need the chain's decimals. */
@@ -244,8 +276,9 @@ export class OneClickCrossChain extends CrossChain {
       deadline: request.deadline.toISOString(),
       ...(this.fee.bps > 0 && this.fee.recipient ? { appFees: [{ recipient: this.fee.recipient, fee: this.fee.bps }] } : {}),
     });
-    const payInMinor = Number(answer.quote?.amountIn);
-    if (!Number.isSafeInteger(payInMinor) || payInMinor < request.usdcMinor) throw new Error('NEAR Intents gave an unusable amount');
+    // Rounded up into six decimals, so a payer who sends what is shown never sends too little.
+    const payInMinor = inSixDecimalsUp(answer.quote?.amountIn, PAY_DECIMALS[request.payFrom] ?? 6);
+    if (payInMinor === null || payInMinor < request.usdcMinor) throw new Error('NEAR Intents gave an unusable amount');
     // It must deliver at least what the bank partner is waiting for, or the payout would never start.
     if (answer.quote?.amountOut !== undefined && Number(answer.quote.amountOut) < request.usdcMinor) throw new Error('NEAR Intents would deliver too little');
     if (!dry && !answer.quote?.depositAddress) throw new Error('NEAR Intents gave no deposit address');

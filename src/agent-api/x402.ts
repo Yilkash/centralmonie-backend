@@ -9,14 +9,17 @@ import { PayFrom } from './cross-chain';
  * destination.recipient stays empty until quoted, because the partner's address is made when the payment is
  * accepted, and an API key is still required, so that every payment has an owner and limits.
  */
-const ORIGIN: Record<PayFrom, { network: string; asset: string }> = {
+// Offered over x402 only where the network has a standard name (CAIP-2) and a proven route.
+const ORIGIN: Partial<Record<PayFrom, { network: string; asset: string }>> = {
   base: { network: 'eip155:8453', asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' },
   near: { network: 'near:mainnet', asset: '17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1' },
   arbitrum: { network: 'eip155:42161', asset: '0xaf88d065e77c8cC2239327C5EDb3A432268e5831' },
   ethereum: { network: 'eip155:1', asset: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48' },
   solana: { network: 'solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp', asset: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v' },
 };
-const DESTINATION = ORIGIN.base;
+const DESTINATION = ORIGIN.base!;
+/** The networks an x402 payer may choose. Others are paid through pay links and the plain API. */
+export const X402_PAY_FROM = Object.keys(ORIGIN) as PayFrom[];
 const GRACE_SECONDS = 24 * 60 * 60;
 const DEPOSIT_WINDOW_SECONDS = 30 * 60;
 
@@ -42,7 +45,7 @@ export function decodeSignature(header: string): X402Payload | null {
 }
 
 const destination = (payment: AgentPayment) => ({ network: DESTINATION.network, asset: DESTINATION.asset, amount: String(payment.usdcMinor), recipient: payment.payoutAddress ?? '' });
-const origin = (payment: AgentPayment) => ORIGIN[payment.payFrom as PayFrom];
+const origin = (payment: AgentPayment) => ORIGIN[payment.payFrom as PayFrom] ?? { network: payment.payFrom, asset: '' };
 
 function unquoted(payment: AgentPayment) {
   return {

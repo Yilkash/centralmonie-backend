@@ -8,7 +8,7 @@ import { AdminGuard } from '../ops/admin.controller';
 import { PAY_FROM, PayFrom } from './cross-chain';
 import { AgentApiService, AgentRefusal, KEYLESS_KEY_ID, maskName, NAIRA, NAIRA_PAYER } from './agent-api.service';
 import { PayLinksService, presentLink, presentOwnLink, presentPublicLink } from './pay-links.service';
-import { decodeSignature, encode, firstChallenge, provesPayment, quotedChallenge, settlement, tokenProblem } from './x402';
+import { decodeSignature, encode, firstChallenge, provesPayment, quotedChallenge, settlement, tokenProblem, X402_PAY_FROM } from './x402';
 
 const quoteBody = z.object({
   amount_naira: z.number().int().positive().max(100_000_000),
@@ -183,6 +183,7 @@ export class AgentX402Controller {
     const payer = keylessFields.safeParse(body);
     if (key.id === KEYLESS_KEY_ID && !payer.success) throw invalid(payer.error);
     const { amount_naira, bank_name, account_number, pay_from, refund_to } = parsed.data;
+    if (!X402_PAY_FROM.includes(pay_from)) throw new AgentRefusal('invalid_request', `pay_from: over x402, pay from ${X402_PAY_FROM.join(', ')}.`, 400);
     const payment = await this.agents.quote(key, {
       amountNaira: amount_naira,
       bankName: bank_name,

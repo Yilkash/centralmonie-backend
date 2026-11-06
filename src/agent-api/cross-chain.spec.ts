@@ -179,3 +179,18 @@ describe('a Stellar receiver must be ready for USDC', () => {
     expect(unused).not.toHaveBeenCalled();
   });
 });
+
+describe('what a payer must send, on a network with eighteen decimals', () => {
+  it('rounds up into six decimals, so sending the figure shown is never too little', async () => {
+    const bnb = jest.fn().mockResolvedValue(reply(200, { quote: { depositAddress: '0xd', amountIn: '1052400000000000001' } }));
+    await expect(client(bnb).quote({ ...request, payFrom: 'bsc' })).resolves.toEqual({ depositAddress: '0xd', payInMinor: 1_052_401 });
+    const even = jest.fn().mockResolvedValue(reply(200, { quote: { depositAddress: '0xd', amountIn: '1052400000000000000' } }));
+    await expect(client(even).quote({ ...request, payFrom: 'bsc' })).resolves.toEqual({ depositAddress: '0xd', payInMinor: 1_052_400 });
+  });
+
+  it('pays from Tron in USDT, the only token there', async () => {
+    const fetchFn = jest.fn().mockResolvedValue(reply(200, goodQuote));
+    await client(fetchFn).quote({ ...request, payFrom: 'tron', payToken: 'USDT' });
+    expect(JSON.parse(fetchFn.mock.calls[0][1].body).originAsset).toBe(PAY_FROM.tron);
+  });
+});

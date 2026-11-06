@@ -11,8 +11,8 @@ import { AuditService } from '../ops/audit.service';
 import { AGENT_STATUSES_THAT_COUNT, GuardsService } from '../ops/guards.service';
 import { AgentPayout, BankLookup, ExchangeRates, NairaOnramp, PaymentProvider } from '../providers/providers';
 import { Chain } from '../chain/chain.service';
-import { isNearAccount } from '../chain/usdc-chains';
-import { CrossChain, PayFrom, PayToken, USDT_ON } from './cross-chain';
+import { ChainKey, isNearAccount, USDC_CHAINS } from '../chain/usdc-chains';
+import { CrossChain, PayFrom, PayToken, USDT_ON, USDT_ONLY } from './cross-chain';
 import { NearRelayer, relayProblem, SignedDelegate } from './near-relay';
 
 const QUOTE_LIFETIME_MS = 10 * 60_000;
@@ -124,8 +124,8 @@ export function paymentsToCsv(rows: AgentPayment[]): string {
 
 export function validRefundAddress(payFrom: PayFrom, address: string): boolean {
   if (payFrom === 'near') return /^[a-z0-9._-]{2,64}$/.test(address);
-  if (payFrom === 'solana') return /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(address);
-  return isAddress(address);
+  const chain = USDC_CHAINS[payFrom as ChainKey];
+  return chain ? chain.valid(address) : false;
 }
 
 /** Paying naira by bank transfer instead of crypto. Only for a receiver of USDC on Base, through a pay link. */
@@ -234,9 +234,11 @@ export class AgentApiService {
   }
 
   /** Reserves nothing and moves nothing. The agent sees the bank's name for the account before it commits. */
-  async quote(key: AgentKey, input: QuoteInput): Promise<AgentPayment> {
+  async quote(key: AgentKey, given: QuoteInput): Promise<AgentPayment> {
+    // Tron and TON have no USDC route, so a payer there pays in USDT without having to say so.
+    const input = USDT_ONLY.has(given.payFrom as PayFrom) ? { ...given, payToken: 'USDT' as const } : given;
     const amountKobo = input.amountNaira * 100;
-    if (input.payToken === 'USDT' && !USDT_ON[input.payFrom as PayFrom]) throw new AgentRefusal('token_unavailable', `USDT cannot be used from ${input.payFrom}. Use USDC, or pay from NEAR, Ethereum or Solana.`, 422);
+    if (input.payToken === 'USDT' && !USDT_ON[input.payFrom as PayFrom]) throw new AgentRefusal('token_unavailable', `USDT cannot be used from ${input.payFrom}. Use USDC, or pay from NEAR, Ethereum, Solana, BNB Chain, Tron or TON.`, 422);
     const naira = input.payFrom === NAIRA;
     if (naira) {
       // The partner sends USDC to one Base address. NEAR and other chains come later, through NEAR Intents.
