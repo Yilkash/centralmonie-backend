@@ -256,6 +256,47 @@ export const deposits = pgTable(
 export const nairaDepositStatus = pgEnum('naira_deposit_status', ['waiting', 'processing', 'completed', 'failed', 'expired', 'cancelled']);
 
 /** Naira a user is paying in to get USDC. The id is the reference the partner knows it by. */
+/**
+ * USDC or USDT sent from another network to a one-time NEAR Intents address, which delivers USDC on Base to the
+ * user's own wallet. 10kobo never holds it: a failed or late deposit goes back to the user's refund address.
+ */
+export const chainDeposits = pgTable(
+  'chain_deposits',
+  {
+    id: uuid('id').primaryKey(),
+    userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+    payFrom: text('pay_from').notNull(),
+    payToken: text('pay_token').notNull(),
+    /** What the user said they will send, in six decimals. */
+    amountMinor: bigint('amount_minor', { mode: 'number' }).notNull(),
+    /** What NEAR Intents quoted to arrive on Base, in USDC's six decimals. */
+    quotedMinor: bigint('quoted_minor', { mode: 'number' }).notNull(),
+    refundTo: text('refund_to').notNull(),
+    depositAddress: text('deposit_address').notNull(),
+    deadline: timestamp('deadline', { withTimezone: true }).notNull(),
+    /** waiting, moving, delivered, refunded, failed or expired. */
+    status: text('status').notNull().default('waiting'),
+    receivedMinor: bigint('received_minor', { mode: 'number' }),
+    transactions: jsonb('transactions').$type<string[]>().notNull().default([]),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [index('chain_deposits_user_idx').on(table.userId, table.createdAt), index('chain_deposits_status_idx').on(table.status)],
+);
+export type ChainDeposit = typeof chainDeposits.$inferSelect;
+
+/** Where a user wants refunds on each kind of wallet, so they type it once. "evm" covers every 0x network. */
+export const refundAddresses = pgTable(
+  'refund_addresses',
+  {
+    userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+    family: text('family').notNull(),
+    address: text('address').notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [primaryKey({ columns: [table.userId, table.family] })],
+);
+
 export const nairaDeposits = pgTable(
   'naira_deposits',
   {

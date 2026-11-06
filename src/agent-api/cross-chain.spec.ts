@@ -194,3 +194,20 @@ describe('what a payer must send, on a network with eighteen decimals', () => {
     expect(JSON.parse(fetchFn.mock.calls[0][1].body).originAsset).toBe(PAY_FROM.tron);
   });
 });
+
+describe('deposits from another network into a Base wallet', () => {
+  const deposit = { payFrom: 'bsc' as const, payToken: 'USDT' as const, amountMinor: 10_000_000, recipient: '0xwallet', refundTo: '0xmine', deadline: new Date('2026-11-06T12:00:00Z') };
+
+  it('asks for an exact input in the network\'s own decimals, delivering USDC on Base to the wallet', async () => {
+    const fetchFn = jest.fn().mockResolvedValue(reply(200, { quote: { depositAddress: '0xdep', amountOut: '9880000', timeEstimate: 60 } }));
+    await expect(client(fetchFn).depositToBase(deposit)).resolves.toEqual({ depositAddress: '0xdep', receiverMinor: 9_880_000, seconds: 60 });
+    expect(JSON.parse(fetchFn.mock.calls[0][1].body)).toMatchObject({
+      dry: false, swapType: 'EXACT_INPUT', originAsset: 'nep245:v2_1.omni.hot.tg:56_2CMMyVTGZkeyNZTSvS5sarzfir6g', destinationAsset: PAY_FROM.base,
+      amount: '10000000000000000000', recipient: '0xwallet', refundTo: '0xmine', refundType: 'ORIGIN_CHAIN',
+    });
+  });
+
+  it('refuses a quote with no address', async () => {
+    await expect(client(jest.fn().mockResolvedValue(reply(200, { quote: { amountOut: '1' } }))).depositToBase(deposit)).rejects.toThrow('unusable');
+  });
+});

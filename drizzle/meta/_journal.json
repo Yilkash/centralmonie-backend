@@ -190,6 +190,13 @@
       "when": 1793916917196,
       "tag": "0026_sudden_william_stryker",
       "breakpoints": true
+    },
+    {
+      "idx": 27,
+      "version": "7",
+      "when": 1793971412834,
+      "tag": "0027_bent_rage",
+      "breakpoints": true
     }
   ]
 }

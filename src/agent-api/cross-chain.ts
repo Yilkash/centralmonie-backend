@@ -72,6 +72,26 @@ export interface SendRequest {
   dry: boolean;
 }
 
+/** Money coming from another network into a user's own wallet as USDC on Base. */
+export interface DepositRequest {
+  payFrom: PayFrom;
+  payToken: PayToken;
+  /** What the user will send, in six decimals. */
+  amountMinor: number;
+  /** The user's own Base wallet. */
+  recipient: string;
+  /** The user's own address on the network they pay from. */
+  refundTo: string;
+  deadline: Date;
+}
+
+export interface DepositQuote {
+  depositAddress: string;
+  /** What should arrive on Base, in USDC's six decimals. */
+  receiverMinor: number;
+  seconds: number | null;
+}
+
 export interface SendQuote {
   depositAddress: string | null;
   receiverMinor: number;
@@ -107,6 +127,10 @@ export abstract class CrossChain {
   /** True only when NEAR itself says the account does not exist. Any doubt is false, and the route then decides. */
   async nearAccountMissing(_account: string): Promise<boolean> {
     return false;
+  }
+  /** A one-time address on another network that turns what is sent there into USDC in the user's Base wallet. */
+  async depositToBase(_request: DepositRequest): Promise<DepositQuote> {
+    throw new Error('Deposits from other networks are not available here');
   }
   /** A sentence when the receiver's account cannot take the token yet, checked before anything is sent. Null when fine or unsure. */
   async recipientProblem(_chain: string, _address: string): Promise<string | null> {
@@ -213,6 +237,33 @@ export class OneClickCrossChain extends CrossChain {
 
   priceCheck(request: CrossChainRequest): Promise<CrossChainQuote> {
     return this.ask(request, true);
+  }
+
+  /**
+   * Exact input: what the user sends is converted, and anything above the amount is converted too. Less than the
+   * amount, or too late, goes back to their refund address on that network.
+   */
+  override async depositToBase(request: DepositRequest): Promise<DepositQuote> {
+    const decimals = PAY_DECIMALS[request.payFrom] ?? 6;
+    const origin = request.payToken === 'USDT' ? USDT_ON[request.payFrom] : PAY_FROM[request.payFrom];
+    if (!origin) throw new Error('That token cannot be sent from there');
+    const answer = await this.call<{ quote?: { depositAddress?: string; amountOut?: string; timeEstimate?: number } }>('POST', '/v0/quote', {
+      dry: false,
+      swapType: 'EXACT_INPUT',
+      slippageTolerance: SEND_SLIPPAGE_BPS,
+      originAsset: origin,
+      depositType: 'ORIGIN_CHAIN',
+      destinationAsset: BASE_USDC,
+      amount: (BigInt(request.amountMinor) * 10n ** BigInt(Math.max(0, decimals - 6))).toString(),
+      refundTo: request.refundTo,
+      refundType: 'ORIGIN_CHAIN',
+      recipient: request.recipient,
+      recipientType: 'DESTINATION_CHAIN',
+      deadline: request.deadline.toISOString(),
+    });
+    const receiverMinor = inSixDecimals(answer.quote?.amountOut, 6);
+    if (receiverMinor === null || !answer.quote?.depositAddress) throw new Error('NEAR Intents gave an unusable quote');
+    return { depositAddress: answer.quote.depositAddress, receiverMinor, seconds: answer.quote.timeEstimate ?? null };
   }
 
   quote(request: CrossChainRequest): Promise<CrossChainQuote> {
@@ -335,6 +386,12 @@ export class SimulatedCrossChain extends CrossChain {
     const depositAddress = request.dry ? null : `0x${randomBytes(20).toString('hex')}`;
     if (depositAddress) this.checks.set(depositAddress, 0);
     return { depositAddress, receiverMinor: Math.floor(request.usdcMinor * 0.998), seconds: 40 };
+  }
+
+  override async depositToBase(request: DepositRequest): Promise<DepositQuote> {
+    const depositAddress = `0x${randomBytes(20).toString('hex')}`;
+    this.checks.set(depositAddress, 0);
+    return { depositAddress, receiverMinor: Math.floor(request.amountMinor * 0.995), seconds: 60 };
   }
 
   /** Waiting on the first check, delivered from the second. */
