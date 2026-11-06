@@ -45,6 +45,9 @@ export interface Receipt {
   note: string | null;
   completed_at: Date;
   tx_hash: string | null;
+  /** For USDC sent on to another network: what arrived there, and the transaction that delivered it. */
+  received?: string | null;
+  delivery_tx_hash?: string | null;
 }
 
 const mask = (value: string, keep = 4) => `****${value.slice(-keep)}`;
@@ -341,12 +344,17 @@ export class WalletService {
     const [payment] = await this.db.select().from(payments).where(and(eq(payments.id, id), eq(payments.userId, userId)));
     if (!payment || payment.status !== 'completed' || payment.providerReference?.startsWith('simulated-')) return null;
     const usdc = payment.route === 'usdc';
+    const wallet = (payment.destination as { walletAddress?: string | null } | null)?.walletAddress ?? null;
+    const chain = usdc ? chainOfWallet(payment.destination as { walletAddress?: string; network?: string | null }) : null;
+    const elsewhere = chain !== null && chain.key !== 'base';
+    // A wallet saved under its own address would say the address twice, once cut short, so it is said once in full.
+    const namedByAddress = Boolean(wallet && payment.recipientName === wallet);
     return {
       reference: payment.id,
       kind: ROUTE_LABEL[payment.route] ?? 'Payment',
       title: 'Payment successful',
       recipient: payment.recipientName,
-      recipient_detail: maskedDestination(payment.destination),
+      recipient_detail: namedByAddress ? null : maskedDestination(payment.destination),
       network: usdc ? (crossChainName(payment.destination) ?? this.chain.networkName()) : null,
       amount: usdc ? formatUsdc(payment.usdcMinor) : formatNaira(payment.amountKobo),
       second_amount: usdc ? null : formatUsdc(payment.usdcMinor),
@@ -354,6 +362,8 @@ export class WalletService {
       note: payment.route === 'bank' ? 'Naira shown is the quoted amount. The exact figure is on the bank alert.' : null,
       completed_at: payment.createdAt,
       tx_hash: payment.fundingTxHash,
+      received: elsewhere && payment.deliveredMinor ? formatUsdc(payment.deliveredMinor).replace('USDC', chain!.token) : null,
+      delivery_tx_hash: elsewhere && payment.providerReference && payment.providerReference !== payment.fundingAddress ? payment.providerReference : null,
     };
   }
 
