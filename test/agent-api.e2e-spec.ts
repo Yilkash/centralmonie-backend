@@ -11,6 +11,8 @@ import { CrossChain, CrossChainRequest, CrossChainState } from '../src/agent-api
 import { configureApp, createAdapter } from '../src/app';
 import { AppModule } from '../src/app.module';
 import { applyMigrations } from '../src/database/migrate';
+import { Chain } from '../src/chain/chain.service';
+import { Transfer } from '../src/chain/chain';
 import { SwitchesService } from '../src/ops/switches.service';
 import { WalletService } from '../src/wallet/wallet.service';
 import { AgentPayout, BankLookup, ExchangeRates, NairaOnramp, OnrampState, PaymentProvider, PaymentRequest, PaymentState } from '../src/providers/providers';
@@ -114,6 +116,10 @@ describe('Agent API', () => {
   const banks = new FakeBanks();
   const relayer = new FakeRelayer();
   const onramp = new FakeOnramp();
+  // USDC that reached receivers on Base, as the chain reader would find it.
+  let deliveries: Transfer[] = [];
+  const delivered = (to: string, value: bigint, txHash: string) =>
+    deliveries.push({ txHash, logIndex: 0, block: 1000, from: '0xf70da97812cb96acdf810712aa562db8dfa3dbef', to, value } as Transfer);
   let key: string;
 
   const call = (method: 'GET' | 'POST', url: string, body?: object, token: string | null = key) =>
@@ -138,6 +144,11 @@ describe('Agent API', () => {
     await app.init();
     await app.getHttpAdapter().getInstance().ready();
     agents = app.get(AgentApiService, { strict: false });
+    const chain = app.get(Chain, { strict: false });
+    jest.spyOn(chain, 'latestBlock').mockImplementation(async () => 1000);
+    jest.spyOn(chain, 'transfers').mockImplementation(async (filter, from, to) =>
+      deliveries.filter((item) => item.block >= from && item.block <= to && (filter.to ?? []).some((address) => address.toLowerCase() === item.to.toLowerCase())),
+    );
   });
 
   beforeEach(async () => {
@@ -154,6 +165,8 @@ describe('Agent API', () => {
     onramp.state = 'waiting';
     onramp.orders = [];
     onramp.failNext = 0;
+    deliveries = [];
+    (agents as unknown as { searchedTo: Map<string, number> }).searchedTo.clear();
     onramp.expiresAt = () => new Date(Date.now() + 30 * 60_000).toISOString();
     banks.blips = 0;
     key = (await agents.createKey('Test agent', 20_000)).key;
@@ -818,8 +831,12 @@ describe('Agent API', () => {
       onramp.state = 'processing';
       expect((await open(link.id)).json().payment).toMatchObject({ status: 'processing', naira_account: null });
       onramp.state = 'completed';
+      // The partner's word is not enough: until the USDC shows up on Base, it is still on its way.
+      expect((await open(link.id)).json()).toMatchObject({ paid: false, payment: { status: 'processing' } });
+      // A little under the quote, as the first real payment was (1.157101 for 1.157106).
+      delivered(WALLET, 3_602_300n, '0x' + 'ab'.repeat(32));
       const paid = (await open(link.id)).json();
-      expect(paid).toMatchObject({ paid: true, open: false, payment: { status: 'paid' } });
+      expect(paid).toMatchObject({ paid: true, open: false, payment: { status: 'paid', links: [{ label: 'Delivery on Base', url: `https://basescan.org/tx/0x${'ab'.repeat(32)}` }] } });
       expect((await payNaira(link.id)).json().code).toBe('already_paid');
     });
 
@@ -873,6 +890,34 @@ describe('Agent API', () => {
       expect(failed.statusCode).toBe(503);
       expect(failed.json()).toMatchObject({ code: 'setup_failed', message: 'We could not set up a bank transfer just now. Nothing was paid. Please try again.' });
       expect((await payNaira(link.id)).json().payment.status).toBe('awaiting_deposit');
+    });
+
+    it('does not count a transfer that is too small, or one already counted for another payment', async () => {
+      const first = (await payNaira((await usdcInvoice()).id)).json().payment;
+      const second = (await payNaira((await usdcInvoice()).id, '10.4.4.4')).json().payment;
+      onramp.state = 'completed';
+      delivered(WALLET, 3_602_305n, '0x' + '01'.repeat(32));
+      await agents.reconcile();
+      const rows = async () => (await pool.query('select id, status, transactions from agent_payments where id = any($1) order by created_at', [[first.id, second.id]])).rows;
+      // One transfer pays one payment, never two.
+      expect((await rows()).map((row) => row.status).sort()).toEqual(['paid', 'processing']);
+      delivered(WALLET, 3_000_000n, '0x' + '02'.repeat(32));
+      await agents.reconcile();
+      expect((await rows()).map((row) => row.status).sort()).toEqual(['paid', 'processing']);
+      delivered(WALLET, 3_590_000n, '0x' + '03'.repeat(32));
+      await agents.reconcile();
+      expect((await rows()).map((row) => row.transactions[0]).sort()).toEqual(['0x' + '01'.repeat(32), '0x' + '03'.repeat(32)]);
+    });
+
+    it('asks a person to look when the partner says sent but no USDC shows up on Base', async () => {
+      const payment = (await payNaira((await usdcInvoice()).id)).json().payment;
+      onramp.state = 'completed';
+      await agents.reconcile();
+      expect((await pool.query('select status from agent_payments where id = $1', [payment.id])).rows[0].status).toBe('processing');
+      await pool.query(`update agent_payments set updated_at = now() - interval '21 minutes' where id = $1`, [payment.id]);
+      await agents.reconcile();
+      const row = (await pool.query('select status, failure_reason from agent_payments where id = $1', [payment.id])).rows[0];
+      expect(row).toMatchObject({ status: 'needs_support', failure_reason: expect.stringContaining('has not shown up on Base') });
     });
 
     it('hands a failed transfer to a person instead of guessing', async () => {

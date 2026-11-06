@@ -10,6 +10,7 @@ import { formatNaira, koboToUsdcMinor } from '../money/money';
 import { AuditService } from '../ops/audit.service';
 import { AGENT_STATUSES_THAT_COUNT, GuardsService } from '../ops/guards.service';
 import { AgentPayout, BankLookup, ExchangeRates, NairaOnramp, PaymentProvider } from '../providers/providers';
+import { Chain } from '../chain/chain.service';
 import { isNearAccount } from '../chain/usdc-chains';
 import { CrossChain, PayFrom, PayToken, USDT_ON } from './cross-chain';
 import { NearRelayer, relayProblem, SignedDelegate } from './near-relay';
@@ -28,6 +29,18 @@ const KEEP_CHECKING_EXPIRED_MS = 24 * 60 * 60_000;
 const PAYING_TOO_LONG_MS = 24 * 60 * 60_000;
 /** Longer than the slowest setup can take (about 144 seconds), so this cannot fire on one still running. */
 const STUCK_CREATING_MS = 5 * 60_000;
+/**
+ * A naira payment is only paid once its USDC is seen on Base: the partner's word "completed" came a block before the
+ * transfer in the first real test, and its reply repeats the quoted amount rather than what was sent.
+ */
+const NAIRA_DELIVERY_WAIT_MS = 20 * 60_000;
+/** The rate can move between the quote and the transfer, so a little less than quoted still counts. */
+const NAIRA_SHORTFALL_ALLOWED = 0.02;
+const BASE_BLOCK_MS = 2_000;
+/** How far back from the start of a payment its delivery is searched for, against clocks that disagree. */
+const DELIVERY_SEARCH_MARGIN_BLOCKS = 150;
+/** Longest stretch searched in one check, so a long-forgotten payment cannot start a huge search. */
+const DELIVERY_SEARCH_MAX_BLOCKS = 6 * 60 * 30;
 /** A ceiling on what the relayer can spend in a day, whoever is asking. */
 const RELAYS_PER_DAY = 100;
 const MAX_QUOTES_A_DAY = 200;
@@ -143,6 +156,8 @@ export class AgentApiService {
   private readonly ipWindows = new Map<string, { until: number; count: number }>();
   /** When each payment was last asked about, so a page checking every few seconds does not ask the partners each time. */
   private readonly lastChecked = new Map<string, number>();
+  /** Up to which block each naira payment's delivery has been searched for, so a repeat check reads only new blocks. */
+  private readonly searchedTo = new Map<string, number>();
 
   constructor(
     @Inject(DATABASE) private readonly db: Database,
@@ -156,6 +171,7 @@ export class AgentApiService {
     private readonly audit: AuditService,
     @Inject(NearRelayer) private readonly relayer: NearRelayer | null,
     @Inject(NairaOnramp) private readonly onramp: NairaOnramp | null,
+    private readonly chain: Chain,
   ) {}
 
   get open(): boolean {
@@ -556,12 +572,54 @@ export class AgentApiService {
       case 'processing':
         return payment.status === 'processing' ? null : { status: 'processing', failureReason: null };
       case 'completed':
-        return { status: 'paid', paidAt: new Date(), failureReason: null };
+        return this.nairaDelivery(payment);
       case 'failed':
         return { status: 'needs_support', failureReason: 'The bank transfer did not complete. A person is checking it with our partner. Do not pay again.' };
       default:
         return null;
     }
+  }
+
+  /**
+   * Paid only when a USDC transfer to the receiver shows up on Base: after the payment started, close to the amount
+   * promised, and not already counted for another payment. Until then the payer sees "on its way", and a person is
+   * asked to look if it never shows up.
+   */
+  private async nairaDelivery(payment: AgentPayment): Promise<Partial<AgentPayment> | null> {
+    const waiting = (): Partial<AgentPayment> | null => {
+      if (payment.status === 'processing' && Date.now() - payment.updatedAt.getTime() > NAIRA_DELIVERY_WAIT_MS) {
+        return { status: 'needs_support', failureReason: 'Our partner says the USDC was sent, but it has not shown up on Base. A person is checking it. Do not pay again.' };
+      }
+      return payment.status === 'processing' ? null : { status: 'processing', failureReason: null };
+    };
+    const receiver = payment.deliverTo;
+    if (!receiver || !isAddress(receiver)) return waiting();
+    try {
+      const latest = await this.chain.latestBlock();
+      const started = (payment.acceptedAt ?? payment.createdAt).getTime();
+      const startBlock = Math.max(0, latest - Math.ceil((Date.now() - started) / BASE_BLOCK_MS) - DELIVERY_SEARCH_MARGIN_BLOCKS);
+      const from = Math.max(startBlock, this.searchedTo.get(payment.id) ?? 0, latest - DELIVERY_SEARCH_MAX_BLOCKS);
+      const transfers = from <= latest ? await this.chain.transfers({ to: [receiver] }, from, latest) : [];
+      // A few blocks are read again next time, in case the node had not seen the newest ones yet.
+      this.searchedTo.set(payment.id, Math.max(startBlock, latest - 5));
+      const lowest = BigInt(Math.floor(payment.usdcMinor * (1 - NAIRA_SHORTFALL_ALLOWED)));
+      const highest = BigInt(Math.ceil(payment.usdcMinor * (1 + NAIRA_SHORTFALL_ALLOWED)));
+      for (const transfer of transfers.sort((a, b) => a.block - b.block || a.logIndex - b.logIndex)) {
+        if (transfer.value < lowest || transfer.value > highest) continue;
+        const [claimed] = await this.db
+          .select({ id: agentPayments.id })
+          .from(agentPayments)
+          .where(and(sql`${agentPayments.transactions} @> ${JSON.stringify([transfer.txHash])}::jsonb`, sql`${agentPayments.id} <> ${payment.id}`))
+          .limit(1);
+        if (claimed) continue;
+        this.searchedTo.delete(payment.id);
+        return { status: 'paid', paidAt: new Date(), failureReason: null, transactions: [transfer.txHash] };
+      }
+    } catch (error) {
+      this.logger.warn(`naira payment ${payment.id}: could not read Base: ${(error as Error).message.slice(0, 200)}`);
+      return payment.status === 'processing' ? null : { status: 'processing', failureReason: null };
+    }
+    return waiting();
   }
 
   private async nextState(payment: AgentPayment): Promise<Partial<AgentPayment> | null> {
