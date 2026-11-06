@@ -67,6 +67,23 @@ describe('the Send page', () => {
     expect((await call('GET', '/v1/send/options', 'bob')).json().recipients).toEqual([]);
   });
 
+  it('puts the most recently paid recipients first, then the rest by name', async () => {
+    const add = async (name: string, accountNumber: string) => {
+      const contact = await contacts.propose(alice, name, [], { kind: 'bank', bankName: 'Access', accountNumber });
+      await contacts.confirm(alice, contact.id);
+      return contact.destinations[0]!;
+    };
+    const zed = await add('Zed', '0123454821');
+    await add('Amaka', '0123454822');
+    const bola = await add('Bola', '0123454823');
+    const paid = (destination: { id: string }, minutesAgo: number) =>
+      pool.query(`insert into payments (user_id, route, amount_kobo, usdc_minor, destination, created_at) values ($1, 'bank', 100000, 700000, $2, now() - ($3 || ' minutes')::interval)`, [alice, JSON.stringify(destination), String(minutesAgo)]);
+    await paid(zed, 60);
+    await paid(bola, 5);
+    const names = (await call('GET', '/v1/send/options', 'alice')).json().recipients.map((item: { name: string }) => item.name);
+    expect(names).toEqual(['Bola', 'Zed', 'Amaka']);
+  });
+
   it('prepares a bank transfer to a saved recipient, for the same approval card as the chat', async () => {
     const mother = await contacts.propose(alice, 'Mother', [], { kind: 'bank', bankName: 'Access', accountNumber: '0123454821' });
     await contacts.confirm(alice, mother.id);

@@ -1,4 +1,7 @@
-import { Body, Controller, Get, HttpCode, Post, Query, UnprocessableEntityException, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, Inject, Post, Query, UnprocessableEntityException, UseGuards } from '@nestjs/common';
+import { and, eq, sql } from 'drizzle-orm';
+import { DATABASE, Database } from '../database/database.module';
+import { payments } from '../database/schema';
 import { z } from 'zod';
 import { AgentRefusal } from '../agent-api/agent-api.service';
 import { AuthGuard } from '../auth/auth.guard';
@@ -40,6 +43,7 @@ const sendBody = z.object({
 @UseGuards(AuthGuard)
 export class SendController {
   constructor(
+    @Inject(DATABASE) private readonly db: Database,
     private readonly contacts: ContactsService,
     private readonly plans: PlansService,
     private readonly dataPlans: DataPlans,
@@ -49,16 +53,26 @@ export class SendController {
   @Get('options')
   async options(@CurrentUser() user: User) {
     const saved = await this.contacts.listConfirmed(user.id);
+    // Most recently paid first, so the people paid most often are at the top however many are saved.
+    const paid = await this.db
+      .select({ id: sql<string>`${payments.destination}->>'id'`, at: sql<Date>`max(${payments.createdAt})` })
+      .from(payments)
+      .where(and(eq(payments.userId, user.id), sql`${payments.destination}->>'id' is not null`))
+      .groupBy(sql`${payments.destination}->>'id'`);
+    const lastPaid = new Map(paid.map((row) => [row.id, new Date(row.at).toISOString()]));
     return {
-      recipients: saved.flatMap((contact) =>
+      recipients: saved
+        .flatMap((contact) =>
         contact.destinations.map((destination) => ({
+          last_paid_at: lastPaid.get(destination.id) ?? null,
           destination_id: destination.id,
           name: contact.name,
           kind: destination.kind,
           detail: describeDestination(destination),
           network: destination.kind === 'wallet' ? (USDC_CHAINS[(destination.network ?? 'base') as keyof typeof USDC_CHAINS]?.name ?? 'Base') : destination.kind === 'phone' ? destination.network : null,
         })),
-      ),
+      )
+        .sort((a, b) => (b.last_paid_at ?? '').localeCompare(a.last_paid_at ?? '') || a.name.localeCompare(b.name)),
       networks: Object.values(USDC_CHAINS).map((chain) => ({ id: chain.key, name: chain.name, token: chain.token })),
       phone_networks: PHONE_NETWORKS,
     };
