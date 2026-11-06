@@ -40,6 +40,8 @@ export interface CrossChainQuote {
 export interface SendRequest {
   usdcMinor: number;
   destinationAsset: string;
+  /** The delivered token's decimals, which the route's raw amounts are written in. Six when left out. */
+  destinationDecimals?: number;
   recipient: string;
   refundTo: string;
   deadline: Date;
@@ -82,6 +84,10 @@ export abstract class CrossChain {
   async nearAccountMissing(_account: string): Promise<boolean> {
     return false;
   }
+  /** A sentence when the receiver's account cannot take the token yet, checked before anything is sent. Null when fine or unsure. */
+  async recipientProblem(_chain: string, _address: string): Promise<string | null> {
+    return null;
+  }
 }
 
 const STATES: Record<string, CrossChainStatus> = {
@@ -93,6 +99,30 @@ const STATES: Record<string, CrossChainStatus> = {
   REFUNDED: 'refunded',
   FAILED: 'failed',
 };
+
+/**
+ * A raw token amount in USDC's own six decimals, rounded down, so 0.5 USDC on Stellar (5000000 at seven decimals) and
+ * 0.5 USDC on BNB Chain (at eighteen) both read as 500000. Null when it is not a whole positive number.
+ */
+export function inSixDecimals(raw: unknown, decimals: number): number | null {
+  if (typeof raw !== 'string' && typeof raw !== 'number') return null;
+  const text = String(raw);
+  if (!/^\d+$/.test(text)) return null;
+  const value = decimals >= 6 ? BigInt(text) / 10n ** BigInt(decimals - 6) : BigInt(text) * 10n ** BigInt(6 - decimals);
+  return value > 0n && value <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(value) : null;
+}
+
+/** NEAR Intents' "1.234567" written out, in six decimals. Status replies give this, and it does not need the chain's decimals. */
+export function formattedInSixDecimals(formatted: unknown): number | null {
+  if (typeof formatted !== 'string' || !/^\d+(\.\d+)?$/.test(formatted)) return null;
+  const [whole, fraction = ''] = formatted.split('.');
+  const value = BigInt(whole!) * 1_000_000n + BigInt((fraction + '000000').slice(0, 6));
+  return value > 0n && value <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(value) : null;
+}
+
+const STELLAR_HORIZON = 'https://horizon.stellar.org';
+/** Circle's USDC on Stellar, the one NEAR Intents delivers. */
+const STELLAR_USDC_ISSUER = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN';
 
 const ATTEMPTS = 4;
 const BASE_USDC = PAY_FROM.base;
@@ -131,6 +161,24 @@ export class OneClickCrossChain extends CrossChain {
     }
   }
 
+  /**
+   * Stellar only takes USDC into an account that exists and has chosen to hold Circle's USDC (a trustline). Without
+   * one the delivery fails and comes back less fees, so it is caught first. Any doubt lets the route decide.
+   */
+  override async recipientProblem(chain: string, address: string): Promise<string | null> {
+    if (chain !== 'stellar') return null;
+    try {
+      const response = await this.fetchFn(`${STELLAR_HORIZON}/accounts/${encodeURIComponent(address)}`, { signal: AbortSignal.timeout(8000) });
+      if (response.status === 404) return 'That Stellar account has not been opened yet, so it cannot receive USDC. Nothing was sent.';
+      if (!response.ok) return null;
+      const account = (await response.json()) as { balances?: { asset_code?: string; asset_issuer?: string }[] };
+      const holdsUsdc = (account.balances ?? []).some((line) => line.asset_code === 'USDC' && line.asset_issuer === STELLAR_USDC_ISSUER);
+      return holdsUsdc ? null : 'That Stellar account has not added USDC yet. They need to add USDC (a trustline) in their wallet first. Nothing was sent.';
+    } catch {
+      return null;
+    }
+  }
+
   priceCheck(request: CrossChainRequest): Promise<CrossChainQuote> {
     return this.ask(request, true);
   }
@@ -154,8 +202,8 @@ export class OneClickCrossChain extends CrossChain {
       recipientType: 'DESTINATION_CHAIN',
       deadline: request.deadline.toISOString(),
     });
-    const receiverMinor = Number(answer.quote?.amountOut);
-    if (!Number.isSafeInteger(receiverMinor) || receiverMinor <= 0 || receiverMinor > request.usdcMinor) throw new Error('NEAR Intents gave an unusable amount');
+    const receiverMinor = inSixDecimals(answer.quote?.amountOut, request.destinationDecimals ?? 6);
+    if (receiverMinor === null || receiverMinor > request.usdcMinor) throw new Error('NEAR Intents gave an unusable amount');
     if (!request.dry && !answer.quote?.depositAddress) throw new Error('NEAR Intents gave no deposit address');
     return { depositAddress: answer.quote?.depositAddress ?? null, receiverMinor, seconds: answer.quote?.timeEstimate ?? null };
   }
@@ -169,12 +217,14 @@ export class OneClickCrossChain extends CrossChain {
     if (!status) throw new Error(`Unknown NEAR Intents status: ${String(answer.status).slice(0, 40)}`);
     const details = answer.swapDetails ?? {};
     const hashes = (name: string) => (Array.isArray(details[name]) ? (details[name] as unknown[]).map((item) => hashOf(item)) : []);
-    const received = Number(details.amountOut);
+    // The formatted figure is already in whole tokens, so it reads the same at any number of decimals.
+    const raw = Number(details.amountOut);
+    const received = formattedInSixDecimals(details.amountOutFormatted) ?? (Number.isSafeInteger(raw) && raw > 0 ? raw : null);
     return {
       status,
       transactions: [...hashes('originChainTxHashes'), ...hashes('nearTxHashes'), ...hashes('destinationChainTxHashes')].filter(Boolean),
       destinationTx: hashes('destinationChainTxHashes').filter(Boolean).at(-1) ?? null,
-      receivedMinor: Number.isSafeInteger(received) && received > 0 ? received : null,
+      receivedMinor: received,
     };
   }
 

@@ -144,7 +144,7 @@ export class PaymentEngine {
       if (moved.length > 0) await this.notifications.notify(payment.userId, text);
     };
     if (state.status === 'delivered') {
-      const received = state.receivedMinor ? `${(state.receivedMinor / 1_000_000).toFixed(2)} USDC` : formatUsdc(payment.usdcMinor);
+      const received = state.receivedMinor ? `${(state.receivedMinor / 1_000_000).toFixed(2)} ${chain.token}` : formatUsdc(payment.usdcMinor);
       await closed({ status: 'completed', providerReference: state.destinationTx ?? state.transactions.at(-1) ?? payment.fundingAddress, deliveredMinor: state.receivedMinor ?? null }, `${received} reached ${name} on ${chain.name}.`);
     } else if (state.status === 'refunded') {
       await closed({ status: 'returned', failureReason: `It could not be delivered on ${chain.name}.` }, `Your payment to ${name} on ${chain.name} could not be delivered, so your USDC was sent back to your wallet, less a small fee.`);

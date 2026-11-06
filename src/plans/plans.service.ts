@@ -151,12 +151,14 @@ export class PlansService {
         if (this.onChain) addressCheck = await checkAddress(this.chain, destination.walletAddress);
       } else {
         if (await this.switches.isPaused('usdc_other_chains')) throw new PlanRefused(`Sending to ${chain.name} is paused for the moment. Nothing was sent.`);
+        const unready = await this.crossChain.recipientProblem(chain.key, destination.walletAddress);
+        if (unready) throw new PlanRefused(unready);
         const priced = await this.crossChain
-          .sendFromBase({ usdcMinor, destinationAsset: chain.assetId, recipient: destination.walletAddress, refundTo: owner?.wallet ?? this.chain.usdcAddress(), deadline: new Date(Date.now() + CROSS_CHAIN_ROUTE_MS), dry: true })
+          .sendFromBase({ usdcMinor, destinationAsset: chain.assetId, destinationDecimals: chain.decimals, recipient: destination.walletAddress, refundTo: owner?.wallet ?? this.chain.usdcAddress(), deadline: new Date(Date.now() + CROSS_CHAIN_ROUTE_MS), dry: true })
           .catch((error: unknown) => {
             throw new PlanRefused(routeProblem(error, chain.name));
           });
-        delivery = { chain: chain.key, name: chain.name, receiverMinor: priced.receiverMinor, seconds: priced.seconds };
+        delivery = { chain: chain.key, name: chain.name, receiverMinor: priced.receiverMinor, seconds: priced.seconds, token: chain.token, caution: chain.caution ?? null };
       }
     }
 
@@ -296,7 +298,7 @@ export class PlansService {
         // The user pays on Base. NEAR Intents delivers on the other chain, and refunds this wallet if it cannot.
         if (await this.switches.isPaused('usdc_other_chains')) throw new PlanRefused(`Sending to ${chain.name} is paused for the moment. Nothing was sent.`);
         const route = await this.crossChain
-          .sendFromBase({ usdcMinor: item.usdcMinor, destinationAsset: chain.assetId, recipient: to, refundTo: user.walletAddress, deadline: new Date(Date.now() + CROSS_CHAIN_ROUTE_MS), dry: false })
+          .sendFromBase({ usdcMinor: item.usdcMinor, destinationAsset: chain.assetId, destinationDecimals: chain.decimals, recipient: to, refundTo: user.walletAddress, deadline: new Date(Date.now() + CROSS_CHAIN_ROUTE_MS), dry: false })
           .catch((error: unknown) => {
             throw new PlanRefused(routeProblem(error, chain.name));
           });

@@ -136,3 +136,46 @@ describe('checking a NEAR account exists', () => {
     expect(fetchFn).not.toHaveBeenCalled();
   });
 });
+
+describe('sending to networks whose tokens use other decimals', () => {
+  const send = (destinationDecimals: number) => ({ usdcMinor: 500_000, destinationAsset: 'asset', destinationDecimals, recipient: 'someone', refundTo: '0xwallet', deadline: new Date('2026-11-06T00:00:00Z'), dry: true });
+
+  it('reads 0.5 USDC on Stellar (seven decimals) and on BNB Chain (eighteen) as 0.5 USDC', async () => {
+    const stellar = jest.fn().mockResolvedValue(reply(200, { quote: { amountOut: '4798000', timeEstimate: 50 } }));
+    await expect(client(stellar).sendFromBase(send(7))).resolves.toMatchObject({ receiverMinor: 479_800 });
+    const bnb = jest.fn().mockResolvedValue(reply(200, { quote: { amountOut: '479812345678901234', timeEstimate: 20 } }));
+    await expect(client(bnb).sendFromBase(send(18))).resolves.toMatchObject({ receiverMinor: 479_812 });
+    // Read as six decimals, the Stellar figure would look like more than was sent, and is refused.
+    await expect(client(jest.fn().mockResolvedValue(reply(200, { quote: { amountOut: '4798000' } }))).sendFromBase(send(6))).rejects.toThrow('unusable');
+  });
+
+  it('reads what arrived from the formatted figure, which is the same at any decimals', async () => {
+    const fetchFn = jest.fn().mockResolvedValue(reply(200, { status: 'SUCCESS', swapDetails: { amountOut: '4798000', amountOutFormatted: '0.4798', destinationChainTxHashes: [{ hash: 'abc' }] } }));
+    await expect(client(fetchFn).status('0xdeposit')).resolves.toMatchObject({ status: 'delivered', receivedMinor: 479_800 });
+  });
+});
+
+describe('a Stellar receiver must be ready for USDC', () => {
+  const horizon = (status: number, body: unknown) => jest.fn().mockResolvedValue(reply(status, body));
+  const ISSUER = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN';
+  const ADDRESS = 'GAZ6GHSFCKVVCOECNRJ7XKKP3KPSJ24ZGHJNLF3MPMOYOG2RXFU2Z6OB';
+
+  it('is fine with an account that holds Circle USDC', async () => {
+    const fetchFn = horizon(200, { balances: [{ asset_type: 'native', balance: '5' }, { asset_code: 'USDC', asset_issuer: ISSUER, balance: '0' }] });
+    await expect(client(fetchFn).recipientProblem('stellar', ADDRESS)).resolves.toBeNull();
+    expect(fetchFn.mock.calls[0][0]).toBe(`https://horizon.stellar.org/accounts/${ADDRESS}`);
+  });
+
+  it('stops an account with no USDC trustline, one holding a look-alike USDC, and one never opened', async () => {
+    await expect(client(horizon(200, { balances: [{ asset_type: 'native', balance: '5' }] })).recipientProblem('stellar', ADDRESS)).resolves.toContain('has not added USDC');
+    await expect(client(horizon(200, { balances: [{ asset_code: 'USDC', asset_issuer: 'GFAKEISSUER' }] })).recipientProblem('stellar', ADDRESS)).resolves.toContain('has not added USDC');
+    await expect(client(horizon(404, { title: 'Resource Missing' })).recipientProblem('stellar', ADDRESS)).resolves.toContain('not been opened');
+  });
+
+  it('lets the route decide when Stellar cannot be reached, and never asks for other networks', async () => {
+    await expect(client(jest.fn().mockRejectedValue(new Error('down'))).recipientProblem('stellar', ADDRESS)).resolves.toBeNull();
+    const unused = jest.fn();
+    await expect(client(unused).recipientProblem('tron', 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t')).resolves.toBeNull();
+    expect(unused).not.toHaveBeenCalled();
+  });
+});

@@ -50,7 +50,8 @@ describe('choosing a chain', () => {
   it('understands the usual names, and nothing else', () => {
     expect(chainNamed('Arb')?.key).toBe('arbitrum');
     expect(chainNamed(' MATIC ')?.key).toBe('polygon');
-    expect(chainNamed('tron')).toBeNull();
+    expect(chainNamed('tron')?.key).toBe('tron');
+    expect(chainNamed('bitcoin')).toBeNull();
     expect(chainNamed(null)).toBeNull();
   });
 

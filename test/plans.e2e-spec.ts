@@ -225,6 +225,8 @@ describe('plans and contacts', () => {
       ['a Solana address', '9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM', null, 'Solana'],
       ['a 0x address on a named chain', '0x70997970C51812dc3A010C7d01b50e0d17dc79C8', 'Arbitrum', 'Arbitrum'],
       ['the short name of a chain', '0x70997970C51812dc3A010C7d01b50e0d17dc79C8', 'matic', 'Polygon'],
+      ['a 0x address on BNB Chain, named as people do', '0x70997970C51812dc3A010C7d01b50e0d17dc79C8', 'BEP20', 'BNB Chain'],
+      ['a Sui address, once the network is named', '0x' + 'ab'.repeat(32), 'Sui', 'Sui'],
     ])('prices %s, and shows the chain and what the receiver gets', async (_name, walletAddress, chain, network) => {
       const contact = await contacts.propose(alice, 'Ada', [], { kind: 'wallet', walletAddress, chain });
       await contacts.confirm(alice, contact.id);
@@ -242,7 +244,11 @@ describe('plans and contacts', () => {
     });
 
     it.each([
-      ['a chain not offered', '0x70997970C51812dc3A010C7d01b50e0d17dc79C8', 'Tron', 'cannot send USDC to Tron'],
+      ['a chain not offered', '0x70997970C51812dc3A010C7d01b50e0d17dc79C8', 'Bitcoin', 'cannot send USDC to Bitcoin'],
+      ['a 0x address on Tron', '0x70997970C51812dc3A010C7d01b50e0d17dc79C8', 'Tron', 'not a valid Tron address'],
+      ['a Stellar address with a typo', 'GAZ6GHSFCKVVCOECNRJ7XKKP3KPSJ24ZGHJNLF3MPMOYOG2RXFU2Z6Q5', 'Stellar', 'not a valid Stellar address'],
+      ['a Sui or Aptos address with no network', '0x' + 'ab'.repeat(32), null, 'Sui or Aptos'],
+      ['USDT itself on Tron', 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t', null, 'token contract on Tron'],
       ['a NEAR name on another chain', 'ada.near', 'Arbitrum', 'a NEAR address'],
       ['a Solana address on another chain', '9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM', 'Polygon', 'a Solana address'],
       ['a 0x address on Solana', '0x70997970C51812dc3A010C7d01b50e0d17dc79C8', 'Solana', 'not a valid Solana address'],
@@ -250,6 +256,19 @@ describe('plans and contacts', () => {
       ['USDC itself on Arbitrum', '0xaf88d065e77c8cC2239327C5EDb3A432268e5831', 'Arbitrum', 'USDC token contract on Arbitrum'],
     ])('refuses %s', async (_name, walletAddress, chain, message) => {
       await expect(contacts.propose(alice, 'X', [], { kind: 'wallet', walletAddress, chain })).rejects.toThrow(message);
+    });
+
+    it.each([
+      ['Stellar', 'GAZ6GHSFCKVVCOECNRJ7XKKP3KPSJ24ZGHJNLF3MPMOYOG2RXFU2Z6OB', 'USDC', 'personal wallet'],
+      ['Tron', 'TJRabPrwbZy45sbavfcjinPJC18kjpRTv8', 'USDT', 'gets USDT'],
+      ['TON', 'UQABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4fIKLE', 'USDT', 'personal wallet'],
+    ])('works out %s from the address alone, names the token received and warns about its catch', async (network, walletAddress, token, caution) => {
+      const contact = await contacts.propose(alice, 'Ada', [], { kind: 'wallet', walletAddress });
+      await contacts.confirm(alice, contact.id);
+      const plan = await plans.propose(alice, [{ route: 'usdc', destinationId: contact.destinations[0]!.id, amountNaira: null, amountUsdc: '5', dataPlanId: null }]);
+      const shown = presentPlan(plan).items[0]!;
+      expect(shown).toMatchObject({ recipient_detail: walletAddress, network, receiver_gets: `4.99 ${token}`, receiver_token: token });
+      expect(shown.delivery_caution).toContain(caution);
     });
 
     it('refuses a schedule to another chain, for now', async () => {
@@ -262,7 +281,7 @@ describe('plans and contacts', () => {
     it('says what is wrong with a mistyped wallet address', async () => {
       const mistyped = '0xe1a9cdb2907134c35E8d055DD72605331f4E642d';
       await expect(contacts.propose(alice, 'Typo', [], { kind: 'wallet', walletAddress: mistyped })).rejects.toThrow('mistake');
-      await expect(contacts.propose(alice, 'Tron', [], { kind: 'wallet', walletAddress: 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t' })).rejects.toThrow('not a valid Base address');
+      await expect(contacts.propose(alice, 'Bad', [], { kind: 'wallet', walletAddress: '0x70997970C51812dc3A010C7d01b50e0d17dc79' })).rejects.toThrow('not a valid Base address');
     });
 
     it('prices a mixed plan, taking the data price from the catalogue', async () => {

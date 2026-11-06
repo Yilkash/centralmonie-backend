@@ -70,7 +70,7 @@ export const AGENT_TOOLS: Anthropic.Tool[] = [
               data_plan_id: nullable('string'),
               new_phone_number: { type: ['string', 'null'], description: 'Only for airtime to a phone not in list_contacts. Otherwise null.' },
               new_wallet_address: { type: ['string', 'null'], description: 'Only for USDC to a wallet not in list_contacts. Otherwise null.' },
-              new_wallet_chain: { type: ['string', 'null'], description: 'The network the user named for that new wallet, such as Solana or Arbitrum. Null if they named none, which means Base unless the address can only be NEAR or Solana.' },
+              new_wallet_chain: { type: ['string', 'null'], description: 'The network the user named for that new wallet, such as Solana, Stellar, Tron or BNB Chain. Null if they named none, which means Base unless the address can only be NEAR, Solana, Stellar, Tron or TON.' },
               new_bank_name: { type: ['string', 'null'], description: 'Only for a bank transfer to an account not in list_contacts. Otherwise null.' },
               new_account_number: { type: ['string', 'null'], description: 'The 10-digit account number for that new bank account. Otherwise null.' },
               new_contact_name: { type: ['string', 'null'], description: 'The name given for that new recipient, or null if none was given.' },

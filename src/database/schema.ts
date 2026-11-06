@@ -129,7 +129,7 @@ export const planItems = pgTable('plan_items', {
   // What the chain said about a wallet address when this was proposed. Null for other payments.
   addressCheck: text('address_check'),
   // For USDC to another chain: where it goes, and what the receiver should get, as quoted when proposed.
-  delivery: jsonb('delivery').$type<{ chain: string; name: string; receiverMinor: number; seconds: number | null } | null>(),
+  delivery: jsonb('delivery').$type<{ chain: string; name: string; receiverMinor: number; seconds: number | null; token?: 'USDC' | 'USDT'; caution?: string | null } | null>(),
 });
 
 export const payments = pgTable(

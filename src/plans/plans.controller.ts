@@ -9,6 +9,9 @@ import { ChainKey, USDC_CHAINS } from '../chain/usdc-chains';
 import { formatNaira, formatUsdc } from '../money/money';
 import { PlanRefused, PlansService, PlanView } from './plans.service';
 
+/** An amount in USDC's six decimals, named as the token the receiver really gets. */
+const inToken = (minor: number, token?: 'USDC' | 'USDT') => formatUsdc(minor).replace('USDC', token ?? 'USDC');
+
 export const pinIn = (body: unknown): string | undefined => {
   const pin = (body as { pin?: unknown } | null | undefined)?.pin;
   return typeof pin === 'string' ? pin : undefined;
@@ -29,10 +32,12 @@ export const presentPlan = (plan: PlanView) => ({
     recipient_name: item.recipientName,
     recipient_detail: item.recipientDetail,
     network: item.route !== 'usdc' ? null : (item.delivery?.name ?? plan.network),
-    receiver_gets: item.delivery ? formatUsdc(item.delivery.receiverMinor) : null,
+    receiver_gets: item.delivery ? inToken(item.delivery.receiverMinor, item.delivery.token) : null,
+    receiver_token: item.delivery?.token ?? (item.route === 'usdc' ? 'USDC' : null),
+    delivery_caution: item.delivery?.caution ?? null,
     receiver_gets_exact: item.delivery ? (item.delivery.receiverMinor / 1_000_000).toFixed(6) : null,
     delivery_seconds: item.delivery?.seconds ?? null,
-    received: item.payment?.deliveredMinor ? formatUsdc(item.payment.deliveredMinor) : null,
+    received: item.payment?.deliveredMinor ? inToken(item.payment.deliveredMinor, item.delivery?.token) : null,
     delivery_tx_url: item.delivery && item.payment?.status === 'completed' && item.payment.providerReference ? `${USDC_CHAINS[item.delivery.chain as ChainKey]?.explorerTx ?? ''}${item.payment.providerReference}` : null,
     fee_warning: item.delivery ? item.usdcMinor - item.delivery.receiverMinor > item.usdcMinor * 0.02 : false,
     address_check: item.addressCheck,
