@@ -64,6 +64,11 @@ describe('AgentChatResponder', () => {
     expect(run).not.toHaveBeenCalled();
   });
 
+  it('keeps bold and numbered steps, which the chat shows, and drops headings, which it does not', async () => {
+    const { responder } = setUp([say('## How\n1. Open **Add USDC**.\n2. Pick the network.')]);
+    await expect(responder.reply(turn())).resolves.toMatchObject({ text: 'How\n1. Open **Add USDC**.\n2. Pick the network.' });
+  });
+
   it('runs a tool for the signed-in user and returns the plan it created', async () => {
     const { responder, run, requests } = setUp(
       [useTool('propose_plan', { items: [] }), say('Please check and approve.')],

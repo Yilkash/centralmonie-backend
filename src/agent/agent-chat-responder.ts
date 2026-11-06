@@ -46,8 +46,8 @@ export class AgentChatResponder extends ChatResponder {
 
         if (response.stop_reason !== 'tool_use') {
           if (response.stop_reason !== 'end_turn') this.logger.warn(`Model stopped with ${response.stop_reason}`);
-          // The chat shows plain text, so markdown stars would appear as they are.
-          return { text: text.replace(/\*\*/g, '') || FAILED, ...cards() };
+          // The chat shows **bold** and numbered steps, and nothing else, so headings are reduced to their words.
+          return { text: text.replace(/^#{1,6}\s+/gm, '') || FAILED, ...cards() };
         }
 
         // The full content goes back, because it can carry thinking the model needs.
