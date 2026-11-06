@@ -64,6 +64,10 @@ export class SendController {
       recipients: saved
         .flatMap((contact) =>
         contact.destinations.map((destination) => ({
+          contact_id: contact.id,
+          // Saved from the chat under its own address or number, so the page shows it short and offers a name.
+          unnamed: contact.name.trim() === (destination.walletAddress ?? destination.phone ?? destination.accountNumber ?? ''),
+          key: `${destination.kind}:${(destination.walletAddress ?? '').toLowerCase()}:${destination.network ?? ''}:${destination.phone ?? ''}:${destination.bankName ?? ''}:${destination.accountNumber ?? ''}`,
           last_paid_at: lastPaid.get(destination.id) ?? null,
           destination_id: destination.id,
           name: contact.name,
@@ -72,7 +76,10 @@ export class SendController {
           network: destination.kind === 'wallet' ? (USDC_CHAINS[(destination.network ?? 'base') as keyof typeof USDC_CHAINS]?.name ?? 'Base') : destination.kind === 'phone' ? destination.network : null,
         })),
       )
-        .sort((a, b) => (b.last_paid_at ?? '').localeCompare(a.last_paid_at ?? '') || a.name.localeCompare(b.name)),
+        .sort((a, b) => (b.last_paid_at ?? '').localeCompare(a.last_paid_at ?? '') || Number(a.unnamed) - Number(b.unnamed) || a.name.localeCompare(b.name))
+        // The same address saved twice is one person: the most recent or best-named copy is kept.
+        .filter((item, index, all) => all.findIndex((other) => other.key === item.key) === index)
+        .map(({ key: _key, ...item }) => item),
       networks: Object.values(USDC_CHAINS).map((chain) => ({ id: chain.key, name: chain.name, token: chain.token })),
       phone_networks: PHONE_NETWORKS,
     };

@@ -84,6 +84,18 @@ export class ContactsService {
     if (updated.length === 0) throw new NotFoundException('Contact not found');
   }
 
+  /** Only the name a person sees changes. Where the money goes stays exactly as it was approved. */
+  async rename(userId: string, contactId: string, name: string): Promise<void> {
+    const clean = name.trim().replace(/\s+/g, ' ');
+    if (clean.length < 1 || clean.length > 60) throw new ContactRefused('A name needs 1 to 60 characters.');
+    const updated = await this.db
+      .update(contacts)
+      .set({ name: clean })
+      .where(and(eq(contacts.id, contactId), eq(contacts.userId, userId), eq(contacts.status, 'confirmed')))
+      .returning({ id: contacts.id });
+    if (updated.length === 0) throw new NotFoundException('Contact not found');
+  }
+
   async discard(userId: string, contactId: string): Promise<void> {
     const deleted = await this.db
       .delete(contacts)

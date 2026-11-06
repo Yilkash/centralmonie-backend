@@ -112,6 +112,26 @@ describe('the Send page', () => {
     expect((await call('POST', '/v1/send', 'alice', { route: 'bank' })).statusCode).toBe(422);
   });
 
+  it('shows a wallet saved twice once, flags one saved under its own address, and lets the user name it', async () => {
+    const address = '0x8168C3DC48e2174BeD6110EAFaC20Ed8529f11e2';
+    for (let copy = 0; copy < 2; copy++) {
+      const contact = await contacts.propose(alice, address, [], { kind: 'wallet', walletAddress: address });
+      await contacts.confirm(alice, contact.id);
+    }
+    const listed = (await call('GET', '/v1/send/options', 'alice')).json().recipients;
+    expect(listed).toHaveLength(1);
+    expect(listed[0]).toMatchObject({ name: address, unnamed: true, network: 'Base', contact_id: expect.any(String) });
+    expect(listed[0]).not.toHaveProperty('key');
+    const renamed = await call('POST', `/v1/contacts/${listed[0].contact_id}/rename`, 'alice', { name: '  Tolu   savings ' });
+    expect(renamed.statusCode).toBe(204);
+    const after = (await call('GET', '/v1/send/options', 'alice')).json().recipients;
+    expect(after.map((item: { name: string; unnamed: boolean }) => [item.name, item.unnamed])).toEqual([['Tolu savings', false]]);
+    // The address and network stay as approved.
+    expect(after[0].detail).toContain('0x8168');
+    expect((await call('POST', `/v1/contacts/${listed[0].contact_id}/rename`, 'alice', { name: '' })).statusCode).toBe(400);
+    expect((await call('POST', `/v1/contacts/${listed[0].contact_id}/rename`, 'bob', { name: 'Mine now' })).statusCode).toBe(404);
+  });
+
   it('lists data plans for a phone network, and refuses an unknown one', async () => {
     const mtn = (await call('GET', '/v1/send/data-plans?network=MTN', 'alice')).json();
     expect(mtn.plans.length).toBeGreaterThan(0);
