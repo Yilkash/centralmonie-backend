@@ -8,12 +8,12 @@ import { z } from 'zod';
 import { ContactRefused, ContactsService, describeDestination, NewDestination } from '../contacts/contacts.service';
 import { User } from '../database/schema';
 import { formatNaira } from '../money/money';
-import { ProposedItem } from '../plans/plan.types';
 import { PlanRefused, PlansService, PlanView } from '../plans/plans.service';
 import { DataPlans } from '../providers/providers';
 import { presentSchedule } from '../schedules/schedules.controller';
 import { SchedulesService, whenOf } from '../schedules/schedules.service';
 import { Timing } from '../schedules/timing';
+import { proposeWithRecipients, RecipientMissing } from '../plans/propose-with-recipients';
 import { WalletService } from '../wallet/wallet.service';
 
 const nullable = (type: string) => ({ type: [type, 'null'] });
@@ -366,42 +366,31 @@ export class AgentToolbox {
 
   private async proposePlan(user: User, input: unknown): Promise<ToolOutcome> {
     const { items } = planInput.parse(input);
-    const created: string[] = [];
-    const resolved: ProposedItem[] = [];
     let plan: PlanView;
     try {
-      for (const item of items) {
-        let destinationId = item.destination_id;
-        const isNew = destinationId === null;
-        if (isNew) {
-          const phone = item.route === 'airtime' ? item.new_phone_number : null;
-          const walletAddress = item.route === 'usdc' ? item.new_wallet_address : null;
-          const bank = item.route === 'bank' && item.new_bank_name && item.new_account_number ? { bankName: item.new_bank_name, accountNumber: item.new_account_number } : null;
-          if (!phone && !walletAddress && !bank) return { result: 'That payment needs a saved recipient first.', isError: true };
-          // Stored unconfirmed. Approving this plan is what saves it, and the card shows the details,
-          // including the name the bank gives, so that one card is the user's check.
-          const contact = await this.contacts.propose(
-            user.id,
-            item.new_contact_name?.trim() || phone || walletAddress || '',
-            [],
-            phone ? { kind: 'phone', phone } : walletAddress ? { kind: 'wallet', walletAddress, chain: item.new_wallet_chain ?? null } : { kind: 'bank', ...bank! },
-          );
-          created.push(contact.id);
-          destinationId = contact.destinations[0]!.id;
-        }
-        resolved.push({
+      plan = await proposeWithRecipients(
+        this.contacts,
+        this.plans,
+        user.id,
+        items.map((item) => ({
           route: item.route,
-          destinationId: destinationId!,
+          destinationId: item.destination_id,
           amountNaira: item.amount_naira,
           amountUsdc: item.amount_usdc,
           dataPlanId: item.data_plan_id,
-          newRecipient: isNew,
-        });
-      }
-      plan = await this.plans.propose(user.id, resolved);
+          // Only airtime takes a new phone from the chat, as before: data needs a saved number.
+          newRecipient: {
+            name: item.new_contact_name,
+            phone: item.route === 'airtime' ? item.new_phone_number : null,
+            walletAddress: item.new_wallet_address,
+            walletChain: item.new_wallet_chain,
+            bankName: item.new_bank_name,
+            accountNumber: item.new_account_number,
+          },
+        })),
+      );
     } catch (error) {
-      // Nothing to approve, so nothing should be left waiting.
-      await Promise.all(created.map((id) => this.contacts.discard(user.id, id).catch(() => undefined)));
+      if (error instanceof RecipientMissing) return { result: error.message, isError: true };
       throw error;
     }
     return {

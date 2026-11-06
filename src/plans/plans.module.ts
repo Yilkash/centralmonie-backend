@@ -5,11 +5,12 @@ import { ContactsModule } from '../contacts/contacts.module';
 import { PaymentsModule } from '../payments/payments.module';
 import { ProvidersModule } from '../providers/providers.module';
 import { PlansController } from './plans.controller';
+import { SendController } from './send.controller';
 import { PlansService } from './plans.service';
 
 @Module({
   imports: [CrossChainModule, AuthModule, ContactsModule, ProvidersModule, PaymentsModule],
-  controllers: [PlansController],
+  controllers: [PlansController, SendController],
   providers: [PlansService],
   exports: [PlansService],
 })
