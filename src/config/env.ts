@@ -93,7 +93,8 @@ const MAINNET_USDC = '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913';
 
 /** Refuses to start on bad settings, naming the variable but never its value. */
 export function validateEnv(raw: Record<string, unknown>): Env {
-  const result = envSchema.safeParse(raw);
+  // A blank line copied from .env.example means "not set", not "set to nothing".
+  const result = envSchema.safeParse(Object.fromEntries(Object.entries(raw).filter(([, value]) => value !== '')));
   if (!result.success) {
     const names = result.error.issues.map((issue) => issue.path.join('.')).join(', ');
     throw new Error(`Invalid environment variables: ${names}`);

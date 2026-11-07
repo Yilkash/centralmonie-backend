@@ -24,6 +24,10 @@ describe('validateEnv', () => {
     expect(() => validateEnv({ DATABASE_URL: 'postgres://localhost/db' })).toThrow('IDENTITY_PROVIDER=test');
   });
 
+  it('treats a blank setting copied from .env.example as not set', () => {
+    expect(() => validateEnv({ DATABASE_URL: 'postgres://localhost/db', IDENTITY_PROVIDER: 'test', PRIVY_APP_ID: '', ANTHROPIC_API_KEY: '' })).not.toThrow();
+  });
+
   it('never repeats a value in its error', () => {
     expect(() => validateEnv({ ...valid, PORT: 'not-a-port' })).not.toThrow('super-secret-value');
   });
