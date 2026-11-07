@@ -1,0 +1,35 @@
+# Secret scanning for 10kobo: gitleaks' own rules, plus the key formats 10kobo makes itself.
+# Runs on every push and pull request (.github/workflows/secrets.yml). Run it locally with:
+#   docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:v8.24.3 git /repo --redact --config /repo/.gitleaks.toml
+[extend]
+useDefault = true
+
+[[rules]]
+id = "10kobo-agent-api-key"
+description = "A 10kobo agent API key"
+regex = '''\b10k_[A-Za-z0-9_-]{40,}'''
+keywords = ["10k_"]
+
+[[rules]]
+id = "10kobo-merchant-key"
+description = "A 10kobo merchant (shop) key"
+regex = '''\bmk_[A-Za-z0-9_-]{40,}'''
+keywords = ["mk_"]
+
+[[rules]]
+id = "10kobo-webhook-secret"
+description = "A signing secret for 10kobo's notices to shops"
+regex = '''\bwhsec_[A-Za-z0-9_-]{40,}'''
+keywords = ["whsec_"]
+
+[[rules]]
+id = "near-agent-market-token"
+description = "A NEAR AI Agent Market agent token"
+regex = '''\baat_[A-Za-z0-9_-]{20,}'''
+keywords = ["aat_"]
+
+[[rules]]
+id = "near-private-key"
+description = "A NEAR account private key"
+regex = '''\bed25519:[1-9A-HJ-NP-Za-km-z]{80,}'''
+keywords = ["ed25519:"]
