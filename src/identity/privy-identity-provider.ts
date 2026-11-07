@@ -33,9 +33,10 @@ export class PrivyIdentityProvider extends IdentityProvider {
 
   constructor(config: ConfigService<Env, true>) {
     super();
-    this.appId = config.get('PRIVY_APP_ID', { infer: true });
-    this.appSecret = config.get('PRIVY_APP_SECRET', { infer: true });
-    this.verificationKey = config.get('PRIVY_VERIFICATION_KEY', { infer: true });
+    // Checked at start-up: real sign-in refuses to start without all three.
+    this.appId = config.get('PRIVY_APP_ID', { infer: true })!;
+    this.appSecret = config.get('PRIVY_APP_SECRET', { infer: true })!;
+    this.verificationKey = config.get('PRIVY_VERIFICATION_KEY', { infer: true })!;
   }
 
   async verify(token: string): Promise<VerifiedIdentity> {

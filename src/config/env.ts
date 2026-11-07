@@ -7,9 +7,10 @@ const envSchema = z.object({
     .string()
     .default('')
     .transform((value) => value.split(',').map((origin) => origin.trim()).filter(Boolean)),
-  PRIVY_APP_ID: z.string().min(1),
-  PRIVY_APP_SECRET: z.string().min(1),
-  PRIVY_VERIFICATION_KEY: z.string().min(1),
+  // Needed only for real sign-in. Test mode signs people in without Privy, so anyone can try it with no keys.
+  PRIVY_APP_ID: z.string().min(1).optional(),
+  PRIVY_APP_SECRET: z.string().min(1).optional(),
+  PRIVY_VERIFICATION_KEY: z.string().min(1).optional(),
   // Without a key, the app runs with the placeholder reply and no AI.
   ANTHROPIC_API_KEY: z.string().min(1).optional(),
   AGENT_MODEL: z.string().min(1).default('claude-haiku-5-5'),
@@ -96,6 +97,9 @@ export function validateEnv(raw: Record<string, unknown>): Env {
   if (!result.success) {
     const names = result.error.issues.map((issue) => issue.path.join('.')).join(', ');
     throw new Error(`Invalid environment variables: ${names}`);
+  }
+  if (result.data.IDENTITY_PROVIDER === 'privy' && !(result.data.PRIVY_APP_ID && result.data.PRIVY_APP_SECRET && result.data.PRIVY_VERIFICATION_KEY)) {
+    throw new Error('Invalid environment variables: PRIVY_APP_ID, PRIVY_APP_SECRET and PRIVY_VERIFICATION_KEY are needed for sign-in (or set IDENTITY_PROVIDER=test to try it without them)');
   }
   if (result.data.IDENTITY_PROVIDER === 'test' && process.env.NODE_ENV === 'production') {
     throw new Error('IDENTITY_PROVIDER=test is not allowed in production');

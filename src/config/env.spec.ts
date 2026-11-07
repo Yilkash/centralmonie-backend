@@ -19,6 +19,11 @@ describe('validateEnv', () => {
     expect(() => validateEnv(rest)).toThrow('PRIVY_APP_ID');
   });
 
+  it('needs no Privy settings in test mode, so anyone can try it without keys', () => {
+    expect(() => validateEnv({ DATABASE_URL: 'postgres://localhost/db', IDENTITY_PROVIDER: 'test' })).not.toThrow();
+    expect(() => validateEnv({ DATABASE_URL: 'postgres://localhost/db' })).toThrow('IDENTITY_PROVIDER=test');
+  });
+
   it('never repeats a value in its error', () => {
     expect(() => validateEnv({ ...valid, PORT: 'not-a-port' })).not.toThrow('super-secret-value');
   });
