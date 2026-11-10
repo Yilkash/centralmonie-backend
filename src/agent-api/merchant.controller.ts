@@ -5,6 +5,9 @@ import { AdminGuard } from '../ops/admin.controller';
 import { AgentRefusal } from './agent-api.service';
 import { AgentRefusalFilter } from './agent-api.controller';
 import { MerchantService } from './merchant.service';
+import { BankLookup } from '../providers/providers';
+import { AuthGuard } from '../auth/auth.guard';
+import { CurrentUser } from '../auth/current-user.decorator';
 
 type MerchantRequest = { headers: { authorization?: string }; merchant?: { key: MerchantKey; owner: User } };
 
@@ -123,6 +126,90 @@ export class MerchantKeysController {
   @HttpCode(200)
   async revoke(@Param('id', ParseUUIDPipe) id: string) {
     if (!(await this.merchants.revokeKey(id))) throw new NotFoundException('No such key.');
+    return { revoked: true };
+  }
+}
+
+const ownKeyBody = z.object({
+  name: z.string().trim().min(2).max(60),
+  // Self-serve keys pay only the person who made them: their own wallet, or a bank account they name.
+  // The owner chooses where the money goes: their 10kobo wallet, a bank account, USDC on Base or a NEAR account.
+  payout: z.union([
+    z.object({ to_my_wallet: z.literal(true) }),
+    z.object({ bank_name: z.string().trim().min(2).max(60), account_number: z.string().regex(/^\d{10}$/) }),
+    z.object({ usdc_address: z.string().trim().max(42) }),
+    z.object({ near_account: z.string().trim().min(2).max(70) }),
+  ]),
+  return_origins: z.array(z.string().max(200)).max(5).optional(),
+  webhook_url: z.string().max(500).nullish(),
+});
+
+/** At most this many live keys per person, and a lower daily limit than keys we make by hand. */
+const OWN_KEYS_LIMIT = 3;
+const OWN_KEY_INVOICES_PER_DAY = 50;
+
+/** A signed-in person makes, lists and stops their own merchant keys, with no one at 10kobo in the way. */
+@Controller('v1/merchant-keys')
+@UseFilters(AgentRefusalFilter)
+@UseGuards(AuthGuard)
+export class OwnMerchantKeysController {
+  constructor(
+    private readonly merchants: MerchantService,
+    private readonly banks: BankLookup,
+  ) {}
+
+  /** The bank's name for an account, so the owner sees who will be paid before making a key. Moves nothing. */
+  @Post('check-account')
+  @HttpCode(200)
+  async checkAccount(@Body() body: unknown) {
+    const parsed = z.object({ bank_name: z.string().trim().min(2).max(60), account_number: z.string().regex(/^\d{10}$/) }).safeParse(body);
+    if (!parsed.success) throw invalid(parsed.error);
+    const name = await this.banks.accountName(parsed.data.bank_name, parsed.data.account_number);
+    if (!name) throw new AgentRefusal('account_not_found', 'That bank has no account with that number. Check both and try again.', 422);
+    return { account_name: name };
+  }
+
+  @Get()
+  async list(@CurrentUser() user: User) {
+    return { keys: await this.merchants.ownKeys(user.id) };
+  }
+
+  @Post()
+  @HttpCode(200)
+  async create(@CurrentUser() user: User, @Body() body: unknown) {
+    const parsed = ownKeyBody.safeParse(body);
+    if (!parsed.success) throw invalid(parsed.error);
+    if (!user.email) throw new AgentRefusal('invalid_request', 'Your account needs an email before it can have a merchant key.', 400);
+    const live = (await this.merchants.ownKeys(user.id)).filter((key) => !key.revoked).length;
+    if (live >= OWN_KEYS_LIMIT) throw new AgentRefusal('too_many_requests', `You can have ${OWN_KEYS_LIMIT} keys at a time. Stop one you no longer use first.`, 429);
+    const { name, payout, return_origins, webhook_url } = parsed.data;
+    // A typo in an account number would send every order to a stranger, so the account must exist first.
+    if ('bank_name' in payout && !(await this.banks.accountName(payout.bank_name, payout.account_number))) {
+      throw new AgentRefusal('account_not_found', 'That bank has no account with that number. Check both and try again.', 422);
+    }
+    const made = await this.merchants.createKey({
+      userEmail: user.email,
+      name,
+      payout:
+        'to_my_wallet' in payout
+          ? { toMyWallet: true }
+          : 'usdc_address' in payout
+            ? { usdcAddress: payout.usdc_address }
+            : 'near_account' in payout
+              ? { nearAccount: payout.near_account }
+              : { bankName: payout.bank_name, accountNumber: payout.account_number },
+      returnOrigins: return_origins ?? [],
+      webhookUrl: webhook_url ?? null,
+      invoicesPerDay: OWN_KEY_INVOICES_PER_DAY,
+    });
+    // Shown this once only. We keep a hash, so it cannot be shown again.
+    return { id: made.id, key: made.key, webhook_secret: made.webhookSecret };
+  }
+
+  @Delete(':id')
+  @HttpCode(200)
+  async revoke(@CurrentUser() user: User, @Param('id', ParseUUIDPipe) id: string) {
+    if (!(await this.merchants.revokeOwnKey(user.id, id))) throw new NotFoundException('No such key.');
     return { revoked: true };
   }
 }

@@ -1,5 +1,5 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
-import { and, count, eq, gte, isNotNull, isNull, lt, lte, or, sql } from 'drizzle-orm';
+import { and, count, eq, gte, isNotNull, isNull, lt, lte, or, sql, desc } from 'drizzle-orm';
 import { createHmac, randomBytes, randomUUID } from 'node:crypto';
 import { DATABASE, Database } from '../database/database.module';
 import { AgentPayment, agentPayments, MerchantKey, merchantEvents, merchantKeys, PayLink, payLinks, User, users } from '../database/schema';
@@ -96,6 +96,31 @@ export class MerchantService {
       .values({ userId: owner.id, name: input.name.trim(), keyHash: hashKey(key), ...payout, returnOrigins: origins, webhookUrl: input.webhookUrl ?? null, webhookSecret, invoicesPerDay: input.invoicesPerDay ?? 200 })
       .returning();
     return { id: row!.id, key, webhookSecret };
+  }
+
+  /** A person's own keys, newest first. The key itself is never stored, so it is never shown again. */
+  async ownKeys(userId: string) {
+    const rows = await this.db.select().from(merchantKeys).where(eq(merchantKeys.userId, userId)).orderBy(desc(merchantKeys.createdAt));
+    return rows.map((row) => ({
+      id: row.id,
+      name: row.name,
+      payout: row.payoutToWallet ? 'Your 10kobo wallet' : row.payoutBankName ? `${row.payoutBankName} ****${(row.payoutAccountNumber ?? '').slice(-4)}` : row.payoutUsdcAddress ? 'A USDC address' : 'A NEAR account',
+      return_origins: row.returnOrigins,
+      webhook_url: row.webhookUrl,
+      invoices_per_day: row.invoicesPerDay,
+      created_at: row.createdAt.toISOString(),
+      revoked: Boolean(row.revokedAt),
+    }));
+  }
+
+  /** Only the owner can stop their own key. */
+  async revokeOwnKey(userId: string, id: string): Promise<boolean> {
+    const rows = await this.db
+      .update(merchantKeys)
+      .set({ revokedAt: new Date() })
+      .where(and(eq(merchantKeys.id, id), eq(merchantKeys.userId, userId), isNull(merchantKeys.revokedAt)))
+      .returning({ id: merchantKeys.id });
+    return rows.length > 0;
   }
 
   async revokeKey(id: string): Promise<boolean> {

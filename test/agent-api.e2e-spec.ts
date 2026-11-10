@@ -2,7 +2,7 @@ import { NestFastifyApplication } from '@nestjs/platform-fastify';
 import { Test } from '@nestjs/testing';
 import { Pool } from 'pg';
 import { AgentApiService, agentApiOpen, ipGroup, KEYLESS_KEY_ID, maskName, paymentsToCsv, validRefundAddress } from '../src/agent-api/agent-api.service';
-import { NearRelayer, SignedDelegate, USDC_ON_NEAR } from '../src/agent-api/near-relay';
+import { NearExactFacilitator, NearExactPayload, NearExactRequirements, NearRelayer, SignedDelegate, USDC_ON_NEAR } from '../src/agent-api/near-relay';
 import { PayLinksService, presentOwnLink } from '../src/agent-api/pay-links.service';
 import { MerchantService, signNotice } from '../src/agent-api/merchant.service';
 import { operationToken, tokenProblem } from '../src/agent-api/x402';
@@ -63,7 +63,9 @@ class FakeBanks extends BankLookup {
   down = false;
   /** Fails this many times, then works. */
   blips = 0;
+  asked = 0;
   async accountName(_bank: string, accountNumber: string) {
+    this.asked++;
     if (this.down) throw new Error('bank down');
     if (this.blips-- > 0) throw new Error('connection dropped');
     return accountNumber.endsWith('0000') ? null : 'Ada Bello';
@@ -89,6 +91,10 @@ class FakeOnramp extends NairaOnramp {
 }
 
 class FakeRelayer extends NearRelayer {
+  balance: bigint | null = 100_000_000n;
+  async usdcBalance() {
+    return this.balance;
+  }
   sent: string[] = [];
   registered: string[] = [];
   delegate: SignedDelegate | null = null;
@@ -107,6 +113,23 @@ class FakeRelayer extends NearRelayer {
   }
 }
 
+class FakeNearExact extends NearExactFacilitator {
+  verified: { payload: NearExactPayload; requirements: NearExactRequirements }[] = [];
+  settled: { payload: NearExactPayload; requirements: NearExactRequirements }[] = [];
+  valid = true;
+  settles = true;
+  async verify(payload: NearExactPayload, requirements: NearExactRequirements) {
+    this.verified.push({ payload, requirements });
+    // Like the official one: the signed amount and recipient must match what we require.
+    const matches = payload.accepted.amount === requirements.amount && payload.accepted.payTo === requirements.payTo;
+    return this.valid && matches ? { isValid: true, payer: 'agent.near' } : { isValid: false, invalidReason: 'invalid_exact_near_amount_mismatch' };
+  }
+  async settle(payload: NearExactPayload, requirements: NearExactRequirements) {
+    this.settled.push({ payload, requirements });
+    return this.settles ? { success: true, transaction: 'NearTxHash111', network: 'near:mainnet', payer: 'agent.near' } : { success: false, errorReason: 'transaction_failed', transaction: '', network: 'near:mainnet' };
+  }
+}
+
 describe('Agent API', () => {
   let app: NestFastifyApplication;
   let pool: Pool;
@@ -115,6 +138,7 @@ describe('Agent API', () => {
   const payout = new FakePayout();
   const banks = new FakeBanks();
   const relayer = new FakeRelayer();
+  const nearExact = new FakeNearExact();
   const onramp = new FakeOnramp();
   // USDC that reached receivers on Base, as the chain reader would find it.
   let deliveries: Transfer[] = [];
@@ -136,6 +160,7 @@ describe('Agent API', () => {
       .overrideProvider(AgentPayout).useValue(payout)
       .overrideProvider(BankLookup).useValue(banks)
       .overrideProvider(NearRelayer).useValue(relayer)
+      .overrideProvider(NearExactFacilitator).useValue(nearExact)
       .overrideProvider(NairaOnramp).useValue(onramp)
       .overrideProvider(ExchangeRates).useValue({ nairaPerUsdc: async () => 1400 })
       .compile();
@@ -412,6 +437,110 @@ describe('Agent API', () => {
     });
   });
 
+  describe('x402 exact on NEAR (the official standard)', () => {
+    const decode = (value: string | string[] | number | undefined) => JSON.parse(Buffer.from(String(value), 'base64').toString());
+    const body = { ...REQUEST, refund_to: 'agent.near' };
+    const ask = (signature?: object, token: string = key) =>
+      app.inject({ method: 'POST', url: '/v1/agent/x402/pay', headers: { authorization: `Bearer ${token}`, ...(signature ? { 'payment-signature': Buffer.from(JSON.stringify(signature)).toString('base64') } : {}) }, payload: body });
+    const transfer = (to: string, amount: string, sender = 'agent.near'): SignedDelegate => ({
+      senderId: sender,
+      receiverId: USDC_ON_NEAR,
+      actions: [{ method: 'ft_transfer', args: JSON.stringify({ receiver_id: to, amount }), deposit: 1n, gas: 30_000_000_000_000n }],
+    });
+    // What the official @x402/near client sends back: the offer it chose, and the signed transfer.
+    const standard = (accepted: object) => ({ x402Version: 2, resource: { url: 'http://localhost/v1/agent/x402/pay' }, accepted, payload: { signedDelegateAction: 'c2lnbmVk' } });
+    const offered = async () => {
+      const first = await ask();
+      return { first, offer: decode(first.headers['payment-required']).accepts[0], id: first.json().payment.id as string };
+    };
+
+    beforeEach(() => {
+      nearExact.verified = [];
+      nearExact.settled = [];
+      nearExact.valid = true;
+      nearExact.settles = true;
+      relayer.balance = 100_000_000n;
+      relayer.registered = [];
+    });
+
+    it('offers the standard exact payment on NEAR first: the USDC contract, the exact amount, its own deposit account', async () => {
+      const { first, offer } = await offered();
+      expect(first.statusCode).toBe(402);
+      expect(offer).toEqual({ scheme: 'exact', network: 'near:mainnet', amount: '3573829', asset: USDC_ON_NEAR, payTo: '0xdeposit', maxTimeoutSeconds: 300 });
+    });
+
+    it('settles when the same request comes back with the signed transfer, and answers 200 with PAYMENT-RESPONSE', async () => {
+      const { offer, id } = await offered();
+      relayer.delegate = transfer('0xdeposit', '3573829');
+      const paid = await ask(standard(offer));
+      expect(paid.statusCode).toBe(200);
+      expect(decode(paid.headers['payment-response'])).toEqual({ success: true, transaction: 'NearTxHash111', network: 'near:mainnet', payer: 'agent.near' });
+      // The requirements come from our record, and the deposit account was registered for USDC first.
+      expect(nearExact.settled[0]!.requirements).toEqual(offer);
+      expect(relayer.registered).toContain('0xdeposit');
+      expect((await status(id)).id).toBe(id);
+      const row = (await pool.query('select transactions, relayed_at from agent_payments where id = $1', [id])).rows[0];
+      expect(row.transactions).toEqual(['NearTxHash111']);
+      expect(row.relayed_at).not.toBeNull();
+    });
+
+    it('also settles on the payment\'s own URL', async () => {
+      const { offer, id } = await offered();
+      relayer.delegate = transfer('0xdeposit', '3573829');
+      const paid = await app.inject({ method: 'POST', url: `/v1/agent/x402/pay/${id}`, headers: { authorization: `Bearer ${key}`, 'payment-signature': Buffer.from(JSON.stringify(standard(offer))).toString('base64') } });
+      expect(paid.statusCode).toBe(200);
+    });
+
+    it('settles only once', async () => {
+      const { offer } = await offered();
+      relayer.delegate = transfer('0xdeposit', '3573829');
+      expect((await ask(standard(offer))).statusCode).toBe(200);
+      expect((await ask(standard(offer))).json().code).toBe('already_relayed');
+      expect(nearExact.settled).toHaveLength(1);
+    });
+
+    it('never trusts the client: a changed amount fails verification, and a short or wrong transfer is refused first', async () => {
+      const { offer } = await offered();
+      relayer.delegate = transfer('0xdeposit', '3573829');
+      const cheaper = await ask(standard({ ...offer, amount: '1' }));
+      expect(cheaper.statusCode).toBe(402);
+      expect(decode(cheaper.headers['payment-response'])).toMatchObject({ success: false, errorReason: 'invalid_exact_near_amount_mismatch' });
+      relayer.delegate = transfer('0xdeposit', '1');
+      expect((await ask(standard(offer))).json().code).toBe('relay_refused');
+      relayer.delegate = transfer('0xelsewhere', '3573829');
+      expect((await ask(standard(offer))).json().code).toBe('relay_refused');
+      relayer.delegate = transfer('0xdeposit', '3573829', 'stranger.near');
+      expect((await ask(standard(offer))).json().code).toBe('relay_refused');
+      expect(nearExact.settled).toHaveLength(0);
+    });
+
+    it('spends no NEAR on an account without the USDC', async () => {
+      const { offer } = await offered();
+      relayer.delegate = transfer('0xdeposit', '3573829');
+      relayer.balance = 5n;
+      expect((await ask(standard(offer))).json().code).toBe('insufficient_funds');
+      expect(relayer.registered).toHaveLength(0);
+      expect(nearExact.verified).toHaveLength(0);
+    });
+
+    it('lets a failed settlement be tried again, as the NEAR nonce stops it landing twice', async () => {
+      const { offer } = await offered();
+      relayer.delegate = transfer('0xdeposit', '3573829');
+      nearExact.settles = false;
+      const failed = await ask(standard(offer));
+      expect(failed.statusCode).toBe(402);
+      expect(decode(failed.headers['payment-response'])).toMatchObject({ success: false, errorReason: 'transaction_failed' });
+      nearExact.settles = true;
+      expect((await ask(standard(offer))).statusCode).toBe(200);
+    });
+
+    it('refuses a payload for a deposit account that is not this key\'s', async () => {
+      const { offer } = await offered();
+      const other = await agents.createKey('Other NEAR', 20_000);
+      expect((await ask(standard(offer), other.key)).json().code).toBe('not_found');
+    });
+  });
+
   describe('x402 with no key', () => {
     const start = (over: object = {}, ip = '10.0.0.1') =>
       app.inject({ method: 'POST', url: '/v1/agent/x402/pay', remoteAddress: ip, payload: { ...REQUEST, payer_name: 'Ada Motors', payer_email: 'ada@example.com', purpose: 'Invoice 1042', ...over } });
@@ -428,7 +557,9 @@ describe('Agent API', () => {
       const first = await start();
       expect(first.statusCode).toBe(402);
       const { id } = first.json().payment;
-      expect(decode(first.headers['payment-required']).accepts[0]).toMatchObject({ amount: '', payTo: '' });
+      // From NEAR the first answer already names the deposit account: the standard `exact` offer first, the draft second.
+      expect(decode(first.headers['payment-required']).accepts[0]).toMatchObject({ scheme: 'exact', network: 'near:mainnet', asset: USDC_ON_NEAR, payTo: '0xdeposit', maxTimeoutSeconds: 300 });
+      expect(decode(first.headers['payment-required']).accepts[1].extra.operationToken).toMatch(/^k1\./);
       expect(decode(first.headers['payment-required']).resource.url).toContain(`/v1/agent/x402/pay/${id}`);
       const second = await pay(id, signed(id, { type: 'quote', refundTo: 'agent.near' }));
       const entry = decode(second.headers['payment-required']).accepts[0];
@@ -460,10 +591,8 @@ describe('Agent API', () => {
     });
 
     it('checks the wallet cap again at accepting, so quotes made together cannot pass it', async () => {
-      const a = (await start({ amount_naira: 50_000, account_number: '8031234005', refund_to: 'e.near' })).json().payment.id;
-      const b = (await start({ amount_naira: 50_000, account_number: '8031234006', refund_to: 'e.near' })).json().payment.id;
-      const c = (await start({ amount_naira: 50_000, account_number: '8031234007', refund_to: 'e.near' })).json().payment.id;
-      const answers = await Promise.all([a, b, c].map((id) => pay(id, signed(id, { type: 'quote', refundTo: 'e.near' }))));
+      // From NEAR the first answer accepts, so the cap is checked there, even for requests arriving together.
+      const answers = await Promise.all(['8031234005', '8031234006', '8031234007'].map((account_number) => start({ amount_naira: 50_000, account_number, refund_to: 'e.near' })));
       expect(answers.map((item) => item.statusCode).sort()).toEqual([402, 402, 422]);
     });
 
@@ -955,13 +1084,97 @@ describe('Agent API', () => {
       user.id = (await pool.query(`insert into users (provider_subject) values ('did:privy:links') returning id`)).rows[0].id;
     });
 
+    describe('reusable payment links', () => {
+      const WALLET = '0x70997970C51812dc3A010C7d01b50e0d17dc79C8';
+      const view = (id: string) => app.inject({ method: 'GET', url: `/v1/public/product-links/${id}` });
+      const checkout = (id: string) => app.inject({ method: 'POST', url: `/v1/public/product-links/${id}/checkout` });
+
+      it('one link, many customers: each Pay makes its own invoice at the fixed price, paying the owner', async () => {
+        const product = await links.createProduct(user, { title: 'Jollof pack', amountNaira: 3500, bankName: 'OPay', accountNumber: '8031234568' });
+        const page = await view(product.id);
+        expect(page.statusCode).toBe(200);
+        expect(page.json()).toMatchObject({ title: 'Jollof pack', amount_naira: 3500, to: 'Ada Bello', receives: 'naira, OPay ****4568', open: true });
+        expect(page.json().url).toContain(`/p/${product.id}`);
+        expect(page.body).not.toContain('8031234568');
+        const first = (await checkout(product.id)).json();
+        const second = (await checkout(product.id)).json();
+        expect(first.invoice_id).not.toBe(second.invoice_id);
+        expect(first.url).toContain(`/pay/${first.invoice_id}`);
+        const invoice = (await open(first.invoice_id)).json();
+        expect(invoice).toMatchObject({ amount_naira: 3500, to: 'Ada Bello', note: 'Jollof pack', open: true, paid: false });
+        const rows = (await pool.query('select user_id, product_link_id, amount_kobo, account_number from pay_links where product_link_id = $1', [product.id])).rows;
+        expect(rows).toHaveLength(2);
+        expect(rows.every((row) => row.user_id === user.id && row.amount_kobo === '350000' && row.account_number === '8031234568')).toBe(true);
+      });
+
+      it('checks the payout once, when the link is made, never when a customer pays', async () => {
+        await expect(links.createProduct(user, { title: 'Bad', amountNaira: 1000, bankName: 'OPay', accountNumber: '8031230000' })).rejects.toThrow('could not find that account');
+        const product = await links.createProduct(user, { title: 'Design', amountNaira: 1000, usdcAddress: WALLET });
+        expect((await view(product.id)).json()).toMatchObject({ to: WALLET, receives: 'USDC on Base' });
+        const lookups = banks.asked;
+        await checkout(product.id);
+        expect(banks.asked).toBe(lookups);
+      });
+
+      it('refuses a bad name or price, and caps how many a seller keeps live', async () => {
+        await expect(links.createProduct(user, { title: 'x', amountNaira: 1000, usdcAddress: WALLET })).rejects.toThrow('2 to 80');
+        await expect(links.createProduct(user, { title: 'Too much', amountNaira: 50_001, usdcAddress: WALLET })).rejects.toThrow('The most for one payment');
+        for (let n = 0; n < 20; n++) await links.createProduct(user, { title: `Item ${n}`, amountNaira: 100, usdcAddress: WALLET });
+        await expect(links.createProduct(user, { title: 'One more', amountNaira: 100, usdcAddress: WALLET })).rejects.toThrow('20 payment links');
+      });
+
+      it('a stopped link makes no more invoices, and only its owner can stop it', async () => {
+        const product = await links.createProduct(user, { title: 'Shoes', amountNaira: 2000, usdcAddress: WALLET });
+        const stranger = { id: (await pool.query(`insert into users (provider_subject) values ('did:privy:stranger') returning id`)).rows[0].id } as User;
+        expect(await links.stopProduct(stranger, product.id)).toBe(false);
+        expect(await links.stopProduct(user, product.id)).toBe(true);
+        expect((await view(product.id)).json().open).toBe(false);
+        expect((await checkout(product.id)).json().code).toBe('link_stopped');
+        expect((await view('00000000-0000-4000-8000-000000000999')).statusCode).toBe(404);
+      });
+
+      it('counts only paid invoices for the owner', async () => {
+        const product = await links.createProduct(user, { title: 'Bag', amountNaira: 5000, bankName: 'OPay', accountNumber: '8031234568' });
+        const { invoice_id } = (await checkout(product.id)).json();
+        await checkout(product.id);
+        await payLink(invoice_id);
+        crossChain.state = { status: 'delivered', transactions: ['0xa'] };
+        payout.state = { state: 'completed' };
+        await open(invoice_id);
+        await app.get(AgentApiService, { strict: false }).reconcile();
+        const listed = await links.listProducts(user);
+        expect(listed[0]).toMatchObject({ title: 'Bag', paid_count: 1, stopped: false });
+      });
+
+      it('lets the customer type the amount when the seller asks, never below the minimum, and a fixed price stays fixed', async () => {
+        const open_ = await links.createProduct(user, { title: 'Lessons', amountNaira: null, minimumNaira: 1000, usdcAddress: WALLET });
+        expect((await view(open_.id)).json()).toMatchObject({ amount_naira: null, customer_chooses: true, minimum_naira: 1000 });
+        const pay = (id: string, amount?: number) => app.inject({ method: 'POST', url: `/v1/public/product-links/${id}/checkout`, payload: amount === undefined ? {} : { amount_naira: amount } });
+        expect((await pay(open_.id)).json().code).toBe('invalid_amount');
+        expect((await pay(open_.id, 999)).json().code).toBe('invalid_amount');
+        expect((await pay(open_.id, 50_001)).json().code).toBe('over_payment_limit');
+        const chosen = (await pay(open_.id, 2500)).json();
+        expect((await open(chosen.invoice_id)).json()).toMatchObject({ amount_naira: 2500, note: 'Lessons' });
+        const fixed = await links.createProduct(user, { title: 'Pack', amountNaira: 3500, usdcAddress: WALLET });
+        const cheaper = (await pay(fixed.id, 1)).json();
+        expect((await open(cheaper.invoice_id)).json().amount_naira).toBe(3500);
+        expect((await view(fixed.id)).json()).toMatchObject({ amount_naira: 3500, customer_chooses: false, minimum_naira: null });
+      });
+
+      it('caps the invoices one link can open in a day', async () => {
+        const product = await links.createProduct(user, { title: 'Popular', amountNaira: 100, usdcAddress: WALLET });
+        await pool.query(`insert into pay_links (user_id, amount_kobo, bank_name, account_number, account_name, product_link_id, expires_at)
+          select $1, 10000, 'Base', $2, $2, $3, now() + interval '1 day' from generate_series(1, 500)`, [user.id, WALLET, product.id]);
+        expect((await checkout(product.id)).json().code).toBe('too_many_requests');
+      });
+    });
+
     it('shows a payer what they need and no more, and a link needs no sign-in', async () => {
       const link = await links.create(user, { amountNaira: 5000, bankName: 'OPay', accountNumber: '8031234568', note: 'Rent' });
       expect(links.url(link)).toContain(`/pay/${link.id}`);
       const response = await open(link.id);
       expect(response.statusCode).toBe(200);
-      expect(response.json()).toMatchObject({ amount_naira: 5000, to: 'Ad* Be***', account_number: '****4568', note: 'Rent', open: true, paid: false, payment: null });
-      expect(response.body).not.toContain('Ada Bello');
+      expect(response.json()).toMatchObject({ amount_naira: 5000, to: 'Ada Bello', account_number: '****4568', note: 'Rent', open: true, paid: false, payment: null });
       expect(response.body).not.toContain('8031234568');
     });
 
@@ -1259,10 +1472,11 @@ describe('Agent API', () => {
       expect(row).toEqual({ status: 'quoted', deposit_address: null });
     });
 
-    it('gives keyless callers a partly hidden name, everywhere, and a keyed agent the full one', async () => {
+    it('shows every caller the full account name, so a payer can be sure who they pay, but never the full number', async () => {
+      // Decided 10 Nov 2026: a name cannot move money, and Nigerian banks show it on every transfer. Lookups stay rate-limited.
       const keyless = await app.inject({ method: 'POST', url: '/v1/agent/x402/pay', payload: { ...REQUEST, payer_name: 'Ada Motors', payer_email: 'ada@example.com', purpose: 'Invoice 1' } });
-      expect(keyless.json().payment.account_name).toBe('Ad* Be***');
-      expect(keyless.body).not.toContain('Ada Bello');
+      expect(keyless.json().payment.account_name).toBe('Ada Bello');
+      expect(keyless.json().payment.account_number).toBe('****4568');
       expect((await quote()).account_name).toBe('Ada Bello');
     });
 
@@ -1279,10 +1493,8 @@ describe('Agent API', () => {
     it('limits accepts per address, so one caller cannot hold everyone\'s allowance', async () => {
       const ip = '10.5.5.5';
       const start = (n: number) => app.inject({ method: 'POST', url: '/v1/agent/x402/pay', remoteAddress: ip, payload: { ...REQUEST, amount_naira: 1000, account_number: `80312350${String(n).padStart(2, '0')}`, refund_to: `r${n}.near`, payer_name: 'Ada Motors', payer_email: 'ada@example.com', purpose: 'Invoice 1' } });
-      const accept = async (n: number) => {
-        const { id } = (await start(n)).json().payment;
-        return app.inject({ method: 'POST', url: `/v1/agent/x402/pay/${id}`, remoteAddress: ip, headers: { 'payment-signature': Buffer.from(JSON.stringify({ x402Version: 2, resource: { url: `http://localhost/v1/agent/x402/pay/${id}` }, payload: { type: 'quote', refundTo: `r${n}.near` } })).toString('base64') } });
-      };
+      // From NEAR the first answer is the accept, so it is what the per-address limit counts.
+      const accept = (n: number) => start(n);
       for (let n = 0; n < 10; n++) expect((await accept(n)).statusCode).toBe(402);
       expect((await accept(10)).json().code).toBe('too_many_requests');
     });

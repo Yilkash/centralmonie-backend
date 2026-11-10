@@ -19,6 +19,77 @@ export abstract class NearRelayer {
   /** An account must be registered with the USDC contract before it can receive USDC. */
   abstract ensureRegistered(account: string): Promise<void>;
   abstract send(signedDelegateBase64: string): Promise<string | null>;
+  /** The account's USDC in atomic units, or null when it cannot be read. Checked before spending NEAR on its behalf. */
+  async usdcBalance(_account: string): Promise<bigint | null> {
+    return null;
+  }
+}
+
+/** How long a signed NEAR transfer stays valid, in seconds. The x402 spec turns this into a block window. */
+export const NEAR_EXACT_TIMEOUT_SECONDS = 300;
+export const NEAR_MAINNET = 'near:mainnet';
+
+/** The standard x402 `exact` offer on NEAR for this payment: this much USDC, to this payment's own deposit account. */
+export function nearExactRequirements(payment: AgentPayment) {
+  return {
+    scheme: 'exact' as const,
+    network: NEAR_MAINNET,
+    amount: String(payment.payInMinor),
+    asset: USDC_ON_NEAR,
+    payTo: payment.depositAddress ?? '',
+    maxTimeoutSeconds: NEAR_EXACT_TIMEOUT_SECONDS,
+  };
+}
+export type NearExactRequirements = ReturnType<typeof nearExactRequirements>;
+
+/** A standard x402 v2 PaymentPayload for the `exact` scheme on NEAR. */
+export interface NearExactPayload {
+  x402Version: 2;
+  resource?: { url: string; description?: string; mimeType?: string };
+  accepted: { scheme: 'exact'; network: string; amount: string; asset: string; payTo: string; maxTimeoutSeconds: number; extra?: Record<string, unknown> };
+  payload: { signedDelegateAction: string };
+}
+
+/**
+ * Checks and settles a standard x402 NEAR payment. The live version is the official @x402/near facilitator,
+ * which applies every rule in the spec: signature, exact transfer, block window, nonce, full-access key,
+ * balance and storage, duplicate settlement, and success only once the inner ft_transfer has succeeded.
+ */
+export abstract class NearExactFacilitator {
+  abstract verify(payload: NearExactPayload, requirements: NearExactRequirements): Promise<{ isValid: boolean; invalidReason?: string; payer?: string }>;
+  abstract settle(payload: NearExactPayload, requirements: NearExactRequirements): Promise<{ success: boolean; errorReason?: string; transaction: string; network: string; payer?: string }>;
+}
+
+export class LiveNearExactFacilitator extends NearExactFacilitator {
+  private scheme?: { verify: NearExactFacilitator['verify']; settle: NearExactFacilitator['settle'] };
+
+  constructor(
+    private readonly accountId: string,
+    private readonly secretKey: string,
+    private readonly rpcUrl: string,
+  ) {
+    super();
+  }
+
+  private load() {
+    if (!this.scheme) {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { createFacilitatorNearSigner } = require('@x402/near') as { createFacilitatorNearSigner: (config: unknown) => unknown };
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { ExactNearScheme } = require('@x402/near/exact/facilitator') as { ExactNearScheme: new (signer: unknown) => LiveNearExactFacilitator['scheme'] };
+      const signer = createFacilitatorNearSigner({ relayers: [{ accountId: this.accountId, secretKey: this.secretKey }], rpcUrls: { [NEAR_MAINNET]: this.rpcUrl } });
+      this.scheme = new ExactNearScheme(signer);
+    }
+    return this.scheme!;
+  }
+
+  verify(payload: NearExactPayload, requirements: NearExactRequirements) {
+    return this.load().verify(payload, requirements);
+  }
+
+  settle(payload: NearExactPayload, requirements: NearExactRequirements) {
+    return this.load().settle(payload, requirements);
+  }
 }
 
 /**
@@ -95,6 +166,15 @@ export class LiveNearRelayer extends NearRelayer {
     const { near, provider, account: relayer } = this.load();
     if (await provider.callFunction({ contractId: USDC_ON_NEAR, method: 'storage_balance_of', args: { account_id: account } })) return;
     await relayer.callFunction({ contractId: USDC_ON_NEAR, methodName: 'storage_deposit', args: { account_id: account, registration_only: true }, gas: near.teraToGas('30'), deposit: 1_250_000_000_000_000_000_000n });
+  }
+
+  async usdcBalance(account: string): Promise<bigint | null> {
+    try {
+      const balance = await this.load().provider.callFunction({ contractId: USDC_ON_NEAR, method: 'ft_balance_of', args: { account_id: account } });
+      return typeof balance === 'string' && /^\d+$/.test(balance) ? BigInt(balance) : null;
+    } catch {
+      return null;
+    }
   }
 
   async send(signedDelegateBase64: string): Promise<string | null> {

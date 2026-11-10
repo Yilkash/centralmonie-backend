@@ -33,6 +33,31 @@ const payloadSchema = z.object({
 });
 export type X402Payload = z.infer<typeof payloadSchema>;
 
+/** A standard x402 v2 PaymentPayload for `exact` on NEAR, as the official @x402/near client sends it. */
+const nearExactSchema = z.object({
+  x402Version: z.literal(2),
+  resource: z.object({ url: z.string(), description: z.string().optional(), mimeType: z.string().optional() }).optional(),
+  accepted: z.object({
+    scheme: z.literal('exact'),
+    network: z.literal('near:mainnet'),
+    amount: z.string(),
+    asset: z.string(),
+    payTo: z.string(),
+    maxTimeoutSeconds: z.number().int().positive(),
+    extra: z.record(z.string(), z.unknown()).optional(),
+  }),
+  payload: z.object({ signedDelegateAction: z.string().min(1) }),
+});
+
+export function decodeNearExact(header: string) {
+  try {
+    const parsed = nearExactSchema.safeParse(JSON.parse(Buffer.from(header, 'base64').toString('utf8')));
+    return parsed.success ? parsed.data : null;
+  } catch {
+    return null;
+  }
+}
+
 export const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64');
 
 export function decodeSignature(header: string): X402Payload | null {

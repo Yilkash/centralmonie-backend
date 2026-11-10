@@ -6,9 +6,10 @@ import { AgentKey, AgentPayment, User } from '../database/schema';
 import { formatNaira, formatUsdc } from '../money/money';
 import { AdminGuard } from '../ops/admin.controller';
 import { PAY_FROM, PayFrom } from './cross-chain';
-import { AgentApiService, AgentRefusal, KEYLESS_KEY_ID, maskName, NAIRA, NAIRA_PAYER } from './agent-api.service';
+import { nearExactRequirements } from './near-relay';
+import { AgentApiService, AgentRefusal, KEYLESS_KEY_ID, NAIRA, NAIRA_PAYER } from './agent-api.service';
 import { PayLinksService, presentLink, presentOwnLink, presentPublicLink } from './pay-links.service';
-import { decodeSignature, encode, firstChallenge, provesPayment, quotedChallenge, settlement, tokenProblem, X402_PAY_FROM } from './x402';
+import { decodeSignature, encode, firstChallenge, provesPayment, quotedChallenge, settlement, tokenProblem, X402_PAY_FROM, decodeNearExact } from './x402';
 
 const quoteBody = z.object({
   amount_naira: z.number().int().positive().max(100_000_000),
@@ -26,7 +27,8 @@ const keyBody = z.object({ name: z.string().trim().min(2).max(80), daily_limit_n
 const money = (minor: number) => (minor / 1_000_000).toFixed(6);
 
 /** The bank's name for an account goes in full only to a key we issued. */
-const shownName = (payment: AgentPayment) => (payment.keyId === KEYLESS_KEY_ID ? maskName(payment.accountName) : payment.accountName);
+// The full name, so a payer can be sure who they are paying. Knowing a name cannot take money from anyone.
+const shownName = (payment: AgentPayment) => payment.accountName;
 
 export const presentPayment = (payment: AgentPayment) => ({
   id: payment.id,
@@ -175,9 +177,13 @@ export class AgentX402Controller {
   async start(
     @CurrentKey() key: AgentKey,
     @Body() body: unknown,
+    @Headers('payment-signature') signature: string | undefined,
     @Req() request: { protocol: string; hostname: string; ip: string },
     @Res({ passthrough: true }) reply: X402Reply,
   ) {
+    // Standard x402 clients retry the same request with the payment attached, so it is settled here too.
+    const standard = signature ? decodeNearExact(signature) : null;
+    if (standard) return this.settleNear(key, await this.agents.byNearDeposit(key, standard.accepted.payTo), standard, reply);
     const parsed = quoteBody.safeParse(body);
     if (!parsed.success) throw invalid(parsed.error);
     const payer = keylessFields.safeParse(body);
@@ -193,9 +199,29 @@ export class AgentX402Controller {
       clientIp: request.ip,
       ...(payer.success ? { payerName: payer.data.payer_name, payerEmail: payer.data.payer_email, purpose: payer.data.purpose } : {}),
     });
-    const offer = firstChallenge(payment, `${request.protocol}://${request.hostname}/v1/agent/x402/pay/${payment.id}`);
+    const url = `${request.protocol}://${request.hostname}/v1/agent/x402/pay/${payment.id}`;
+    if (pay_from === 'near') {
+      const accepted = await this.agents.accept(key, payment.id, request.ip);
+      if (accepted.status === 'awaiting_deposit' && accepted.depositAddress) {
+        const quoted = quotedChallenge(key.keyHash, accepted, url, `/v1/agent/x402/pay/${payment.id}`);
+        // The standard `exact` NEAR offer comes first; the draft near-intents offer stays for older clients.
+        const offer = { ...quoted, accepts: [nearExactRequirements(accepted), ...quoted.accepts] };
+        reply.status(402).header('PAYMENT-REQUIRED', encode(offer));
+        return { ...offer, payment: presentPayment(accepted) };
+      }
+    }
+    const offer = firstChallenge(payment, url);
     reply.status(402).header('PAYMENT-REQUIRED', encode(offer));
     return { ...offer, payment: presentPayment(payment) };
+  }
+
+  /** Settles a standard x402 NEAR payment and answers the way the x402 HTTP transport says. */
+  private async settleNear(key: AgentKey, payment: AgentPayment, payload: NonNullable<ReturnType<typeof decodeNearExact>>, reply: X402Reply) {
+    if (payload.accepted.payTo !== payment.depositAddress) throw new AgentRefusal('invalid_request', 'That payment is for a different deposit account.', 400);
+    const result = await this.agents.settleNearExact(key, payment, payload);
+    reply.header('PAYMENT-RESPONSE', encode(result.settlement));
+    if (!result.settlement.success) reply.status(402);
+    return { settlement: result.settlement, payment: presentPayment(result.payment) };
   }
 
   @Post('pay/:id')
@@ -218,6 +244,9 @@ export class AgentX402Controller {
       const current = await this.agents.get(key, id);
       return challenge(firstChallenge(current, url), current);
     }
+
+    const standard = decodeNearExact(signature);
+    if (standard) return this.settleNear(key, await this.agents.get(key, id), standard, reply);
 
     const signed = decodeSignature(signature);
     if (!signed) throw new AgentRefusal('invalid_request', 'PAYMENT-SIGNATURE is not a valid x402 payload.', 400);
@@ -324,6 +353,69 @@ export class PayLinksController {
   async cancel(@CurrentUser() user: User, @Param('id', ParseUUIDPipe) id: string) {
     const link = await this.links.cancel(user, id);
     return presentOwnLink({ link, payment: null }, this.links.url(link));
+  }
+}
+
+const productBody = z.object({
+  title: z.string().trim().min(2).max(80),
+  // Leave out for "the customer types the amount", optionally with a minimum.
+  amount_naira: z.number().int().positive().nullish(),
+  minimum_naira: z.number().int().positive().nullish(),
+  bank_name: z.string().trim().min(2).max(80).nullish(),
+  account_number: z.string().regex(/^\d{10}$/).nullish(),
+  near_account: z.string().trim().min(2).max(70).nullish(),
+  usdc_address: z.string().trim().max(42).nullish(),
+  to_my_wallet: z.boolean().nullish(),
+});
+
+/** Reusable payment links: one product at one price, for sellers with no website or developer. */
+@Controller('v1/product-links')
+@UseFilters(AgentRefusalFilter)
+@UseGuards(AuthGuard)
+export class ProductLinksController {
+  constructor(private readonly links: PayLinksService) {}
+
+  @Post()
+  @HttpCode(200)
+  async create(@CurrentUser() user: User, @Body() body: unknown) {
+    const parsed = productBody.safeParse(body);
+    if (!parsed.success) throw invalid(parsed.error);
+    const { title, amount_naira, minimum_naira, bank_name, account_number, near_account, usdc_address, to_my_wallet } = parsed.data;
+    const row = await this.links.createProduct(user, { title, amountNaira: amount_naira ?? null, minimumNaira: minimum_naira ?? null, bankName: bank_name ?? null, accountNumber: account_number ?? null, nearAccount: near_account ?? null, usdcAddress: usdc_address ?? null, toMyWallet: to_my_wallet ?? null });
+    return (await this.links.listProducts(user)).find((item) => item.id === row.id);
+  }
+
+  @Get()
+  async list(@CurrentUser() user: User) {
+    return { links: await this.links.listProducts(user) };
+  }
+
+  @Post(':id/stop')
+  @HttpCode(200)
+  async stop(@CurrentUser() user: User, @Param('id', ParseUUIDPipe) id: string) {
+    if (!(await this.links.stopProduct(user, id))) throw new NotFoundException('No such payment link.');
+    return { stopped: true };
+  }
+}
+
+/** What a customer sees, and the Pay button, which makes their own invoice. No sign-in. */
+@Controller('v1/public/product-links')
+@UseFilters(AgentRefusalFilter)
+export class PublicProductLinksController {
+  constructor(private readonly links: PayLinksService) {}
+
+  @Get(':id')
+  async get(@Param('id', ParseUUIDPipe) id: string) {
+    return this.links.publicProduct(id);
+  }
+
+  @Post(':id/checkout')
+  @HttpCode(200)
+  async checkout(@Param('id', ParseUUIDPipe) id: string, @Body() body: unknown) {
+    const parsed = z.object({ amount_naira: z.number().int().positive().nullish() }).safeParse(body ?? {});
+    if (!parsed.success) throw invalid(parsed.error);
+    const link = await this.links.checkoutProduct(id, parsed.data.amount_naira ?? null);
+    return { invoice_id: link.id, url: this.links.url(link) };
   }
 }
 

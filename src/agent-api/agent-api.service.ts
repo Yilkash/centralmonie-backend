@@ -13,7 +13,7 @@ import { AgentPayout, BankLookup, ExchangeRates, NairaOnramp, PaymentProvider } 
 import { Chain } from '../chain/chain.service';
 import { ChainKey, isNearAccount, USDC_CHAINS } from '../chain/usdc-chains';
 import { CrossChain, PayFrom, PayToken, USDT_ON, USDT_ONLY } from './cross-chain';
-import { NearRelayer, relayProblem, SignedDelegate } from './near-relay';
+import { NearExactFacilitator, NearExactPayload, nearExactRequirements, NearRelayer, relayProblem, SignedDelegate } from './near-relay';
 
 const QUOTE_LIFETIME_MS = 10 * 60_000;
 /** What the agent is told. Limits hold the payment for this long, so it stays short. */
@@ -170,6 +170,7 @@ export class AgentApiService {
     private readonly guards: GuardsService,
     private readonly audit: AuditService,
     @Inject(NearRelayer) private readonly relayer: NearRelayer | null,
+    @Inject(NearExactFacilitator) private readonly nearExact: NearExactFacilitator | null,
     @Inject(NairaOnramp) private readonly onramp: NairaOnramp | null,
     private readonly chain: Chain,
   ) {}
@@ -520,6 +521,57 @@ export class AgentApiService {
       this.logger.error(`relay for ${id} failed: ${(error as Error).message.slice(0, 200)}`);
       throw new AgentRefusal('relay_failed', 'The relayer could not confirm the transfer, and it may still have gone. Check the status before doing anything else.', 502);
     }
+  }
+
+  /** The payment a standard x402 NEAR payload is for: the one whose deposit account it pays, under this key. */
+  async byNearDeposit(key: AgentKey, depositAddress: string): Promise<AgentPayment> {
+    const [row] = await this.db
+      .select()
+      .from(agentPayments)
+      .where(and(eq(agentPayments.keyId, key.id), eq(agentPayments.depositAddress, depositAddress), eq(agentPayments.payFrom, 'near')));
+    if (!row) throw new AgentRefusal('not_found', 'No payment is waiting for that deposit account.', 404);
+    return row;
+  }
+
+  /**
+   * Standard x402 `exact` on NEAR. Our own rules first (this payment, from its refund account, enough USDC), so the
+   * relayer never spends NEAR on a payload that cannot pay; then the official facilitator verifies and settles.
+   * The requirements always come from our record, never from the client.
+   */
+  async settleNearExact(key: AgentKey, payment: AgentPayment, payload: NearExactPayload) {
+    if (!this.nearExact || !this.relayer) throw new AgentRefusal('relayer_unavailable', 'Standard x402 on NEAR is not available right now. Send the USDC from your own wallet.', 503);
+    const requirements = nearExactRequirements(payment);
+    let delegate: SignedDelegate;
+    try {
+      delegate = this.relayer.decode(payload.payload.signedDelegateAction);
+    } catch {
+      throw new AgentRefusal('invalid_payload', 'signedDelegateAction is not a valid NEAR SignedDelegate.', 400);
+    }
+    const problem = relayProblem(delegate, payment);
+    if (problem) throw new AgentRefusal('relay_refused', problem, 422);
+    const balance = await this.relayer.usdcBalance(delegate.senderId);
+    if (balance === null || balance < BigInt(payment.payInMinor)) throw new AgentRefusal('insufficient_funds', 'The paying account does not hold enough USDC on NEAR.', 402);
+    const [{ today } = { today: 0 }] = await this.db.select({ today: count() }).from(agentPayments).where(gte(agentPayments.relayedAt, sql`${startOfLagosDay}`));
+    if (today >= RELAYS_PER_DAY) throw new AgentRefusal('relayer_busy', 'Gas-free sending is busy today. Send the USDC from your own wallet.', 429);
+    // The deposit account must be able to hold USDC before the spec's checks will pass.
+    await this.relayer.ensureRegistered(payment.depositAddress!);
+    const verified = await this.nearExact.verify(payload, requirements);
+    if (!verified.isValid) return { settlement: { success: false, errorReason: verified.invalidReason ?? 'invalid_payload', transaction: '', network: requirements.network }, payment };
+    const [claimed] = await this.db
+      .update(agentPayments)
+      .set({ relayedAt: new Date(), updatedAt: new Date() })
+      .where(and(eq(agentPayments.id, payment.id), eq(agentPayments.status, 'awaiting_deposit'), isNull(agentPayments.relayedAt)))
+      .returning();
+    if (!claimed) throw new AgentRefusal('already_relayed', 'This payment has already been sent. Check its status.', 409);
+    const settlement = await this.nearExact.settle(payload, requirements);
+    await this.audit.record('agent_api', 'agent_payment.x402_near_exact', payment.id, { keyId: key.id, success: settlement.success, reason: settlement.errorReason ?? null, hash: settlement.transaction || null });
+    if (!settlement.success) {
+      // The signed transfer can only ever land once (the NEAR nonce), so a failed settlement may be tried again.
+      await this.db.update(agentPayments).set({ relayedAt: null, updatedAt: new Date() }).where(eq(agentPayments.id, payment.id));
+      return { settlement, payment: claimed };
+    }
+    const [row] = await this.db.update(agentPayments).set({ transactions: [settlement.transaction], updatedAt: new Date() }).where(eq(agentPayments.id, payment.id)).returning();
+    return { settlement, payment: row ?? claimed };
   }
 
   /** A key's payments as a spreadsheet an accountant can read. Account numbers stay masked. */

@@ -4,9 +4,9 @@ import { and, count, desc, eq, gte, isNull, sql } from 'drizzle-orm';
 import { isAddress } from 'viem';
 import { Env } from '../config/env';
 import { DATABASE, Database } from '../database/database.module';
-import { AgentPayment, agentPayments, merchantKeys, PayLink, payLinks, User } from '../database/schema';
+import { AgentPayment, agentPayments, merchantKeys, PayLink, payLinks, ProductLink, productLinks, User } from '../database/schema';
 import { BankLookup } from '../providers/providers';
-import { AgentApiService, AgentRefusal, LATE_ARRIVAL_MS, maskName, NAIRA } from './agent-api.service';
+import { AgentApiService, AgentRefusal, LATE_ARRIVAL_MS, NAIRA } from './agent-api.service';
 import { addressRefusal } from '../chain/address-check';
 import { isNearAccount, USDC_CHAINS } from '../chain/usdc-chains';
 import { CrossChain, PayFrom, PayToken } from './cross-chain';
@@ -18,6 +18,9 @@ const AFTER_DUE_MS = 14 * DAY_MS;
 const FURTHEST_DUE_MS = 366 * DAY_MS;
 const LINKS_PER_DAY = 20;
 const MAX_LINK_NAIRA = 50_000;
+const PRODUCT_LINKS_LIVE = 20;
+/** Invoices one payment link can open in a day, so nobody can flood a seller's list. */
+const PRODUCT_CHECKOUTS_PER_DAY = 500;
 /** A payment that has finished without paying the bank, so the link can be tried again. */
 const CAN_RETRY = new Set(['refunded', 'expired', 'quoted']);
 /** The time to send has passed. The old payment is still watched for a late arrival, but its address is no longer offered. */
@@ -79,23 +82,8 @@ export class PayLinksService {
     return `${base.replace(/\/$/, '')}/pay/${link.id}`;
   }
 
-  /** Makes a link and moves nothing, so this is safe for the chat agent to do. */
-  async create(user: User, input: LinkInput, merchant?: MerchantLink): Promise<PayLink> {
-    const items = input.lineItems?.length ? input.lineItems : null;
-    const total = items ? items.reduce((sum, item) => sum + item.amountNaira, 0) : null;
-    const amountNaira = input.amountNaira ?? total;
-    if (!amountNaira || !Number.isInteger(amountNaira) || amountNaira <= 0) throw new AgentRefusal('invalid_request', 'A pay link needs a whole naira amount.', 400);
-    if (total !== null && total !== amountNaira) throw new AgentRefusal('invalid_request', `The line items add up to ₦${total.toLocaleString('en-NG')}, not ₦${amountNaira.toLocaleString('en-NG')}.`, 400);
-    if (amountNaira > MAX_LINK_NAIRA) throw new AgentRefusal('over_payment_limit', `The most for one pay link is ₦${MAX_LINK_NAIRA.toLocaleString('en-NG')}.`, 422);
-    if (input.dueDate && (Number.isNaN(new Date(`${input.dueDate}T23:59:59+01:00`).getTime()) || new Date(`${input.dueDate}T23:59:59+01:00`).getTime() < Date.now())) throw new AgentRefusal('invalid_request', 'The due date has already passed.', 400);
-    const dueEnds = input.dueDate ? new Date(`${input.dueDate}T23:59:59+01:00`).getTime() : null;
-    if (dueEnds && dueEnds > Date.now() + FURTHEST_DUE_MS) throw new AgentRefusal('invalid_request', 'A due date can be at most a year away.', 400);
-    const [{ made } = { made: 0 }] = await this.db
-      .select({ made: count() })
-      .from(payLinks)
-      .where(and(eq(payLinks.userId, user.id), gte(payLinks.createdAt, sql`now() - interval '1 day'`)));
-    if (!merchant && made >= LINKS_PER_DAY) throw new AgentRefusal('too_many_requests', 'You have made too many pay links today. Try again tomorrow.', 429);
-
+  /** Where the money goes, checked: a NEAR account that exists, a valid Base address, or a bank account the bank names. */
+  private async payoutFor(user: User, input: LinkInput): Promise<{ bank: { bankName: string; accountNumber: string; accountName: string }; usdcAddress: string | null }> {
     if (input.toMyWallet && !user.walletAddress) throw new AgentRefusal('wallet_not_ready', 'Your wallet is still being set up. Please try again in a moment.', 409);
     const usdcAddress = input.nearAccount ? null : input.toMyWallet ? user.walletAddress : input.usdcAddress?.trim() || null;
     let bank: { bankName: string; accountNumber: string; accountName: string };
@@ -117,6 +105,132 @@ export class PayLinksService {
       if (!accountName) throw new AgentRefusal('account_not_found', 'We could not find that account. Check the bank and the account number.', 404);
       bank = { bankName: input.bankName, accountNumber: input.accountNumber, accountName };
     }
+    return { bank, usdcAddress };
+  }
+
+  /** Makes a reusable payment link. Moves nothing. */
+  async createProduct(user: User, input: { title: string; amountNaira: number | null; minimumNaira?: number | null } & Pick<LinkInput, 'bankName' | 'accountNumber' | 'nearAccount' | 'usdcAddress' | 'toMyWallet'>): Promise<ProductLink> {
+    const title = input.title.trim();
+    if (title.length < 2 || title.length > 80) throw new AgentRefusal('invalid_request', 'Give the product a name of 2 to 80 characters.', 400);
+    // A fixed price, or none: then each customer types the amount, at least the minimum when one is given.
+    const fixed = input.amountNaira ?? null;
+    const minimum = fixed === null ? (input.minimumNaira ?? null) : null;
+    for (const value of [fixed, minimum]) {
+      if (value === null) continue;
+      if (!Number.isInteger(value) || value <= 0) throw new AgentRefusal('invalid_request', 'Amounts are whole naira, more than zero.', 400);
+      if (value > MAX_LINK_NAIRA) throw new AgentRefusal('over_payment_limit', `The most for one payment is ₦${MAX_LINK_NAIRA.toLocaleString('en-NG')}.`, 422);
+    }
+    const [{ live } = { live: 0 }] = await this.db.select({ live: count() }).from(productLinks).where(and(eq(productLinks.userId, user.id), isNull(productLinks.stoppedAt)));
+    if (live >= PRODUCT_LINKS_LIVE) throw new AgentRefusal('too_many_requests', `You can have ${PRODUCT_LINKS_LIVE} payment links at a time. Stop one you no longer use.`, 429);
+    const { bank, usdcAddress } = await this.payoutFor(user, input);
+    const [row] = await this.db
+      .insert(productLinks)
+      .values({ userId: user.id, title, amountKobo: fixed === null ? null : fixed * 100, minimumKobo: minimum === null ? null : minimum * 100, ...bank, nearAccount: input.nearAccount ?? null, usdcAddress })
+      .returning();
+    return row!;
+  }
+
+  /** A person's payment links with how many customers paid each, newest first. */
+  async listProducts(user: User) {
+    const rows = await this.db.select().from(productLinks).where(eq(productLinks.userId, user.id)).orderBy(desc(productLinks.createdAt));
+    if (rows.length === 0) return [];
+    const paid = await this.db
+      .select({ id: payLinks.productLinkId, paid: count() })
+      .from(payLinks)
+      .innerJoin(agentPayments, eq(payLinks.paymentId, agentPayments.id))
+      .where(and(eq(payLinks.userId, user.id), eq(agentPayments.status, 'paid'), sql`${payLinks.productLinkId} is not null`))
+      .groupBy(payLinks.productLinkId);
+    const counts = new Map(paid.map((row) => [row.id, row.paid]));
+    return rows.map((row) => ({ ...this.presentProduct(row), paid_count: counts.get(row.id) ?? 0, stopped: Boolean(row.stoppedAt), created_at: row.createdAt.toISOString() }));
+  }
+
+  /** Only the owner can stop their own link. Invoices already opened from it stay payable. */
+  async stopProduct(user: User, id: string): Promise<boolean> {
+    const rows = await this.db.update(productLinks).set({ stoppedAt: new Date() }).where(and(eq(productLinks.id, id), eq(productLinks.userId, user.id), isNull(productLinks.stoppedAt))).returning({ id: productLinks.id });
+    return rows.length > 0;
+  }
+
+  /** What a customer sees before paying. */
+  async publicProduct(id: string) {
+    const [row] = await this.db.select().from(productLinks).where(eq(productLinks.id, id));
+    if (!row) throw new AgentRefusal('not_found', 'This payment link does not exist.', 404);
+    return { ...this.presentProduct(row), open: !row.stoppedAt };
+  }
+
+  /**
+   * A customer pressed Pay: a fresh invoice for exactly this product, paying exactly this owner. The bank was
+   * checked when the link was made, so nothing outside is asked here, and a daily cap stops a link being flooded.
+   */
+  async checkoutProduct(id: string, chosenNaira?: number | null): Promise<PayLink> {
+    const [row] = await this.db.select().from(productLinks).where(eq(productLinks.id, id));
+    if (!row) throw new AgentRefusal('not_found', 'This payment link does not exist.', 404);
+    if (row.stoppedAt) throw new AgentRefusal('link_stopped', 'The seller has stopped this payment link.', 410);
+    // A fixed price is always the price: whatever a customer sends is ignored. Otherwise the customer's amount is checked.
+    let amountKobo = row.amountKobo;
+    if (amountKobo === null) {
+      const least = row.minimumKobo ? row.minimumKobo / 100 : 1;
+      if (!chosenNaira || !Number.isInteger(chosenNaira) || chosenNaira < least) throw new AgentRefusal('invalid_amount', `Enter a whole naira amount of at least ₦${least.toLocaleString('en-NG')}.`, 400);
+      if (chosenNaira > MAX_LINK_NAIRA) throw new AgentRefusal('over_payment_limit', `The most for one payment is ₦${MAX_LINK_NAIRA.toLocaleString('en-NG')}.`, 422);
+      amountKobo = chosenNaira * 100;
+    }
+    const [{ today } = { today: 0 }] = await this.db.select({ today: count() }).from(payLinks).where(and(eq(payLinks.productLinkId, id), gte(payLinks.createdAt, sql`now() - interval '1 day'`)));
+    if (today >= PRODUCT_CHECKOUTS_PER_DAY) throw new AgentRefusal('too_many_requests', 'This payment link is very busy today. Please try again later.', 429);
+    const [link] = await this.db
+      .insert(payLinks)
+      .values({
+        userId: row.userId,
+        amountKobo,
+        bankName: row.bankName,
+        accountNumber: row.accountNumber,
+        accountName: row.accountName,
+        note: row.title,
+        lineItems: [{ description: row.title, amountNaira: amountKobo / 100 }],
+        nearAccount: row.nearAccount,
+        usdcAddress: row.usdcAddress,
+        productLinkId: row.id,
+        expiresAt: new Date(Date.now() + LINK_LIFETIME_MS),
+      })
+      .returning();
+    return link!;
+  }
+
+  /** The public page of a payment link. */
+  productUrl(id: string): string {
+    const base = this.config.get('PUBLIC_APP_URL', { infer: true }) ?? [this.config.get('CORS_ORIGINS', { infer: true })].flat().join(',').split(',')[0]!.trim();
+    return `${base.replace(/\/$/, '')}/p/${id}`;
+  }
+
+  private presentProduct(row: ProductLink) {
+    return {
+      id: row.id,
+      url: this.productUrl(row.id),
+      title: row.title,
+      amount_naira: row.amountKobo === null ? null : row.amountKobo / 100,
+      customer_chooses: row.amountKobo === null,
+      minimum_naira: row.minimumKobo === null ? null : row.minimumKobo / 100,
+      to: row.nearAccount ?? row.usdcAddress ?? row.accountName,
+      receives: row.nearAccount ? 'USDC on NEAR' : row.usdcAddress ? 'USDC on Base' : `naira, ${row.bankName} ****${row.accountNumber.slice(-4)}`,
+    };
+  }
+
+  /** Makes a link and moves nothing, so this is safe for the chat agent to do. */
+  async create(user: User, input: LinkInput, merchant?: MerchantLink): Promise<PayLink> {
+    const items = input.lineItems?.length ? input.lineItems : null;
+    const total = items ? items.reduce((sum, item) => sum + item.amountNaira, 0) : null;
+    const amountNaira = input.amountNaira ?? total;
+    if (!amountNaira || !Number.isInteger(amountNaira) || amountNaira <= 0) throw new AgentRefusal('invalid_request', 'A pay link needs a whole naira amount.', 400);
+    if (total !== null && total !== amountNaira) throw new AgentRefusal('invalid_request', `The line items add up to ₦${total.toLocaleString('en-NG')}, not ₦${amountNaira.toLocaleString('en-NG')}.`, 400);
+    if (amountNaira > MAX_LINK_NAIRA) throw new AgentRefusal('over_payment_limit', `The most for one pay link is ₦${MAX_LINK_NAIRA.toLocaleString('en-NG')}.`, 422);
+    if (input.dueDate && (Number.isNaN(new Date(`${input.dueDate}T23:59:59+01:00`).getTime()) || new Date(`${input.dueDate}T23:59:59+01:00`).getTime() < Date.now())) throw new AgentRefusal('invalid_request', 'The due date has already passed.', 400);
+    const dueEnds = input.dueDate ? new Date(`${input.dueDate}T23:59:59+01:00`).getTime() : null;
+    if (dueEnds && dueEnds > Date.now() + FURTHEST_DUE_MS) throw new AgentRefusal('invalid_request', 'A due date can be at most a year away.', 400);
+    const [{ made } = { made: 0 }] = await this.db
+      .select({ made: count() })
+      .from(payLinks)
+      .where(and(eq(payLinks.userId, user.id), gte(payLinks.createdAt, sql`now() - interval '1 day'`)));
+    if (!merchant && made >= LINKS_PER_DAY) throw new AgentRefusal('too_many_requests', 'You have made too many pay links today. Try again tomorrow.', 429);
+
+    const { bank, usdcAddress } = await this.payoutFor(user, input);
     const [link] = await this.db
       .insert(payLinks)
       .values({ userId: user.id, amountKobo: amountNaira * 100, ...bank, note: input.note?.trim() || null, dueDate: input.dueDate ?? null, lineItems: items, nearAccount: input.nearAccount ?? null, usdcAddress, merchantKeyId: merchant?.keyId ?? null, reference: merchant?.reference ?? null, returnUrl: merchant?.returnUrl ?? null, expiresAt: new Date(Math.max(Date.now() + LINK_LIFETIME_MS, (dueEnds ?? 0) + AFTER_DUE_MS)) })
@@ -242,7 +356,7 @@ export const presentPublicLink = ({ link, payment, open, merchantName = null, na
   return_url: link.returnUrl,
   expires_at: link.expiresAt,
   amount_naira: link.amountKobo / 100,
-  to: link.nearAccount ?? link.usdcAddress ?? maskName(link.accountName),
+  to: link.nearAccount ?? link.usdcAddress ?? link.accountName,
   bank_name: link.bankName,
   account_number: link.nearAccount || link.usdcAddress ? null : `****${link.accountNumber.slice(-4)}`,
   receives: link.nearAccount ? 'USDC on NEAR' : link.usdcAddress ? 'USDC on Base' : 'naira',

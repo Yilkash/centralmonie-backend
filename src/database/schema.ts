@@ -418,6 +418,34 @@ export type AgentKey = typeof agentKeys.$inferSelect;
 export type AgentPayment = typeof agentPayments.$inferSelect;
 
 /** A link someone can pay from any chain, with naira going to the bank account of the user who made it. */
+/**
+ * A reusable payment link: one product or service at a fixed price, which many customers can pay. Each customer
+ * gets their own invoice (a pay link) made from it, so the price and the payout can never be changed by a buyer.
+ */
+export const productLinks = pgTable(
+  'product_links',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+    title: text('title').notNull(),
+    /** The fixed price. Null means each customer types the amount, at least minimumKobo when that is set. */
+    amountKobo: bigint('amount_kobo', { mode: 'number' }),
+    minimumKobo: bigint('minimum_kobo', { mode: 'number' }),
+    /** Checked once when the link is made, then copied to every invoice, so customers never trigger a bank lookup. */
+    bankName: text('bank_name').notNull(),
+    accountNumber: text('account_number').notNull(),
+    accountName: text('account_name').notNull(),
+    nearAccount: text('near_account'),
+    usdcAddress: text('usdc_address'),
+    /** Set when the owner stops it. A stopped link makes no more invoices. */
+    stoppedAt: timestamp('stopped_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [index('product_links_user_idx').on(table.userId, table.createdAt)],
+);
+
+export type ProductLink = typeof productLinks.$inferSelect;
+
 export const payLinks = pgTable(
   'pay_links',
   {
@@ -443,6 +471,8 @@ export const payLinks = pgTable(
     /** Where the payer goes back to once paid. Only a website the shop registered. */
     returnUrl: text('return_url'),
     paymentId: uuid('payment_id').references(() => agentPayments.id),
+    /** Set when a customer opened it from a reusable payment link. */
+    productLinkId: uuid('product_link_id').references(() => productLinks.id, { onDelete: 'set null' }),
     expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
