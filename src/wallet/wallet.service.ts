@@ -128,8 +128,14 @@ export class WalletService {
 
   async summary(user: User): Promise<WalletSummary> {
     // The balance must still show if the rate cannot be read, so it is shown without its naira value.
-    const [used, rate] = await Promise.all([this.limits.usedTodayKobo(user.id), this.rates.nairaPerUsdc().catch(() => null)]);
-    const balance = user.walletAddress ? await this.chain.usdcBalance(user.walletAddress).catch(() => null) : null;
+    // All at once, so the page waits for the slowest lookup instead of the sum of them.
+    const [used, rate, balance, depositOnTheWay, [latest]] = await Promise.all([
+      this.limits.usedTodayKobo(user.id),
+      this.rates.nairaPerUsdc().catch(() => null),
+      user.walletAddress ? this.chain.usdcBalance(user.walletAddress).catch(() => null) : Promise.resolve(null),
+      this.depositOnTheWay(user.id),
+      this.entries(user.id, {}, 1),
+    ]);
     return {
       address: user.walletAddress,
       balance_usdc: balance === null ? null : formatUsdc(Number(balance)),
@@ -137,8 +143,8 @@ export class WalletService {
       limit_used: formatNaira(used),
       limit_left: formatNaira(Math.max(DAILY_LIMIT_KOBO - used, 0)),
       naira_per_usdc: rate,
-      deposit_on_the_way: await this.depositOnTheWay(user.id),
-      latest: (await this.entries(user.id, {}, 1))[0] ?? null,
+      deposit_on_the_way: depositOnTheWay,
+      latest: latest ?? null,
     };
   }
 
