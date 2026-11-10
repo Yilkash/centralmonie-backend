@@ -4,6 +4,8 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { TenKoboClient } from '../src/client.ts';
 import { buildServer } from '../src/server.ts';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { createMcpHttpServer } from '../src/http.ts';
 
 const ID = '11111111-1111-4111-8111-111111111111';
 const INPUT = { amount_naira: 1400, bank_name: 'OPay', account_number: '8031234568', pay_from: 'near', refund_to: 'agent.near', payer_name: 'Ada Motors', payer_email: 'ada@example.com', purpose: 'Invoice 1' };
@@ -95,5 +97,34 @@ describe('the 10kobo MCP server', () => {
     const result = await call('quote_naira_payment', INPUT);
     assert.match(result.text, /Nothing was sent/);
     assert.doesNotMatch(result.text, /private detail/);
+  });
+});
+
+describe('the hosted MCP server', () => {
+  it('answers on /mcp over Streamable HTTP, lists the three tools with their annotations, and refuses other paths', async () => {
+    const http = createMcpHttpServer().listen(0);
+    const port = (http.address() as { port: number }).port;
+    try {
+      const mcp = new Client({ name: 'test', version: '1' });
+      await mcp.connect(new StreamableHTTPClientTransport(new URL(`http://localhost:${port}/mcp`)));
+      const { tools } = await mcp.listTools();
+      assert.deepEqual(tools.map((tool) => tool.name), ['quote_naira_payment', 'accept_quote', 'check_payment']);
+      assert.equal(tools.find((tool) => tool.name === 'check_payment')!.annotations!.readOnlyHint, true);
+      assert.equal(tools.every((tool) => tool.annotations?.destructiveHint === false), true);
+      await mcp.close();
+      assert.equal((await fetch(`http://localhost:${port}/elsewhere`)).status, 404);
+      assert.equal((await fetch(`http://localhost:${port}/mcp`)).status, 405);
+      assert.equal((await fetch(`http://localhost:${port}/mcp`, { method: 'POST', body: 'not json' })).status, 400);
+    } finally {
+      http.close();
+    }
+  });
+
+  it('accepts with refund_to given again, so a restarted server still works', async () => {
+    const fetchFn = (async () => new Response(JSON.stringify({ payment: { id: ID, status: 'awaiting_deposit' } }), { status: 402, headers: { 'PAYMENT-REQUIRED': encode(offer) } })) as unknown as typeof fetch;
+    const fresh = new TenKoboClient({ baseUrl: 'https://api.test/', fetchFn });
+    const accepted = await fresh.accept(ID, 'agent.near');
+    assert.equal(accepted.to_address, '0xdeposit');
+    await assert.rejects(new TenKoboClient({ baseUrl: 'https://api.test/', fetchFn }).accept(ID), /refund_to/);
   });
 });

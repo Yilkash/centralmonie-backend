@@ -7,6 +7,7 @@
   "bin": { "10kobo-mcp": "src/main.ts" },
   "scripts": {
     "start": "node --disable-warning=ExperimentalWarning src/main.ts",
+    "start:http": "node --disable-warning=ExperimentalWarning src/http.ts",
     "test": "node --disable-warning=ExperimentalWarning --test test/*.test.ts",
     "typecheck": "tsc --noEmit"
   },

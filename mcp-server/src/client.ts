@@ -40,9 +40,10 @@ export class TenKoboClient {
     return payment;
   }
 
-  async accept(id: string): Promise<{ pay_exact_usdc: string; to_address: string; network: string; send_before: string | undefined; payment_id: string }> {
-    const known = this.payments.get(id);
-    if (!known) throw new TenKoboError('not_found', 'Get a quote first. That quote is not from this session.');
+  async accept(id: string, refundTo?: string): Promise<{ pay_exact_usdc: string; to_address: string; network: string; send_before: string | undefined; payment_id: string }> {
+    const known = this.payments.get(id) ?? (refundTo ? { refundTo } : undefined);
+    if (!known) throw new TenKoboError('not_found', 'Give refund_to, the same refund address used in the quote.');
+    this.payments.set(id, known);
     const url = this.resource(id);
     const { response } = await this.call(`/v1/agent/x402/pay/${id}`, undefined, { x402Version: 2, resource: { url }, payload: { type: 'quote', refundTo: known.refundTo } });
     const header = response.headers.get('payment-required');
