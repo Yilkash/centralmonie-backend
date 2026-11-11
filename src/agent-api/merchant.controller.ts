@@ -159,9 +159,19 @@ export class OwnMerchantKeysController {
   ) {}
 
   /** The bank's name for an account, so the owner sees who will be paid before making a key. Moves nothing. */
+  /** In memory, so a restart clears it. Stops one account being used to look up many names. */
+  private readonly checks = new Map<string, { until: number; count: number }>();
+
   @Post('check-account')
   @HttpCode(200)
-  async checkAccount(@Body() body: unknown) {
+  async checkAccount(@CurrentUser() user: User, @Body() body: unknown) {
+    const now = Date.now();
+    const window = this.checks.get(user.id);
+    const current = window && window.until > now ? window : { until: now + 3_600_000, count: 0 };
+    current.count += 1;
+    this.checks.set(user.id, current);
+    if (this.checks.size > 10_000) for (const [id, entry] of this.checks) if (entry.until <= now) this.checks.delete(id);
+    if (current.count > 20) throw new AgentRefusal('too_many_requests', 'Too many account checks. Try again later.', 429);
     const parsed = z.object({ bank_name: z.string().trim().min(2).max(60), account_number: z.string().regex(/^\d{10}$/) }).safeParse(body);
     if (!parsed.success) throw invalid(parsed.error);
     const name = await this.banks.accountName(parsed.data.bank_name, parsed.data.account_number);
@@ -188,6 +198,7 @@ export class OwnMerchantKeysController {
       throw new AgentRefusal('account_not_found', 'That bank has no account with that number. Check both and try again.', 422);
     }
     const made = await this.merchants.createKey({
+      actor: `user:${user.id}`,
       userEmail: user.email,
       name,
       payout:

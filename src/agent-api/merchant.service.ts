@@ -6,6 +6,7 @@ import { AgentPayment, agentPayments, MerchantKey, merchantEvents, merchantKeys,
 import { isAddress } from 'viem';
 import { isNearAccount } from '../chain/usdc-chains';
 import { AgentRefusal, hashKey } from './agent-api.service';
+import { AuditService } from '../ops/audit.service';
 import { LinkInput, PayLinksService, presentOwnLink } from './pay-links.service';
 
 /** The notices a shop can get. Each is final for its invoice, so each is sent once. */
@@ -17,6 +18,8 @@ const LONGEST_WAIT_MS = 6 * 60 * 60_000;
 const NOTICE_TIMEOUT_MS = 5000;
 
 export interface NewMerchantKey {
+  /** Who made it, for the audit log: 'admin' or 'user:<id>'. */
+  actor?: string;
   userEmail: string;
   name: string;
   /** Where every invoice from this key pays out: naira to a bank, or USDC to the owner's wallet, a Base address or a NEAR account. */
@@ -98,6 +101,7 @@ export class MerchantService {
   constructor(
     @Inject(DATABASE) private readonly db: Database,
     private readonly links: PayLinksService,
+    private readonly audit: AuditService,
   ) {}
 
   /** The key and webhook secret are shown once, here, and only their hash or the secret for signing is kept. */
@@ -130,6 +134,8 @@ export class MerchantService {
       .insert(merchantKeys)
       .values({ userId: owner.id, name: input.name.trim(), keyHash: hashKey(key), ...payout, returnOrigins: origins, webhookUrl: input.webhookUrl ?? null, webhookSecret, invoicesPerDay: input.invoicesPerDay ?? 200 })
       .returning();
+    // Who made it and where its money goes, never the key or the secret.
+    await this.audit.record(input.actor ?? 'admin', 'merchant_key.created', row!.id, { name: row!.name, userId: owner.id, payout: 'accountNumber' in input.payout ? { bankName: input.payout.bankName, accountNumber: `****${input.payout.accountNumber.slice(-4)}` } : input.payout, returnOrigins: origins, webhook: Boolean(input.webhookUrl) });
     return { id: row!.id, key, webhookSecret };
   }
 
@@ -155,11 +161,13 @@ export class MerchantService {
       .set({ revokedAt: new Date() })
       .where(and(eq(merchantKeys.id, id), eq(merchantKeys.userId, userId), isNull(merchantKeys.revokedAt)))
       .returning({ id: merchantKeys.id });
+    if (rows.length > 0) await this.audit.record(`user:${userId}`, 'merchant_key.revoked', id);
     return rows.length > 0;
   }
 
   async revokeKey(id: string): Promise<boolean> {
     const rows = await this.db.update(merchantKeys).set({ revokedAt: new Date() }).where(and(eq(merchantKeys.id, id), isNull(merchantKeys.revokedAt))).returning({ id: merchantKeys.id });
+    if (rows.length > 0) await this.audit.record('admin', 'merchant_key.revoked', id);
     return rows.length > 0;
   }
 

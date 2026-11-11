@@ -991,6 +991,17 @@ describe('Agent API', () => {
       }
     });
 
+    it('records who made and stopped a key in the audit log, without the key, the secret or the full account number', async () => {
+      const rows = (await pool.query(`select actor, action, details::text as details from audit_log where subject = $1 order by created_at`, [keyId])).rows;
+      expect(rows[0]).toMatchObject({ actor: 'admin', action: 'merchant_key.created' });
+      expect(rows[0].details).toContain('****4568');
+      expect(rows[0].details).not.toContain('8031234568');
+      expect(rows[0].details).not.toContain(shopKey);
+      await merchants.revokeKey(keyId);
+      const after = (await pool.query(`select action from audit_log where subject = $1 order by created_at`, [keyId])).rows.map((row) => row.action);
+      expect(after).toEqual(['merchant_key.created', 'merchant_key.revoked']);
+    });
+
     it('refuses keys that would send payers or notices somewhere unsafe', async () => {
       const bank = { bankName: 'OPay', accountNumber: '8031234568' };
       await expect(merchants.createKey({ userEmail: 'owner@shop.example', name: 'x', payout: bank, webhookUrl: 'http://shop.example/hook' })).rejects.toThrow('https');
