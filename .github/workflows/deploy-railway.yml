@@ -1,0 +1,37 @@
+# Deploys the backend to Railway on every push to main, once the CI checks have passed.
+# Railway's own GitHub app needs a blockfuselabs owner to install it, so this uses a Railway project token instead,
+# kept in the repository secret RAILWAY_TOKEN. Build and start commands live in railway.json.
+name: Deploy to Railway
+
+on:
+  workflow_run:
+    workflows: [CI]
+    branches: [main]
+    types: [completed]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-railway
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    # Only after CI passed on a push, or when started by hand.
+    if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      # Pinned: CLI 5.3.0 fails with "Not signed in" when given a project token.
+      - run: npm install -g @railway/cli@5.2.0
+      - name: Upload to Railway
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: railway up --service=backend --detach
