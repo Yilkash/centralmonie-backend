@@ -8,7 +8,7 @@ import { DATABASE, Database } from '../database/database.module';
 import { AgentKey, agentKeys, AgentPayment, agentPayments } from '../database/schema';
 import { formatNaira, koboToUsdcMinor } from '../money/money';
 import { AuditService } from '../ops/audit.service';
-import { AGENT_STATUSES_THAT_COUNT, GuardsService } from '../ops/guards.service';
+import { AGENT_STATUSES_MONEY_ARRIVED, AGENT_STATUSES_THAT_COUNT, GuardsService } from '../ops/guards.service';
 import { AgentPayout, BankLookup, ExchangeRates, NairaOnramp, PaymentProvider } from '../providers/providers';
 import { Chain } from '../chain/chain.service';
 import { ChainKey, isNearAccount, USDC_CHAINS } from '../chain/usdc-chains';
@@ -58,6 +58,11 @@ const KEYLESS = {
   quotesPerIpHour: 30,
   acceptsPerIpHour: 10,
   quotesPerDay: 2000,
+  /** Unpaid payments open at once to one bank account. Unpaid ones no longer count toward the money caps, so this
+   * bounds how far real payments arriving together can go past them. */
+  openUnpaidPerAccount: 3,
+  /** Quotes one pay link or checkout can ask for in an hour. These do not use the shared daily quote budget. */
+  quotesPerLinkHour: 40,
 };
 
 const startOfLagosDay = sql`(date_trunc('day', now() at time zone 'Africa/Lagos') at time zone 'Africa/Lagos')`;
@@ -82,9 +87,15 @@ export function agentApiOpen(mode: 'simulated' | 'chain', enabled: boolean): boo
 
 /** IPv6 hands out whole /64 blocks, so one caller can hold billions of addresses. */
 export function ipGroup(ip: string): string {
-  if (!ip.includes(':') || ip.startsWith('::ffff:')) return ip;
-  const [head = ''] = ip.split('::');
-  return head.split(':').slice(0, 4).join(':');
+  if (!ip.includes(':')) return ip;
+  if (/^::ffff:\d+\.\d+\.\d+\.\d+$/i.test(ip)) return ip.slice(7);
+  const bare = ip.split('%')[0]!.toLowerCase();
+  const [head = '', tail] = bare.split('::');
+  const left = head ? head.split(':') : [];
+  const right = tail ? tail.split(':') : [];
+  const missing = tail === undefined ? 0 : Math.max(8 - left.length - right.length, 0);
+  const full = [...left, ...Array<string>(missing).fill('0'), ...right].map((part) => (part.replace(/^0+(?=.)/, '') || '0'));
+  return full.slice(0, 4).join(':');
 }
 
 /** Keeps enough to compare with an invoice, without handing out names to anyone who asks about an account. */
@@ -147,6 +158,8 @@ export interface QuoteInput {
   payToken?: PayToken;
   /** USDC straight to this NEAR account or Base address, with no bank payout. */
   deliverTo?: string;
+  /** The pay link or checkout this quote is for. It gets its own quote budget instead of the shared daily one. */
+  viaLink?: string;
 }
 
 /** The way in for other AI agents. It uses no AI: ordinary code checks the request and tracks the money. */
@@ -197,6 +210,17 @@ export class AgentApiService {
     const [row] = await this.db.select().from(agentKeys).where(eq(agentKeys.id, KEYLESS_KEY_ID));
     if (row!.revokedAt) throw new AgentRefusal('unavailable', 'Paying without a key is stopped for now.', 503);
     return row!;
+  }
+
+  /** In memory, like countIp. One pay link cannot be used to flood quotes, and links do not share one daily budget. */
+  private countLink(linkId: string): void {
+    const now = Date.now();
+    const key = `link:${linkId}`;
+    const window = this.ipWindows.get(key);
+    const current = window && window.until > now ? window : { until: now + 3_600_000, count: 0 };
+    current.count += 1;
+    this.ipWindows.set(key, current);
+    if (current.count > KEYLESS.quotesPerLinkHour) throw new AgentRefusal('too_many_requests', 'This link has had many payment attempts. Try again later.', 429);
   }
 
   /** In memory, so a restart clears it. It slows abuse of the bank lookup: the money limits are elsewhere. */
@@ -256,7 +280,8 @@ export class AgentApiService {
         .select({ today: count() })
         .from(agentPayments)
         .where(and(eq(agentPayments.keyId, KEYLESS_KEY_ID), gte(agentPayments.createdAt, sql`${startOfLagosDay}`)));
-      if (today >= KEYLESS.quotesPerDay) throw new AgentRefusal('too_many_requests', 'Paying without a key is busy today. Try again tomorrow.', 429);
+      if (input.viaLink) this.countLink(input.viaLink);
+      else if (today >= KEYLESS.quotesPerDay) throw new AgentRefusal('too_many_requests', 'Paying without a key is busy today. Try again tomorrow.', 429);
       if (amountKobo > KEYLESS.perPaymentKobo) throw new AgentRefusal('over_payment_limit', `Without an API key, the most for one payment is ${formatNaira(KEYLESS.perPaymentKobo)}.`, 422);
       await this.assertKeylessCaps(amountKobo, refundTo, input.accountNumber, this.db);
     }
@@ -718,9 +743,14 @@ export class AgentApiService {
       const [row] = await db
         .select({ used: sql<string>`coalesce(sum(${agentPayments.amountKobo}), 0)` })
         .from(agentPayments)
-        .where(and(eq(agentPayments.keyId, KEYLESS_KEY_ID), eq(column, value), inArray(agentPayments.status, [...AGENT_STATUSES_THAT_COUNT]), gte(agentPayments.acceptedAt, sql`${startOfLagosDay}`)));
+        .where(and(eq(agentPayments.keyId, KEYLESS_KEY_ID), eq(column, value), inArray(agentPayments.status, [...AGENT_STATUSES_MONEY_ARRIVED]), gte(agentPayments.acceptedAt, sql`${startOfLagosDay}`)));
       return Number(row!.used);
     };
+    const [open] = await db
+      .select({ open: count() })
+      .from(agentPayments)
+      .where(and(eq(agentPayments.keyId, KEYLESS_KEY_ID), eq(agentPayments.accountNumber, accountNumber), inArray(agentPayments.status, ['creating', 'awaiting_deposit']), gte(agentPayments.acceptedAt, sql`${startOfLagosDay}`), sql`(${agentPayments.depositDeadline} is null or ${agentPayments.depositDeadline} > now())`));
+    if (Number(open!.open) >= KEYLESS.openUnpaidPerAccount) throw new AgentRefusal('too_many_open', 'Several payments to this account are waiting for money. Finish one, or try again in a few minutes.', 429);
     if ((await used(agentPayments.refundTo, refundTo)) + addedKobo > KEYLESS.perWalletDayKobo) throw new AgentRefusal('over_wallet_limit', 'This wallet has reached its limit for today.', 422);
     if ((await used(agentPayments.accountNumber, accountNumber)) + addedKobo > KEYLESS.perAccountDayKobo) throw new AgentRefusal('over_account_limit', 'This bank account has reached its limit for today.', 422);
   }
@@ -731,7 +761,7 @@ export class AgentApiService {
     const [row] = await db
       .select({ used: sql<string>`coalesce(sum(${agentPayments.amountKobo}), 0)` })
       .from(agentPayments)
-      .where(and(eq(agentPayments.keyId, key.id), inArray(agentPayments.status, [...AGENT_STATUSES_THAT_COUNT]), gte(agentPayments.acceptedAt, sql`${startOfLagosDay}`)));
+      .where(and(eq(agentPayments.keyId, key.id), inArray(agentPayments.status, [...(key.id === KEYLESS_KEY_ID ? AGENT_STATUSES_MONEY_ARRIVED : AGENT_STATUSES_THAT_COUNT)]), gte(agentPayments.acceptedAt, sql`${startOfLagosDay}`)));
     const left = key.dailyLimitKobo - Number(row!.used);
     if (addedKobo > left) throw new AgentRefusal('over_daily_limit', `This would go over this key's daily limit. ${formatNaira(Math.max(left, 0))} is left today.`, 422);
   }

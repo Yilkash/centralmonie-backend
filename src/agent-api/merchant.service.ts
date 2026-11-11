@@ -1,5 +1,5 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
-import { and, count, eq, gte, isNotNull, isNull, lt, lte, or, sql, desc } from 'drizzle-orm';
+import { and, count, eq, gte, inArray, isNotNull, isNull, lt, lte, or, sql, desc } from 'drizzle-orm';
 import { createHmac, randomBytes, randomUUID } from 'node:crypto';
 import { DATABASE, Database } from '../database/database.module';
 import { AgentPayment, agentPayments, MerchantKey, merchantEvents, merchantKeys, PayLink, payLinks, User, users } from '../database/schema';
@@ -31,7 +31,26 @@ export interface MerchantInvoiceInput extends Pick<LinkInput, 'amountNaira' | 'n
   returnUrl?: string | null;
 }
 
-/** Plain http is allowed only for a server on this same machine, for local testing. */
+const production = () => process.env.NODE_ENV === 'production';
+
+/** Addresses no shop's server can be at: this machine, private networks, link-local and cloud metadata, CGNAT. */
+export function isPrivateAddress(address: string): boolean {
+  const ip = address.toLowerCase().replace(/^\[|\]$/g, '').replace(/^::ffff:(?=\d+\.)/, '');
+  const v4 = ip.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
+  if (v4) {
+    const [a, b] = [Number(v4[1]), Number(v4[2])];
+    return a === 0 || a === 10 || a === 127 || (a === 100 && b >= 64 && b <= 127) || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 198 && (b === 18 || b === 19)) || a >= 224;
+  }
+  if (!ip.includes(':')) return false;
+  return ip === '::' || ip === '::1' || /^f[cd]/.test(ip) || /^fe[89ab]/.test(ip) || ip.startsWith('ff');
+}
+
+const privateName = (host: string) => host === 'localhost' || /\.(localhost|local|internal|lan|home|intranet)$/i.test(host) || isPrivateAddress(host);
+
+/**
+ * A shop's web address. Plain http and this machine are allowed only outside production, for local testing.
+ * In production it must be public https, so a notice can never be aimed at our own network.
+ */
 function webAddress(value: string, what: string): URL {
   let url: URL;
   try {
@@ -39,10 +58,26 @@ function webAddress(value: string, what: string): URL {
   } catch {
     throw new AgentRefusal('invalid_request', `The ${what} is not a valid web address.`, 400);
   }
-  const local = ['localhost', '127.0.0.1'].includes(url.hostname);
-  if (url.protocol !== 'https:' && !(url.protocol === 'http:' && local)) throw new AgentRefusal('invalid_request', `The ${what} must use https.`, 400);
+  const host = url.hostname.replace(/^\[|\]$/g, '');
+  const local = ['localhost', '127.0.0.1'].includes(host);
   if (url.username || url.password) throw new AgentRefusal('invalid_request', `The ${what} must not contain a password.`, 400);
+  if (production()) {
+    if (url.protocol !== 'https:') throw new AgentRefusal('invalid_request', `The ${what} must use https.`, 400);
+    if (privateName(host)) throw new AgentRefusal('invalid_request', `The ${what} must be a public website, not a private or internal address.`, 400);
+  } else if (url.protocol !== 'https:' && !(url.protocol === 'http:' && local)) {
+    throw new AgentRefusal('invalid_request', `The ${what} must use https.`, 400);
+  }
   return url;
+}
+
+/** Looked up right before sending, so a public name that later points inside our network is still refused. */
+async function assertPublicHost(url: URL): Promise<void> {
+  if (!production()) return;
+  const host = url.hostname.replace(/^\[|\]$/g, '');
+  if (privateName(host)) throw new Error('private address');
+  const { lookup } = await import('node:dns/promises');
+  const found = await lookup(host, { all: true });
+  if (found.length === 0 || found.some((entry) => isPrivateAddress(entry.address))) throw new Error('private address');
 }
 
 /** Shows a shop exactly how to check a notice: the time, a dot, then the body, signed with its webhook secret. */
@@ -145,11 +180,19 @@ export class MerchantService {
       if (!key.returnOrigins.includes(url.origin)) throw new AgentRefusal('invalid_request', 'The return address must be on a website registered for this key.', 400);
       returnUrl = url.toString();
     }
-    const [{ made } = { made: 0 }] = await this.db
-      .select({ made: count() })
-      .from(payLinks)
-      .where(and(eq(payLinks.merchantKeyId, key.id), gte(payLinks.createdAt, sql`now() - interval '1 day'`)));
-    if (made >= key.invoicesPerDay) throw new AgentRefusal('too_many_requests', 'This key has made its most invoices for today.', 429);
+    return this.db.transaction(async (tx) => {
+      // Held until this invoice is made, so two requests at once are counted one after the other.
+      await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${'invoices:' + key.id}))`);
+      const [{ made } = { made: 0 }] = await tx
+        .select({ made: count() })
+        .from(payLinks)
+        .where(and(eq(payLinks.merchantKeyId, key.id), gte(payLinks.createdAt, sql`now() - interval '1 day'`)));
+      if (made >= key.invoicesPerDay) throw new AgentRefusal('too_many_requests', 'This key has made its most invoices for today.', 429);
+      return this.makeInvoice(key, owner, input, returnUrl);
+    });
+  }
+
+  private async makeInvoice(key: MerchantKey, owner: User, input: MerchantInvoiceInput, returnUrl: string | null): Promise<PayLink> {
 
     const payout = key.payoutToWallet
       ? { toMyWallet: true }
@@ -176,6 +219,20 @@ export class MerchantService {
   private sameInvoice(link: PayLink, input: MerchantInvoiceInput): PayLink {
     const total = input.amountNaira ?? input.lineItems?.reduce((sum, item) => sum + item.amountNaira, 0) ?? null;
     if (total !== null && total * 100 !== link.amountKobo) throw new AgentRefusal('reference_used', 'That reference already has an invoice for a different amount.', 409);
+    // A retry may leave details out, but must not change them: a changed order needs a new reference.
+    const differs = (given: unknown, kept: unknown) => given !== undefined && given !== null && JSON.stringify(given) !== JSON.stringify(kept);
+    // Compared as plain values: the database may keep an item's fields in another order.
+    const plain = (list: { description: string; amountNaira: number }[] | null | undefined) => list?.map((item) => `${item.description}|${item.amountNaira}`);
+    const items = plain(input.lineItems ?? undefined);
+    let returnUrl: string | undefined;
+    try {
+      returnUrl = input.returnUrl ? new URL(input.returnUrl).toString() : undefined;
+    } catch {
+      returnUrl = input.returnUrl ?? undefined;
+    }
+    if (differs(input.note?.trim() || undefined, link.note) || differs(input.dueDate, link.dueDate) || differs(items, plain(link.lineItems)) || differs(returnUrl, link.returnUrl)) {
+      throw new AgentRefusal('reference_used', 'That reference already has an invoice with different details. Use a new reference for a changed order.', 409);
+    }
     return link;
   }
 
@@ -232,18 +289,30 @@ export class MerchantService {
 
   /** Sends notices that are due. A shop answering with any 2xx means it has it; anything else is tried again later. */
   async deliverNotices(): Promise<number> {
+    // Claimed in one step: due notices are pushed a little into the future, skipping any another copy holds, and only
+    // what this copy claimed is sent. A copy that stops mid-send leaves the notice to be tried again after the hold.
+    const claimed = await this.db.execute<{ id: string }>(sql`
+      update ${merchantEvents} set next_attempt_at = now() + interval '2 minutes'
+      where id in (
+        select e.id from ${merchantEvents} e join ${merchantKeys} k on k.id = e.key_id
+        where e.delivered_at is null and e.next_attempt_at <= now() and e.attempts < ${MAX_ATTEMPTS} and k.revoked_at is null
+        order by e.next_attempt_at limit 20 for update of e skip locked
+      )
+      returning id`);
+    const ids = (claimed.rows ?? (claimed as unknown as { id: string }[])).map((row) => row.id);
+    if (ids.length === 0) return 0;
     const due = await this.db
       .select({ event: merchantEvents, key: merchantKeys })
       .from(merchantEvents)
       .innerJoin(merchantKeys, eq(merchantEvents.keyId, merchantKeys.id))
-      .where(and(isNull(merchantEvents.deliveredAt), lte(merchantEvents.nextAttemptAt, sql`now()`), lt(merchantEvents.attempts, MAX_ATTEMPTS), isNull(merchantKeys.revokedAt)))
-      .limit(20);
+      .where(inArray(merchantEvents.id, ids));
     let delivered = 0;
     for (const { event, key } of due) {
       const body = JSON.stringify(event.payload);
       let problem: string | null = null;
       try {
         if (!key.webhookUrl || !key.webhookSecret) throw new Error('no notice address');
+        await assertPublicHost(new URL(key.webhookUrl));
         const response = await this.fetchFn(key.webhookUrl, {
           method: 'POST',
           headers: { 'content-type': 'application/json', '10kobo-event-id': event.id, '10kobo-signature': signNotice(key.webhookSecret, Math.floor(Date.now() / 1000), body) },
@@ -254,7 +323,7 @@ export class MerchantService {
         });
         if (response.status < 200 || response.status >= 300) problem = `answered ${response.status}`;
       } catch (error) {
-        problem = (error as Error).name === 'TimeoutError' ? 'timed out' : 'could not connect';
+        problem = (error as Error).name === 'TimeoutError' ? 'timed out' : (error as Error).message === 'private address' ? 'refused: not a public address' : 'could not connect';
       }
       if (!problem) {
         await this.db.update(merchantEvents).set({ deliveredAt: new Date(), attempts: event.attempts + 1, lastError: null }).where(eq(merchantEvents.id, event.id));

@@ -581,29 +581,46 @@ describe('Agent API', () => {
       expect((await start({ amount_naira: 50_000 })).statusCode).toBe(402);
     });
 
-    it('caps one wallet and one bank account per day', async () => {
+    const arrived = () => pool.query(`update agent_payments set status = 'processing' where status = 'awaiting_deposit'`);
+
+    it('caps one wallet and one bank account per day, counting money that arrived', async () => {
       expect((await acceptKeyless({ amount_naira: 50_000, account_number: '8031234001' })).statusCode).toBe(402);
       expect((await acceptKeyless({ amount_naira: 50_000, account_number: '8031234002' })).statusCode).toBe(402);
+      await arrived();
       expect((await start({ amount_naira: 1000, account_number: '8031234003' })).json().code).toBe('over_wallet_limit');
       expect((await acceptKeyless({ amount_naira: 50_000, account_number: '8031234004', refund_to: 'b.near' })).statusCode).toBe(402);
       expect((await acceptKeyless({ amount_naira: 50_000, account_number: '8031234004', refund_to: 'c.near' })).statusCode).toBe(402);
+      await arrived();
       expect((await start({ amount_naira: 1000, account_number: '8031234004', refund_to: 'd.near' })).json().code).toBe('over_account_limit');
     });
 
-    it('checks the wallet cap again at accepting, so quotes made together cannot pass it', async () => {
-      // From NEAR the first answer accepts, so the cap is checked there, even for requests arriving together.
-      const answers = await Promise.all(['8031234005', '8031234006', '8031234007'].map((account_number) => start({ amount_naira: 50_000, account_number, refund_to: 'e.near' })));
-      expect(answers.map((item) => item.statusCode).sort()).toEqual([402, 402, 422]);
+    it('a stranger who starts payments and never pays cannot block a shop: unpaid ones do not count, and only three may wait per account', async () => {
+      // Two unpaid ₦50,000 payments used to fill this account's whole day. Now they wait without using it up.
+      for (const n of [1, 2, 3]) expect((await start({ amount_naira: 50_000, account_number: '8031234010', refund_to: `s${n}.near` }, `10.4.4.${n}`)).statusCode).toBe(402);
+      expect((await start({ amount_naira: 1000, account_number: '8031234010', refund_to: 's4.near' }, '10.4.4.4')).json().code).toBe('too_many_open');
+      // The real customer can pay as soon as one of those times out.
+      await pool.query(`update agent_payments set deposit_deadline = now() - interval '1 minute' where account_number = '8031234010'`);
+      expect((await start({ amount_naira: 5000, account_number: '8031234010', refund_to: 'real.near' }, '10.4.4.5')).statusCode).toBe(402);
     });
 
-    it('caps the total of all keyless payments in a day', async () => {
+    it('checks the caps again at accepting, so payments arriving together cannot pass them by much', async () => {
+      // From NEAR the first answer accepts. Unpaid ones do not use the wallet's day, so all three may wait...
+      const answers = await Promise.all(['8031234005', '8031234006', '8031234007'].map((account_number) => start({ amount_naira: 50_000, account_number, refund_to: 'e.near' })));
+      expect(answers.map((item) => item.statusCode).sort()).toEqual([402, 402, 402]);
+      // ...but once money has arrived, the wallet's day is used up.
+      await arrived();
+      expect((await start({ amount_naira: 1000, account_number: '8031234008', refund_to: 'e.near' })).json().code).toBe('over_wallet_limit');
+    });
+
+    it('caps the total of all keyless payments in a day, counting money that arrived', async () => {
       for (const n of [1, 2, 3, 4]) expect((await acceptKeyless({ amount_naira: 50_000, account_number: `803123410${n}`, refund_to: `w${n}.near` })).statusCode).toBe(402);
+      await arrived();
       expect((await start({ amount_naira: 1000, account_number: '8031234200', refund_to: 'w5.near' })).json().code).toBe('over_daily_limit');
     });
 
     it('slows repeated quotes from one address', async () => {
       const ip = '10.9.9.9';
-      for (let n = 0; n < 30; n++) await start({ amount_naira: 1000 }, ip);
+      for (let n = 0; n < 30; n++) await start({ amount_naira: 1000, account_number: `80312300${String(n).padStart(2, '0')}` }, ip);
       expect((await start({ amount_naira: 1000 }, ip)).json().code).toBe('too_many_requests');
       expect((await start({ amount_naira: 1000 }, '10.9.9.10')).statusCode).toBe(402);
     });
@@ -917,6 +934,63 @@ describe('Agent API', () => {
       await expect(merchants.createKey({ userEmail: 'owner@shop.example', name: 'x', payout: { toMyWallet: true } })).rejects.toThrow('no 10kobo wallet');
     });
 
+    it('in production, refuses notice and return addresses that are not public https', async () => {
+      const bank = { bankName: 'OPay', accountNumber: '8031234568' };
+      const before = process.env.NODE_ENV;
+      process.env.NODE_ENV = 'production';
+      try {
+        for (const webhookUrl of ['http://localhost:3010/hook', 'https://localhost/hook', 'https://127.0.0.1/hook', 'https://10.0.0.5/hook', 'https://169.254.169.254/latest/meta-data', 'https://192.168.1.10/', 'https://[::1]/', 'https://backend.railway.internal/hook', 'https://100.64.0.1/']) {
+          await expect(merchants.createKey({ userEmail: 'owner@shop.example', name: 'x', payout: bank, webhookUrl })).rejects.toThrow(/https|public website/);
+        }
+        await expect(merchants.createKey({ userEmail: 'owner@shop.example', name: 'x', payout: bank, returnOrigins: ['https://10.1.2.3'] })).rejects.toThrow('public website');
+        await expect(merchants.createKey({ userEmail: 'owner@shop.example', name: 'x', payout: bank, webhookUrl: 'https://shop.example/hook' })).resolves.toMatchObject({ key: expect.stringMatching(/^mk_/) });
+      } finally {
+        process.env.NODE_ENV = before;
+      }
+    });
+
+    it('sends nothing to a notice address that turns out to be private when it is time to send', async () => {
+      const made = await shop('POST', '/v1/merchant/invoices', ORDER);
+      await pool.query(`update merchant_keys set webhook_url = 'https://10.0.0.7/hook' where id = $1`, [keyId]);
+      await pool.query(`insert into merchant_events (id, key_id, link_id, type, payload) values (gen_random_uuid(), $1, $2, 'invoice.paid', '{}'::jsonb)`, [keyId, made.json().id]);
+      const before = process.env.NODE_ENV;
+      process.env.NODE_ENV = 'production';
+      try {
+        await merchants.deliverNotices();
+      } finally {
+        process.env.NODE_ENV = before;
+      }
+      expect(notices).toHaveLength(0);
+      const row = (await pool.query(`select last_error from merchant_events where key_id = $1`, [keyId])).rows[0];
+      expect(row.last_error).toContain('not a public address');
+    });
+
+    it('sends each notice once, even when two copies of the server send at the same moment', async () => {
+      const made = await shop('POST', '/v1/merchant/invoices', ORDER);
+      for (let n = 0; n < 5; n++) await pool.query(`insert into merchant_events (id, key_id, link_id, type, payload) values (gen_random_uuid(), $1, $2, $3, '{}'::jsonb)`, [keyId, made.json().id, `invoice.test${n}`]);
+      await Promise.all([merchants.deliverNotices(), merchants.deliverNotices(), merchants.deliverNotices()]);
+      expect(notices).toHaveLength(5);
+      expect(new Set(notices.map((notice) => notice.headers['10kobo-event-id'])).size).toBe(5);
+    });
+
+    it('never makes more invoices in a day than the key allows, even when requests arrive together', async () => {
+      await pool.query(`update merchant_keys set invoices_per_day = 3 where id = $1`, [keyId]);
+      const answers = await Promise.all(Array.from({ length: 8 }, (_, n) => shop('POST', '/v1/merchant/invoices', { ...ORDER, reference: `race-${n}` })));
+      expect(answers.filter((answer) => answer.statusCode === 200)).toHaveLength(3);
+      expect(answers.filter((answer) => answer.json().code === 'too_many_requests')).toHaveLength(5);
+      expect((await pool.query(`select count(*)::int as made from pay_links where merchant_key_id = $1`, [keyId])).rows[0].made).toBe(3);
+    });
+
+    it('refuses an order reference used again with different details, but allows a plain retry', async () => {
+      const first = (await shop('POST', '/v1/merchant/invoices', ORDER)).json();
+      expect((await shop('POST', '/v1/merchant/invoices', { reference: ORDER.reference, line_items: ORDER.line_items })).json().id).toBe(first.id);
+      for (const changed of [{ note: 'Another order' }, { return_url: 'https://shop.example/elsewhere' }, { line_items: [{ description: 'Jollof rice', amount_naira: 4000 }] }]) {
+        const answer = await shop('POST', '/v1/merchant/invoices', { ...ORDER, ...changed });
+        expect(answer.statusCode).toBe(409);
+        expect(answer.json().code).toBe('reference_used');
+      }
+    });
+
     it('refuses keys that would send payers or notices somewhere unsafe', async () => {
       const bank = { bankName: 'OPay', accountNumber: '8031234568' };
       await expect(merchants.createKey({ userEmail: 'owner@shop.example', name: 'x', payout: bank, webhookUrl: 'http://shop.example/hook' })).rejects.toThrow('https');
@@ -986,6 +1060,8 @@ describe('Agent API', () => {
       const big = () => links.create(user, { amountNaira: 50_000, usdcAddress: WALLET });
       expect((await payNaira((await big()).id, '10.1.1.1')).statusCode).toBe(200);
       expect((await payNaira((await big()).id, '10.1.1.1')).statusCode).toBe(200);
+      // The allowance is used by money that arrived, not by payments only started.
+      await pool.query(`update agent_payments set status = 'processing' where status = 'awaiting_deposit'`);
       const third = await payNaira((await big()).id, '10.1.1.1');
       expect(third.json().code).toBe('over_wallet_limit');
       // Another network can still pay, to a receiver that has not had its own day's limit.
@@ -1372,12 +1448,21 @@ describe('Agent API', () => {
       expect((await wallet.activityPage(other, 1, 6)).total).toBe(0);
     });
 
+    it('keeps working when the shared daily quote budget is used up, with an hourly budget of its own', async () => {
+      await agents.keylessKey();
+      await pool.query(`insert into agent_payments (id, key_id, amount_kobo, usdc_minor, pay_in_minor, bank_name, account_number, account_name, pay_from, refund_to, quote_expires_at)
+        select gen_random_uuid(), $1, 100, 1, 1, 'OPay', '8031234568', 'x', 'near', 'a.near', now() from generate_series(1, 2000)`, [KEYLESS_KEY_ID]);
+      const link = await links.create(user, { amountNaira: 5000, bankName: 'OPay', accountNumber: '8031234568' });
+      expect((await payLink(link.id)).statusCode).toBe(200);
+    });
+
     it('needs sign-in to make a link, and uses the same limits as paying without a key', async () => {
       expect((await app.inject({ method: 'POST', url: '/v1/pay-links', payload: { amount_naira: 5000, bank_name: 'OPay', account_number: '8031234568' } })).statusCode).toBe(401);
       for (const n of [1, 2]) {
         const link = await links.create(user, { amountNaira: 50_000, bankName: 'OPay', accountNumber: '8031234568' });
         expect((await payLink(link.id, { pay_from: 'arbitrum', refund_to: n === 1 ? REFUND : '0x70997970C51812dc3A010C7d01b50e0d17dc79C8' })).statusCode).toBe(200);
       }
+      await pool.query(`update agent_payments set status = 'processing' where status = 'awaiting_deposit'`);
       const third = await links.create(user, { amountNaira: 1000, bankName: 'OPay', accountNumber: '8031234568' });
       expect((await payLink(third.id, { pay_from: 'arbitrum', refund_to: '0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC' })).json().code).toBe('over_account_limit');
     });
@@ -1595,7 +1680,12 @@ describe('Agent API rules', () => {
     expect(ipGroup('2001:db8:1:2:3:4:5:6')).toBe('2001:db8:1:2');
     expect(ipGroup('2001:db8:1:2:ffff:4:5:6')).toBe(ipGroup('2001:db8:1:2:3:4:5:6'));
     expect(ipGroup('10.0.0.1')).toBe('10.0.0.1');
-    expect(ipGroup('::ffff:10.0.0.1')).toBe('::ffff:10.0.0.1');
+    expect(ipGroup('::ffff:10.0.0.1')).toBe('10.0.0.1');
+    // The short :: form is expanded first, so one /64 is one group however it is written.
+    expect(ipGroup('2001:db8::1')).toBe('2001:db8:0:0');
+    expect(ipGroup('2001:db8:0:5::1')).toBe(ipGroup('2001:0db8:0000:0005:ffff::'));
+    expect(ipGroup('2001:db8:0:5::1')).not.toBe(ipGroup('2001:db8:0:6::1'));
+    expect(ipGroup('fe80::1%eth0')).toBe('fe80:0:0:0');
   });
 
   it('hides most of a name, and keeps short words readable', () => {

@@ -313,6 +313,7 @@ export class PayLinksService {
       ...(link.nearAccount || link.usdcAddress ? { deliverTo: (link.nearAccount ?? link.usdcAddress)! } : {}),
       payerName: payer.payerName || 'Pay link payer',
       purpose: link.note ?? 'Pay link',
+      viaLink: link.id,
       ...(payer.clientIp ? { clientIp: payer.clientIp } : {}),
     });
     // Claimed before the money route exists, so two people opening one link at once cannot both be given an address.
