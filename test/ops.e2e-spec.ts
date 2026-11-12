@@ -80,6 +80,9 @@ describe('hardening', () => {
 
       const { entries } = (await call('GET', '/v1/admin/audit', ADMIN)).json();
       expect(entries.map((entry: { action: string }) => entry.action)).toEqual(expect.arrayContaining(['switch.paused', 'switch.resumed', 'plan.approved', 'plan.proposed']));
+      const approved = entries.find((entry: { action: string }) => entry.action === 'plan.approved');
+      const { rows } = await pool.query('select email from users where id = $1', [alice.id]);
+      expect(approved.actor_email).toBe(rows[0].email);
     });
 
     it('holds a due schedule under a route pause', async () => {

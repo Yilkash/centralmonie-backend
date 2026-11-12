@@ -251,7 +251,14 @@ export class AdminController {
 
   @Get('audit')
   async auditTrail() {
-    return { entries: await this.db.select().from(auditLog).orderBy(desc(auditLog.createdAt)).limit(200) };
+    // A person's ID is shown as their email, so staff can see who did what. System actors keep their names.
+    const rows = await this.db
+      .select({ entry: auditLog, email: users.email })
+      .from(auditLog)
+      .leftJoin(users, sql`${users.id}::text = ${auditLog.actor}`)
+      .orderBy(desc(auditLog.createdAt))
+      .limit(200);
+    return { entries: rows.map(({ entry, email }) => ({ ...entry, actor_email: email })) };
   }
 
   @Post('switches')
