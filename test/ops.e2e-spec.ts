@@ -103,6 +103,33 @@ describe('hardening', () => {
       expect(texts.join(' ')).toMatch(/USDC is back in your wallet/);
     });
 
+    it('lists users, every payment, merchants and daily stats, for the admin only', async () => {
+      const plan = await plans.approve(alice, (await plans.propose(alice.id, bank(100))).id);
+      await pool.query("update payments set status = 'completed' where id = $1", [plan.items[0]!.payment!.id]);
+      for (const path of ['users', 'payments', 'merchants', 'stats']) expect((await call('GET', `/v1/admin/${path}`, 'alice')).statusCode).toBe(401);
+
+      const { users } = (await call('GET', '/v1/admin/users', ADMIN)).json();
+      expect(users).toHaveLength(1);
+      expect(users[0]).toMatchObject({ id: alice.id, payments: 1, sent: '₦100' });
+      expect((await call('GET', '/v1/admin/users?q=nobody%25', ADMIN)).json().users).toHaveLength(0);
+
+      const { payments } = (await call('GET', '/v1/admin/payments?status=completed', ADMIN)).json();
+      expect(payments.filter((row: { kind: string }) => row.kind === 'app')).toHaveLength(1);
+      expect(payments[0]).toMatchObject({ kind: 'app', channel: 'Bank', to: 'Mother', amount: '₦100' });
+      expect((await call('GET', '/v1/admin/payments?status=failed', ADMIN)).json().payments).toHaveLength(0);
+
+      const merchants = (await call('GET', '/v1/admin/merchants', ADMIN)).json();
+      expect(merchants).toMatchObject({ merchant_keys: [], payment_links: [] });
+
+      const stats = (await call('GET', '/v1/admin/stats', ADMIN)).json();
+      expect(stats.days).toHaveLength(14);
+      // Agent payments from other suites can remain in this table, so those counts are at least ours.
+      expect(stats.totals).toMatchObject({ users: 1, users_7d: 1 });
+      expect(stats.totals.payments_paid).toBeGreaterThanOrEqual(1);
+      expect(stats.days.at(-1).signups).toBe(1);
+      expect(stats.days.at(-1).payments).toBeGreaterThanOrEqual(1);
+    });
+
     it('lists stuck payments', async () => {
       const plan = await plans.approve(alice, (await plans.propose(alice.id, bank(100))).id);
       await pool.query("update payments set status = 'needs_support' where id = $1", [plan.items[0]!.payment!.id]);
