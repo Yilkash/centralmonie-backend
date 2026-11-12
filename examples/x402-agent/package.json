@@ -1,0 +1,8 @@
+{
+  "name": "10kobo-x402-agent",
+  "private": true,
+  "type": "module",
+  "description": "An AI agent paying a Nigerian bank account through 10kobo with the official x402 client",
+  "scripts": { "preview": "node pay.mjs preview", "pay": "node pay.mjs pay" },
+  "dependencies": { "@x402/core": "2.30.0", "@x402/fetch": "2.30.0", "@x402/near": "2.30.0" }
+}
