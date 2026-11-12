@@ -37,6 +37,13 @@ describe('naira deposits', () => {
   const partner = new FakeOnramp();
   const call = (method: 'GET' | 'POST', url: string, token: string, body?: object) =>
     app.inject({ method, url, headers: { authorization: `Bearer ${token}` }, ...(body ? { payload: body } : {}) });
+  /** The chain watcher seeing USDC land in the newest deposit's wallet, at the given share of the quoted amount. */
+  const arrive = (share = 1) =>
+    pool.query(
+      `insert into deposits (user_id, tx_hash, log_index, from_address, usdc_minor)
+       select user_id, gen_random_uuid()::text, 0, '0x0000000000000000000000000000000000000001', floor(usdc_minor * $1::numeric) from naira_deposits order by created_at desc limit 1`,
+      [share],
+    );
   const notices = async () => (await pool.query(`select content from chat_messages where role = 'assistant' order by created_at`)).rows.map((row) => row.content as string);
 
   beforeAll(async () => {
@@ -88,6 +95,10 @@ describe('naira deposits', () => {
     expect((await call('GET', '/v1/deposits/current', 'alice')).json().deposit.status).toBe('processing');
     partner.state = 'completed';
     await service.reconcile();
+    // The partner says it is done, but nothing has landed in the wallet yet: still on its way.
+    expect((await call('GET', '/v1/deposits/current', 'alice')).json().deposit.status).toBe('processing');
+    await arrive();
+    await service.reconcile();
     await service.reconcile();
     expect((await call('GET', '/v1/deposits/current', 'alice')).json().deposit.status).toBe('completed');
     const said = await notices();
@@ -101,6 +112,18 @@ describe('naira deposits', () => {
     await service.reconcile();
     expect((await call('GET', '/v1/deposits/current', 'alice')).json().deposit.status).toBe('expired');
     partner.state = 'completed';
+    await arrive();
+    await service.reconcile();
+    expect((await call('GET', '/v1/deposits/current', 'alice')).json().deposit.status).toBe('completed');
+  });
+
+  it('is not complete until the USDC really lands, and a much smaller arrival does not count', async () => {
+    await call('POST', '/v1/deposits', 'alice', { amount_naira: 2000 });
+    partner.state = 'completed';
+    await arrive(0.5);
+    await service.reconcile();
+    expect((await call('GET', '/v1/deposits/current', 'alice')).json().deposit.status).toBe('processing');
+    await arrive(0.995);
     await service.reconcile();
     expect((await call('GET', '/v1/deposits/current', 'alice')).json().deposit.status).toBe('completed');
   });
@@ -138,6 +161,7 @@ describe('naira deposits', () => {
     expect((await call('GET', '/v1/deposits/current', 'alice')).json().deposit.user_sent).toBe(true);
     expect((await call('GET', '/v1/wallet', 'alice')).json().deposit_on_the_way).toBe('₦2,000');
     partner.state = 'completed';
+    await arrive();
     await service.reconcile();
     expect((await call('GET', '/v1/wallet', 'alice')).json().deposit_on_the_way).toBeNull();
     // The wallet summary also reads the balance from a public test network, which can be slow.

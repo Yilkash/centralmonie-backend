@@ -2,7 +2,7 @@ import { Inject, Injectable, Logger, NotFoundException, ServiceUnavailableExcept
 import { randomUUID } from 'node:crypto';
 import { and, desc, eq, gte, inArray, ne, sql } from 'drizzle-orm';
 import { DATABASE, Database } from '../database/database.module';
-import { NairaDeposit, nairaDeposits, User } from '../database/schema';
+import { deposits, NairaDeposit, nairaDeposits, User } from '../database/schema';
 import { DAILY_LIMIT_KOBO, formatNaira } from '../money/money';
 import { NotificationsService } from '../notifications/notifications.service';
 import { AuditService } from '../ops/audit.service';
@@ -11,6 +11,10 @@ import { NairaOnramp } from '../providers/providers';
 
 const WATCH_FOR_MS = 24 * 60 * 60 * 1000;
 const MAX_A_DAY = 10;
+/** The partner's figure can differ a little from what lands. Less than this is not taken as this deposit's USDC. */
+const ARRIVAL_SHARE = 0.9;
+/** After this long with the partner done and nothing seen on Base, a person should look. */
+const MISSING_AFTER_MS = 30 * 60 * 1000;
 const UNAVAILABLE = 'Naira deposits are not available right now. Please try again later.';
 
 /** Naira in, USDC out. We only hold the instructions and report progress, so no money of ours moves here. */
@@ -150,6 +154,29 @@ export class NairaDepositsService {
     }
   }
 
+  private readonly reportedMissing = new Set<string>();
+
+  /**
+   * Has this deposit's USDC really landed in the wallet? Read from the chain watcher's records, not from the partner,
+   * so "complete" and the balance always agree. An arrival counts for one deposit only: the oldest one it fits.
+   */
+  private async arrived(deposit: NairaDeposit): Promise<boolean> {
+    const [found] = await this.db
+      .select({ id: deposits.id })
+      .from(deposits)
+      .where(
+        and(
+          eq(deposits.userId, deposit.userId),
+          gte(deposits.createdAt, deposit.createdAt),
+          gte(deposits.usdcMinor, Math.floor(deposit.usdcMinor * ARRIVAL_SHARE)),
+          // Not already the arrival of an earlier completed deposit.
+          sql`not exists (select 1 from ${nairaDeposits} other where other.user_id = ${deposit.userId} and other.id <> ${deposit.id} and other.status = 'completed' and other.completed_at >= ${deposits.createdAt} and other.created_at <= ${deposits.createdAt})`,
+        ),
+      )
+      .limit(1);
+    return Boolean(found);
+  }
+
   private async move(deposit: NairaDeposit, status: NairaDeposit['status'], completed = false): Promise<boolean> {
     const updated = await this.db
       .update(nairaDeposits)
@@ -163,7 +190,18 @@ export class NairaDepositsService {
     const amount = formatNaira(deposit.amountKobo);
     switch (state) {
       case 'completed':
-        if (await this.move(deposit, 'completed', true)) await this.notifications.notify(deposit.userId, `Your ${amount} deposit is complete.`);
+        // The partner says it has sent the USDC. It is complete only once the USDC is seen in the wallet.
+        if (await this.arrived(deposit)) {
+          if (await this.move(deposit, 'completed', true)) await this.notifications.notify(deposit.userId, `Your ${amount} deposit is complete.`);
+          return;
+        }
+        if (deposit.status !== 'processing' && (await this.move(deposit, 'processing'))) {
+          await this.notifications.notify(deposit.userId, `We have received your ${amount}. Your USDC is on the way.`);
+        }
+        if (Date.now() - deposit.createdAt.getTime() > MISSING_AFTER_MS && !this.reportedMissing.has(deposit.id)) {
+          this.reportedMissing.add(deposit.id);
+          this.logger.error(`naira deposit ${deposit.id}: the partner says it is done, but no USDC has been seen in the wallet`);
+        }
         return;
       case 'processing':
         if (deposit.status !== 'processing' && (await this.move(deposit, 'processing'))) {
