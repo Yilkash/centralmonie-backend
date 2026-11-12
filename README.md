@@ -45,7 +45,7 @@ partner to the bank, or arrives in the receiver's own wallet.
 | --- | --- | --- |
 | **x402, scheme `exact` on `near:mainnet`** | An AI agent pays with the **official x402 client** (`@x402/near`, `@x402/core`, `@x402/fetch`). The first request answers `402 Payment Required`; the agent signs one USDC transfer, 10kobo checks it with the official x402 NEAR verifier and settles it, and the naira goes to the bank | `src/agent-api/near-relay.ts`, `src/agent-api/agent-api.controller.ts` |
 | **NEAR Intents (1Click API)** | Every move between chains: paying a bank, invoice or checkout from 15 networks, sending to 16 networks, and deposits from 14. Bank payments use exact-output quotes, so the bank receives the exact naira asked for | `src/agent-api/cross-chain.ts` |
-| **Meta transactions (relayer)** | The agent signs a delegate action and 10kobo pays the gas, so the agent needs only USDC. The relayer pays only for a USDC transfer to that payment's own one-time deposit address | `src/agent-api/near-relay.ts` |
+| **Meta transactions (NEP-366, relayer)** | The agent signs a NEP-366 delegate action and 10kobo's relayer submits it and pays the gas, so the agent needs only USDC. The relayer pays only for a USDC transfer to that payment's own one-time deposit address | `src/agent-api/near-relay.ts` |
 | **NEAR accounts** | Agents pay from NEAR; payment links and sends can deliver USDC to a `name.near` account. The prize account is `10kobo.near` | `src/chain/usdc-chains.ts` |
 | **x402 with the `near-intents` method** | For agents paying from Base, Arbitrum, Ethereum or Solana, the same 402 also offers a NEAR Intents payment, following the draft in x402-foundation/x402 pull request 3370 (not final) | `src/agent-api/x402.ts` |
 
