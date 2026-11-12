@@ -13,6 +13,7 @@ API key. It runs on mainnet with real money.
 | API | https://api.10kobo.xyz |
 | Demo shop with the checkout widget | https://10kobo.xyz/shop |
 | Real payments, with explorer links | https://10kobo.xyz/proof |
+| **Demo video** | [x.com/10koboPay/status/2120959937916322236](https://x.com/10koboPay/status/2120959937916322236) |
 | X | [@10koboPay](https://x.com/10koboPay) |
 
 This repository is the backend (NestJS API). The web app is
@@ -130,7 +131,7 @@ Real payments on mainnet, all with small amounts:
 
 On 12 November, on the hosted site: a ₦2,000 naira deposit into a wallet, a ₦2,000 bank payment from the chat, and a
 ₦1,600 checkout at the demo shop paid in USDC through NEAR Intents, each reaching a real OPay account. More are on
-https://10kobo.xyz/proof. The demo videos are on [@10koboPay](https://x.com/10koboPay).
+https://10kobo.xyz/proof. The demo videos are in [this post](https://x.com/10koboPay/status/2120959937916322236) on [@10koboPay](https://x.com/10koboPay).
 
 ## What is real, and what is not yet
 
