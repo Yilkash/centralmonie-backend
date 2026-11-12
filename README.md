@@ -30,7 +30,7 @@ AI agent cannot pay a Nigerian bank account at all.
 
 | Who | What they can do |
 | --- | --- |
-| **A person** | Hold dollars (USDC) in their own wallet. Add money by naira bank transfer or from 14 other networks. Pay any Nigerian bank, buy airtime and data, or send USDC to 16 networks, just by typing it in a chat ("send 5,000 to my landlord at GTBank") or on the Send page |
+| **A person** | Hold dollars (USDC) in their own wallet. **Send:** pay any Nigerian bank in naira, buy airtime and data, or send USDC to 16 networks, just by typing it in a chat ("send 5,000 to my landlord at GTBank") or on the Send page. **Receive:** add money by naira bank transfer, take USDC from 14 other networks, or get paid by anyone with a pay link, in naira or crypto |
 | **A business** | Share a **payment link**, or paste a **checkout widget** into any website with no code. Customers pay by naira bank transfer or with crypto from 15 networks. The business is paid in its Nigerian bank account or in USDC. Developers can use **merchant keys** and **signed webhooks** instead |
 | **An AI agent** | Pay a Nigerian bank account with **standard x402** from NEAR, with no account and no API key, or with one HTTP call and a key. It sees the account holder's name from the bank before paying, and needs no NEAR for gas. Assistants like Claude and ChatGPT can also connect through the **MCP server** |
 
