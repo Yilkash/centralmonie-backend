@@ -14,7 +14,7 @@ import { ChatService } from './chat.service';
 
 const chatId = z.string().uuid();
 const renameChat = z.object({ title: z.string().trim().min(1).max(80) });
-const sendMessage = z.object({ content: z.string().trim().min(1).max(2000), conversation_id: chatId.optional(), new_chat: z.boolean().optional() });
+const sendMessage = z.object({ content: z.string().trim().min(1).max(6000), conversation_id: chatId.optional(), new_chat: z.boolean().optional() });
 const contactConfirmed = z.object({ contact_id: z.string().uuid(), conversation_id: chatId.optional() });
 
 @Controller('v1/chat/messages')
@@ -93,7 +93,7 @@ export class ChatController {
   @Post()
   async send(@CurrentUser() user: User, @Body() body: unknown) {
     const parsed = sendMessage.safeParse(body);
-    if (!parsed.success) throw new BadRequestException('A message needs 1 to 2000 characters');
+    if (!parsed.success) throw new BadRequestException('A message needs 1 to 6000 characters');
     const saved = await this.chat.send(user, parsed.data.content, { conversationId: parsed.data.conversation_id, startNew: parsed.data.new_chat });
     return { reply: await this.present(user, saved), conversation_id: saved.conversationId };
   }

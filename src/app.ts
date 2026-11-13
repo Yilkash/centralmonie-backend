@@ -17,5 +17,9 @@ export async function configureApp(app: NestFastifyApplication): Promise<void> {
     methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Authorization', 'Content-Type'],
   });
+  // Most requests are small; only an attached invoice may be large (a 5 MB file is about 7 MB as base64).
+  app.getHttpAdapter().getInstance().addHook('onRoute', (route) => {
+    if (route.url === '/v1/protect/read-file') route.bodyLimit = 7.5 * 1024 * 1024;
+  });
   app.enableShutdownHooks();
 }

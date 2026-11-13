@@ -102,11 +102,22 @@ export class ProtectService {
    */
   private async guardStopped(input: ProtectInput, attempt: number, guard: boolean, said: string, ms: number, tokens: number | null) {
     const model = this.config.get('SERV_MODEL', { infer: true });
-    if (INSTRUCTIONS.test(input.request) || !guard) return { judgement: guardBlock(said), refusal: said, model, ms, tokens };
+    if (!guard) return { judgement: guardBlock(said), refusal: said, model, ms, tokens };
+    // The guard's refusal says only that it stopped; SERV is asked again without it, so the owner also sees every
+    // other reason (the bank's name, changed details, pressure). Text that commands the AI stays a block whatever it says.
     const again = await this.judge(input, attempt, false);
-    if (!again.judgement) return { ...again, judgement: guardBlock(said), refusal: said };
-    const raised = again.judgement.verdict === 'pay' ? { ...again.judgement, verdict: 'ask' as const } : again.judgement;
-    return { ...again, judgement: { ...raised, summary: `SERV's prompt guard flagged this request as manipulative. ${raised.summary}` }, refusal: `Prompt guard: ${said}`, ms: ms + again.ms };
+    if (!again.judgement) return { ...again, judgement: guardBlock(said), refusal: said, ms: ms + again.ms };
+    const commands = INSTRUCTIONS.test(input.request) || /⚠ Hidden text in this file/.test(input.request);
+    const floor = commands ? 'block' : 'ask';
+    const verdict: ProtectVerdict = again.judgement.verdict === 'block' || floor === 'block' ? 'block' : 'ask';
+    const signals = commands ? [guardBlock(said).signals[0]!, ...again.judgement.signals.filter((signal) => !/instruction/i.test(signal.name))] : again.judgement.signals;
+    const lead = commands ? 'SERV\'s prompt guard stopped text aimed at the AI.' : 'SERV\'s prompt guard flagged this request as manipulative.';
+    return {
+      ...again,
+      judgement: { ...again.judgement, verdict, signals, contains_instructions_to_agent: commands || again.judgement.contains_instructions_to_agent, summary: `${lead} ${again.judgement.summary}` },
+      refusal: `Prompt guard: ${said}`,
+      ms: ms + again.ms,
+    };
   }
 
   /** The owner read the warning and chose to go ahead. Only an "ask" can be confirmed; a "block" cannot. */
@@ -221,7 +232,7 @@ function guardBlock(said: string | null | undefined): ProtectJudgement {
     verdict: 'block',
     confidence: 1,
     summary: 'SERV\'s prompt guard stopped this request: the text tries to give instructions to the AI or the payment system.',
-    signals: [{ name: 'Instructions hidden in the request', severity: 'high', evidence: said ? `SERV: "${said.slice(0, 160)}"` : 'Stopped by the prompt guard' }],
+    signals: [{ name: 'Hidden instructions for the AI', severity: 'high', evidence: 'SERV\'s prompt guard refused to read on: the text tries to command the AI or the payment system.' }],
     claims_urgency: false,
     claims_new_bank_details: false,
     contains_instructions_to_agent: true,

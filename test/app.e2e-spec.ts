@@ -102,7 +102,7 @@ describe('10kobo API', () => {
     expect((await call('GET', '/v1/chat/messages', 'bob')).json().messages).toEqual([]);
   });
 
-  it.each([[{}], [{ content: '   ' }], [{ content: 'x'.repeat(2001) }]])('refuses bad input %#', async (body) => {
+  it.each([[{}], [{ content: '   ' }], [{ content: 'x'.repeat(6001) }]])('refuses bad input %#', async (body) => {
     expect((await call('POST', '/v1/chat/messages', 'alice', body)).statusCode).toBe(400);
   });
 
