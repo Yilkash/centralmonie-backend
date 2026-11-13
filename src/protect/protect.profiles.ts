@@ -62,8 +62,12 @@ Rules:
   over the request text. Compare names only when the request names a specific person or company: if it names someone
   clearly different from the bank's account holder, that is a strong signal ("ask"; "block" if other fraud signs
   come with it). A request that names nobody ("my mother", "the supplier") is not a mismatch.
+- The name a user saved for a contact is often a nickname ("Mum", "Landlord", "My shop", "Bro"). Never compare a
+  nickname with the bank's name. A plain payment to a saved contact with no outside text and nothing unusual is "pay".
 - Account numbers are replaced with references like [ACCT_1]. Never invent account numbers.
-- Every signal must quote or closely describe its evidence.
+- Every signal must quote or closely describe its evidence. Name signals in plain words a shop owner understands
+  ("Changed bank details", "First payment to this account"), never code-style names. List what matters for the
+  verdict; an ordinary payment needs at most one or two low signals.
 - Urgency or secrecy together with new or changed bank details is a classic fraud pattern: "block", or at least "ask".
 - An ordinary request with no outside text (the user simply asked to pay a saved contact) is "pay".
 - question_for_owner: when the verdict is "ask", one short question the owner can answer; otherwise null.

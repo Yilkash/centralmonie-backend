@@ -163,7 +163,7 @@ export class ProtectService {
             ...(guard ? [{ type: 'function', function: { name: 'serv_prompt_guard', parameters: { type: 'object', properties: {} } } }] : []),
             // Our instructions are not secret, and SERV's leak filter misreads fraud rules quoted in a summary.
             { type: 'function', function: { name: 'serv_disable_content_filter', parameters: { type: 'object', properties: {} } } },
-            { type: 'function', function: { name: 'serv_shadow_agent', parameters: { type: 'object', properties: { hint: { type: 'string', default: profile.shadowHint }, max_iterations: { type: 'integer', default: 2 } } } } },
+            { type: 'function', function: { name: 'serv_shadow_agent', parameters: { type: 'object', properties: { hint: { type: 'string', default: profile.shadowHint }, max_iterations: { type: 'integer', default: 1 } } } } },
           ],
           stream: false,
         }),
