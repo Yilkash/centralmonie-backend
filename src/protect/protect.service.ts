@@ -3,7 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { and, desc, eq, sql } from 'drizzle-orm';
 import { Env } from '../config/env';
 import { DATABASE, Database } from '../database/database.module';
-import { payments, ProtectCheck, protectChecks } from '../database/schema';
+import { contactDestinations, contacts, payments, ProtectCheck, protectChecks } from '../database/schema';
 import { JUDGEMENT_SCHEMA, PROTECT_PROFILES, ProtectJudgement, ProtectProfile, ProtectVerdict } from './protect.profiles';
 
 const RANK: Record<ProtectVerdict, number> = { pay: 0, ask: 1, block: 2 };
@@ -131,8 +131,21 @@ export class ProtectService {
           .select({ paid: sql<number>`count(*)::int` })
           .from(payments)
           .where(and(eq(payments.userId, userId), eq(payments.status, 'completed'), sql`${payments.destination}->>'accountNumber' = ${destination.accountNumber}`));
+        // A contact saved just now was named from this request (an invoice, a message), so its name is a claim to
+        // check against the bank. One the user saved earlier may be a nickname ("Mum"), which is never compared.
+        const [saved] = await this.db
+          .select({ at: contactDestinations.createdAt })
+          .from(contactDestinations)
+          .innerJoin(contacts, eq(contacts.id, contactDestinations.contactId))
+          .where(and(eq(contacts.userId, userId), eq(contactDestinations.accountNumber, destination.accountNumber)))
+          .orderBy(contactDestinations.createdAt)
+          .limit(1);
+        const justNow = !saved || Date.now() - saved.at.getTime() < 15 * 60_000;
+        const who = justNow
+          ? `to "${item.recipientName}", a payee added just now from this request (so this name is what the request claims; compare it with the bank's name)`
+          : `to a contact the user saved earlier as "${item.recipientName}" (the user's own label, possibly a nickname; never compare it with the bank's name)`;
         facts.push(
-          `Bank payment of ${naira} to a contact the user labelled "${item.recipientName}" (the user's own label, not a legal name; never compare it with the bank's name). ${destination.bankName ?? 'Bank'} account ending ${destination.accountNumber.slice(-4)}; the bank says the account holder is "${destination.accountName ?? 'unknown'}". This user has paid this account ${prior?.paid ?? 0} time(s) before.`,
+          `Bank payment of ${naira} ${who}. ${destination.bankName ?? 'Bank'} account ending ${destination.accountNumber.slice(-4)}; the bank says the account holder is "${destination.accountName ?? 'unknown'}". This user has paid this account ${prior?.paid ?? 0} time(s) before.`,
         );
       } else facts.push(`${item.route} payment of ${naira} to "${item.recipientName}".`);
     }
