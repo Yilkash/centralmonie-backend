@@ -80,7 +80,7 @@ export class ProtectService {
         servVerdict: judged.judgement?.verdict ?? null,
         summary: summary ?? (judged.refusal ? 'SERV could not judge this payment, so it waits for your confirmation.' : null),
         question: judged.judgement?.question_for_owner ?? null,
-        signals: judged.judgement?.signals ?? [],
+        signals: (judged.judgement?.signals ?? []).map((signal) => ({ ...signal, name: plainWords(signal.name) })),
         refusal: judged.refusal,
         model: judged.model,
         ms: judged.ms,
@@ -132,7 +132,7 @@ export class ProtectService {
           .from(payments)
           .where(and(eq(payments.userId, userId), eq(payments.status, 'completed'), sql`${payments.destination}->>'accountNumber' = ${destination.accountNumber}`));
         facts.push(
-          `Bank payment of ${naira} to the contact saved as "${item.recipientName}": ${destination.bankName ?? 'bank'} account ending ${destination.accountNumber.slice(-4)}. The bank's own name for this account is "${destination.accountName ?? 'unknown'}". This user has paid this account ${prior?.paid ?? 0} time(s) before.`,
+          `Bank payment of ${naira} to a contact the user labelled "${item.recipientName}" (the user's own label, not a legal name; never compare it with the bank's name). ${destination.bankName ?? 'Bank'} account ending ${destination.accountNumber.slice(-4)}; the bank says the account holder is "${destination.accountName ?? 'unknown'}". This user has paid this account ${prior?.paid ?? 0} time(s) before.`,
         );
       } else facts.push(`${item.route} payment of ${naira} to "${item.recipientName}".`);
     }
@@ -220,3 +220,9 @@ function guardBlock(said: string | null | undefined): ProtectJudgement {
 @Global()
 @Module({ providers: [ProtectService], exports: [ProtectService] })
 export class ProtectModule {}
+
+/** "named-person_mismatch" → "Named person mismatch": SERV sometimes names signals like code. */
+function plainWords(name: string): string {
+  const words = name.replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim();
+  return words.charAt(0).toUpperCase() + words.slice(1);
+}
