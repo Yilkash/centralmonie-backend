@@ -85,7 +85,7 @@ export class PlansController {
   }
 
   /**
-   * 10kobo Protect, when on: a payment SERV blocked cannot be approved, and one it flagged needs the owner to confirm
+   * CentralMonie Protect, when on: a payment SERV blocked cannot be approved, and one it flagged needs the owner to confirm
    * they checked it ("protect_confirmed": true). The plan must belong to the user, which get() checks.
    */
   private async enforceProtect(user: User, id: string, body: unknown) {
@@ -93,10 +93,10 @@ export class PlansController {
     await this.plans.get(user.id, id);
     const check = await this.protect.latest('plan', id);
     if (!check) return;
-    if (check.verdict === 'block') throw new UnprocessableEntityException(`10kobo Protect blocked this payment. ${check.summary ?? ''}`.trim());
+    if (check.verdict === 'block') throw new UnprocessableEntityException(`CentralMonie Protect blocked this payment. ${check.summary ?? ''}`.trim());
     if (check.verdict === 'ask' && !check.acknowledgedAt) {
       if ((body as { protect_confirmed?: unknown } | null)?.protect_confirmed !== true) {
-        throw new UnprocessableEntityException('10kobo Protect asks you to confirm this payment first. Check the warning, then confirm.');
+        throw new UnprocessableEntityException('CentralMonie Protect asks you to confirm this payment first. Check the warning, then confirm.');
       }
       await this.protect.acknowledge('plan', id);
     }

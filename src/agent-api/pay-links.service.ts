@@ -41,7 +41,7 @@ export interface LinkInput {
   nearAccount?: string | null;
   /** USDC to this Base address instead of naira to a bank. */
   usdcAddress?: string | null;
-  /** USDC to the user's own 10kobo wallet instead of naira to a bank. */
+  /** USDC to the user's own CentralMonie wallet instead of naira to a bank. */
   toMyWallet?: boolean | null;
   note?: string | null;
   dueDate?: string | null;
@@ -329,13 +329,13 @@ export class PayLinksService {
     return this.agents.accept(key, quote.id, payer.clientIp);
   }
 
-  /** 10kobo Protect for shops: SERV judges the order so the shop knows whether to ship. It never blocks the customer. */
+  /** CentralMonie Protect for shops: SERV judges the order so the shop knows whether to ship. It never blocks the customer. */
   private async checkOrder(link: PayLink, payer: PayerDetails): Promise<void> {
     const items = (link.lineItems ?? []).map((item) => `${item.description}: ₦${item.amountNaira.toLocaleString('en-NG')}`);
     await this.protect.check(link.userId, 'merchant_invoice', link.id, {
       profile: 'checkout',
       request: [`Order ${link.reference ?? link.id}`, ...items, link.note ? `Note: ${link.note}` : '', `Customer name given at checkout: ${payer.payerName || 'none'}`].filter(Boolean).join('\n'),
-      facts: [`Order total ₦${(link.amountKobo / 100).toLocaleString('en-NG')}, paid through 10kobo checkout from ${payer.payFrom}.`, `Refunds, if any, can only go back to the customer's own refund address (${payer.payFrom === 'naira' ? 'bank transfer payer' : 'a crypto address they gave'}), never to an account named in a message.`],
+      facts: [`Order total ₦${(link.amountKobo / 100).toLocaleString('en-NG')}, paid through CentralMonie checkout from ${payer.payFrom}.`, `Refunds, if any, can only go back to the customer's own refund address (${payer.payFrom === 'naira' ? 'bank transfer payer' : 'a crypto address they gave'}), never to an account named in a message.`],
     });
   }
 }

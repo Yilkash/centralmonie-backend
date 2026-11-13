@@ -87,9 +87,9 @@ export class ChainDepositsService {
 
     const refundTo = input.refundTo.trim();
     if (!validRefundAddress(network.id, refundTo)) throw new DepositRefused(`That is not a valid ${network.name} address for refunds. Please check it was copied in full.`);
-    // The 10kobo wallet is a smart wallet that exists only on Base. The same 0x address elsewhere belongs to nobody.
+    // The CentralMonie wallet is a smart wallet that exists only on Base. The same 0x address elsewhere belongs to nobody.
     if (isAddress(refundTo) && refundTo.toLowerCase() === user.walletAddress.toLowerCase()) {
-      throw new DepositRefused(`That is your 10kobo wallet, which only exists on Base. A refund sent to it on ${network.name} would be lost. Use your own ${network.name} wallet.`);
+      throw new DepositRefused(`That is your CentralMonie wallet, which only exists on Base. A refund sent to it on ${network.name} would be lost. Use your own ${network.name} wallet.`);
     }
 
     const [{ count } = { count: 0 }] = await this.db

@@ -76,7 +76,7 @@ const envSchema = z.object({
   // Our fee on payments through NEAR Intents, in basis points (100 = 1%), paid to this NEAR account. Off at 0.
   ONECLICK_FEE_BPS: z.coerce.number().int().min(0).max(400).default(0),
   ONECLICK_FEE_RECIPIENT: z.string().min(2).optional(),
-  // 10kobo Protect: SERV Reasoning checks payments before money moves. Off unless switched on, and needs the key.
+  // CentralMonie Protect: SERV Reasoning checks payments before money moves. Off unless switched on, and needs the key.
   SERV_PROTECT_ENABLED: z.enum(['true', 'false']).default('false').transform((value) => value === 'true'),
   SERV_API_KEY: z.string().min(10).optional(),
   SERV_MODEL: z.string().min(1).default('gpt-5.4-mini'),

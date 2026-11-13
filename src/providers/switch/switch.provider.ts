@@ -5,7 +5,7 @@ import { BankLookup, ExchangeRates, NairaOnramp, OnrampState, PaymentProvider, P
 import { echoesAmount, fromSwitchNumber, KOBO_DECIMALS, switchNumberToMinor, toSwitchNumber, USDC_DECIMALS } from './switch-money';
 
 // Naira to a bank and naira to USDC through Switch. Ported from Tokkenly's src/switch. Never run
-// against the live partner from 10kobo.
+// against the live partner from CentralMonie.
 //
 // Off-ramp order, and the safety argument Tokkenly makes for it: deposit() asks Switch to create
 // the payment with a stable reference, and only then is USDC sent to the address it names. Switch
@@ -29,7 +29,7 @@ export interface SwitchConfig {
   onrampCallbackUrl?: string;
   /** Switch's name for the network: the first half of `base:usdc`. Defaults to base. */
   network?: string;
-  /** The name sent for every on-ramp beneficiary. 10kobo has no identity checks. */
+  /** The name sent for every on-ramp beneficiary. CentralMonie has no identity checks. */
   holderName?: string;
   fetch?: typeof fetch;
   now?: () => number;
@@ -148,7 +148,7 @@ const STOPPED = new Set(['FAILED', 'REVERSED', 'BLOCKED']);
 
 export const SWITCH_SIGNATURE_HEADER = 'x-switch-signature';
 export const SWITCH_TIMESTAMP_HEADER = 'x-switch-timestamp';
-export const GENERIC_HOLDER_NAME = '10kobo Customer';
+export const GENERIC_HOLDER_NAME = '10kobo Customer'; // The name agreed with the partner; changing it needs their OK.
 
 // Customer-facing. Provider text is not customer copy, so Switch's own sentences are only logged.
 const BANK_UNAVAILABLE = 'Sending to a bank is unavailable right now. Please try again shortly.';
@@ -420,7 +420,7 @@ export class SwitchProvider extends PaymentProvider implements ExchangeRates, Ba
         reference: request.reference,
         ...(this.callbackUrl ? { callback_url: this.callbackUrl } : {}),
         refund_address: payout.refundAddress ?? this.refundAddress,
-        narration: `10kobo payout to ${payout.accountName}`,
+        narration: `CentralMonie payout to ${payout.accountName}`,
         exact_output: false,
       });
     } catch (err) {
@@ -506,7 +506,7 @@ export class SwitchProvider extends PaymentProvider implements ExchangeRates, Ba
 /**
  * A beneficiary name Switch will accept. It requires an alphanumeric name, so accents go, anything
  * but letters, digits and spaces goes, and a generic stands in when nothing usable is left. Tokkenly
- * passes a verified legal name here. 10kobo has no identity checks, so the generic is what it sends.
+ * passes a verified legal name here. CentralMonie has no identity checks, so the generic is what it sends.
  */
 export function switchBeneficiaryName(raw: string | null | undefined): string {
   const cleaned = (raw ?? '')

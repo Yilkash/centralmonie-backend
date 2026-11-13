@@ -35,7 +35,7 @@ export interface PlanView extends Plan {
   totalUsdcMinor: number;
   /** What the wallet must send when payments are waiting for the user's signature. */
   calls: WalletCall[];
-  /** 10kobo Protect's newest check of this plan, when Protect is on. */
+  /** CentralMonie Protect's newest check of this plan, when Protect is on. */
   protect: ProtectCheck | null;
 }
 

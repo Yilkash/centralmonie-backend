@@ -1,4 +1,4 @@
-// The one place a number crosses between 10kobo's integers and Switch's JSON numbers. Ported from
+// The one place a number crosses between CentralMonie's integers and Switch's JSON numbers. Ported from
 // Tokkenly (src/switch/switch-money.ts). Switch sends and receives money as JSON numbers such as
 // `amount: 100` and `rate: 1500.5`. Everything here takes or returns integer minor units.
 

@@ -258,7 +258,7 @@ export const nairaDepositStatus = pgEnum('naira_deposit_status', ['waiting', 'pr
 /** Naira a user is paying in to get USDC. The id is the reference the partner knows it by. */
 /**
  * USDC or USDT sent from another network to a one-time NEAR Intents address, which delivers USDC on Base to the
- * user's own wallet. 10kobo never holds it: a failed or late deposit goes back to the user's refund address.
+ * user's own wallet. CentralMonie never holds it: a failed or late deposit goes back to the user's refund address.
  */
 export const chainDeposits = pgTable(
   'chain_deposits',
@@ -485,7 +485,7 @@ export const payLinks = pgTable(
 export type PayLink = typeof payLinks.$inferSelect;
 
 /**
- * A shop's secret key for making checkout invoices from its own server. It belongs to a 10kobo user, and the payout is
+ * A shop's secret key for making checkout invoices from its own server. It belongs to a CentralMonie user, and the payout is
  * fixed on the key, so a leaked key can make invoices but can never change where the money goes.
  */
 export const merchantKeys = pgTable('merchant_keys', {
@@ -531,7 +531,7 @@ export const merchantEvents = pgTable(
 );
 
 /**
- * 10kobo Protect: SERV Reasoning's judgement of a payment before money moves, with the reasons it gave. One row per
+ * CentralMonie Protect: SERV Reasoning's judgement of a payment before money moves, with the reasons it gave. One row per
  * check. A plan, an agent payment or a merchant invoice can be checked; the newest row for it is the one that counts.
  */
 export const protectChecks = pgTable(
@@ -542,7 +542,7 @@ export const protectChecks = pgTable(
     subjectKind: text('subject_kind').notNull(),
     subjectId: uuid('subject_id').notNull(),
     profile: text('profile').notNull(),
-    /** pay, ask or block: the final answer after SERV and the facts 10kobo already knows. */
+    /** pay, ask or block: the final answer after SERV and the facts CentralMonie already knows. */
     verdict: text('verdict').notNull(),
     servVerdict: text('serv_verdict'),
     summary: text('summary'),

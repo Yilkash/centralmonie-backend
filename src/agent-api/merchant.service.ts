@@ -109,7 +109,7 @@ export class MerchantService {
   /** The key and webhook secret are shown once, here, and only their hash or the secret for signing is kept. */
   async createKey(input: NewMerchantKey): Promise<{ id: string; key: string; webhookSecret: string | null }> {
     const [owner] = await this.db.select().from(users).where(eq(users.email, input.userEmail.trim().toLowerCase()));
-    if (!owner) throw new AgentRefusal('not_found', 'No 10kobo user has that email.', 404);
+    if (!owner) throw new AgentRefusal('not_found', 'No CentralMonie user has that email.', 404);
     const origins = (input.returnOrigins ?? []).map((origin) => {
       const url = webAddress(origin, 'return website');
       if (url.origin !== origin.replace(/\/$/, '')) throw new AgentRefusal('invalid_request', 'A return website is just the start of an address, such as https://shop.example.', 400);
@@ -118,7 +118,7 @@ export class MerchantService {
     if (input.webhookUrl) webAddress(input.webhookUrl, 'notice address');
     let payout: Partial<typeof merchantKeys.$inferInsert>;
     if ('toMyWallet' in input.payout) {
-      if (!owner.walletAddress) throw new AgentRefusal('wallet_not_ready', 'That user has no 10kobo wallet yet.', 409);
+      if (!owner.walletAddress) throw new AgentRefusal('wallet_not_ready', 'That user has no CentralMonie wallet yet.', 409);
       payout = { payoutToWallet: true };
     } else if ('usdcAddress' in input.payout) {
       if (!isAddress(input.payout.usdcAddress)) throw new AgentRefusal('invalid_request', 'That is not a valid Base address.', 400);
@@ -147,7 +147,7 @@ export class MerchantService {
     return rows.map((row) => ({
       id: row.id,
       name: row.name,
-      payout: row.payoutToWallet ? 'Your 10kobo wallet' : row.payoutBankName ? `${row.payoutBankName} ****${(row.payoutAccountNumber ?? '').slice(-4)}` : row.payoutUsdcAddress ? 'A USDC address' : 'A NEAR account',
+      payout: row.payoutToWallet ? 'Your CentralMonie wallet' : row.payoutBankName ? `${row.payoutBankName} ****${(row.payoutAccountNumber ?? '').slice(-4)}` : row.payoutUsdcAddress ? 'A USDC address' : 'A NEAR account',
       return_origins: row.returnOrigins,
       webhook_url: row.webhookUrl,
       invoices_per_day: row.invoicesPerDay,
@@ -261,7 +261,7 @@ export class MerchantService {
     return this.links.cancel(owner, id);
   }
 
-  /** With 10kobo Protect on, the order's newest check: "pay" ship as normal, "ask" hold and check, "block" do not ship. */
+  /** With CentralMonie Protect on, the order's newest check: "pay" ship as normal, "ask" hold and check, "block" do not ship. */
   async present(row: { link: PayLink; payment: AgentPayment | null }) {
     const protect = this.protect.enabled ? presentCheck(await this.protect.latest('merchant_invoice', row.link.id)) : null;
     return { ...presentOwnLink(row, this.links.url(row.link)), reference: row.link.reference, checkout_url: this.links.url(row.link), return_url: row.link.returnUrl, ...(this.protect.enabled ? { protect } : {}) };

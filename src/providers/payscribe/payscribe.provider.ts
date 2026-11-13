@@ -5,7 +5,7 @@ import { DataPlan, DataPlans, PaymentProvider, PaymentRequest, PaymentResult, Pa
 import { nairaToKobo } from './naira';
 
 // Airtime and data from the platform's prefunded naira at Payscribe. Ported from Tokkenly's
-// src/payscribe/payscribe.client.ts and src/bills. Never run against the live partner from 10kobo.
+// src/payscribe/payscribe.client.ts and src/bills. Never run against the live partner from CentralMonie.
 
 export interface PayscribeConfig {
   /** Sandbox is https://sandbox.payscribe.ng/api/v1/, live is https://api.payscribe.ng/api/v1/. */

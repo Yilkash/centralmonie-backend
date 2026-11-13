@@ -415,7 +415,7 @@ export class AgentApiService {
 
   /**
    * Asks the partner for a temporary bank account. When the naira lands there, the partner sends USDC straight to the
-   * receiver, so 10kobo never holds it. Like the crypto route, a failure before any account is shown leaves nothing at risk.
+   * receiver, so CentralMonie never holds it. Like the crypto route, a failure before any account is shown leaves nothing at risk.
    */
   private async setUpNaira(payment: AgentPayment): Promise<AgentPayment> {
     try {

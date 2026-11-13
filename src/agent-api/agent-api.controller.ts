@@ -18,7 +18,7 @@ const quoteBody = z.object({
   account_number: z.string().regex(/^\d{10}$/, 'An account number has 10 digits.'),
   pay_from: z.enum(Object.keys(PAY_FROM) as [PayFrom, ...PayFrom[]]).default('base'),
   refund_to: z.string().trim().min(2).max(100),
-  // 10kobo Protect reads it: the invoice or message the agent is paying from. Optional.
+  // CentralMonie Protect reads it: the invoice or message the agent is paying from. Optional.
   invoice_text: z.string().max(6000).optional(),
 });
 const paymentBody = z.object({ quote_id: z.string().uuid() });
@@ -67,7 +67,7 @@ export const presentPayment = (payment: AgentPayment) => ({
 });
 
 /**
- * 10kobo Protect for agents, when on: SERV Reasoning reads the agent's purpose and invoice against what the bank says
+ * CentralMonie Protect for agents, when on: SERV Reasoning reads the agent's purpose and invoice against what the bank says
  * about the account. A block refuses the payment. An "ask" refuses an agent with no key, which has no owner here to
  * confirm; an agent with a key gets the warning with its payment.
  */
@@ -82,8 +82,8 @@ async function protectAgentPayment(protect: ProtectService, payment: AgentPaymen
       said.payerName ? `The agent says it pays for: ${said.payerName}.` : 'The agent did not say who it pays for.',
     ],
   });
-  if (check.verdict === 'block') throw new AgentRefusal('protect_blocked', `10kobo Protect blocked this payment: ${check.summary ?? 'it looks unsafe'}`, 422);
-  if (check.verdict === 'ask' && keyless) throw new AgentRefusal('protect_needs_owner', `10kobo Protect wants a person to confirm this payment first: ${check.summary ?? ''}`.trim(), 422);
+  if (check.verdict === 'block') throw new AgentRefusal('protect_blocked', `CentralMonie Protect blocked this payment: ${check.summary ?? 'it looks unsafe'}`, 422);
+  if (check.verdict === 'ask' && keyless) throw new AgentRefusal('protect_needs_owner', `CentralMonie Protect wants a person to confirm this payment first: ${check.summary ?? ''}`.trim(), 422);
   return presentCheck(check);
 }
 

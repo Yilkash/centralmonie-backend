@@ -114,7 +114,7 @@ export class SendController {
             : null,
         },
       ]);
-      // 10kobo Protect checks form payments too, from 10kobo's own facts, plus the note if the user added one.
+      // CentralMonie Protect checks form payments too, from CentralMonie's own facts, plus the note if the user added one.
       if (this.protect.enabled) {
         await this.protect.check(user.id, 'plan', plan.id, { profile: 'payment', request: '', facts: await this.protect.planFacts(user.id, plan.items) });
         return { plan: presentPlan(await this.plans.get(user.id, plan.id)) };

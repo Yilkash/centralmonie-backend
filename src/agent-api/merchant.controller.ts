@@ -133,7 +133,7 @@ export class MerchantKeysController {
 const ownKeyBody = z.object({
   name: z.string().trim().min(2).max(60),
   // Self-serve keys pay only the person who made them: their own wallet, or a bank account they name.
-  // The owner chooses where the money goes: their 10kobo wallet, a bank account, USDC on Base or a NEAR account.
+  // The owner chooses where the money goes: their CentralMonie wallet, a bank account, USDC on Base or a NEAR account.
   payout: z.union([
     z.object({ to_my_wallet: z.literal(true) }),
     z.object({ bank_name: z.string().trim().min(2).max(60), account_number: z.string().regex(/^\d{10}$/) }),
@@ -148,7 +148,7 @@ const ownKeyBody = z.object({
 const OWN_KEYS_LIMIT = 3;
 const OWN_KEY_INVOICES_PER_DAY = 50;
 
-/** A signed-in person makes, lists and stops their own merchant keys, with no one at 10kobo in the way. */
+/** A signed-in person makes, lists and stops their own merchant keys, with no one at CentralMonie in the way. */
 @Controller('v1/merchant-keys')
 @UseFilters(AgentRefusalFilter)
 @UseGuards(AuthGuard)

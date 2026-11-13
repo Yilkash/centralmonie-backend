@@ -273,7 +273,7 @@ describe('fundingAddress and deposit', () => {
       reference: 'ref-1',
       callback_url: 'https://api.test/hook',
       refund_address: REFUND,
-      narration: '10kobo payout to CHINONSO ADEYEMI',
+      narration: 'CentralMonie payout to CHINONSO ADEYEMI',
       exact_output: false,
     });
   });

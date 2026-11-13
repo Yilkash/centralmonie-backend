@@ -194,7 +194,7 @@ export const AGENT_TOOLS: Anthropic.Tool[] = [
         account_number: { type: ['string', 'null'], description: 'Exactly 10 digits, or null if USDC is received instead.' },
         near_account: { type: ['string', 'null'], description: 'Only if the user wants USDC on NEAR rather than naira, such as ada.near. Otherwise null.' },
         usdc_address: { type: ['string', 'null'], description: 'Only if the user wants USDC on a Base address they gave, starting 0x. Otherwise null.' },
-        to_my_wallet: { type: ['boolean', 'null'], description: "True if the user wants the USDC in their own 10kobo wallet. Otherwise null." },
+        to_my_wallet: { type: ['boolean', 'null'], description: "True if the user wants the USDC in their own CentralMonie wallet. Otherwise null." },
         note: { ...nullable('string'), description: 'What it is for, shown to the payer. Null if none was given.' },
         due_date: { type: ['string', 'null'], description: 'The date it is due, as YYYY-MM-DD. Null if none was given.' },
         line_items: {
@@ -305,7 +305,7 @@ export class AgentToolbox {
   ) {}
 
   /** The user comes from the signed-in session, never from the model, so it cannot act for anyone else. */
-  /** context.recentText: the user's latest messages, which may hold a pasted invoice. 10kobo Protect reads it. */
+  /** context.recentText: the user's latest messages, which may hold a pasted invoice. CentralMonie Protect reads it. */
   async run(user: User, name: string, input: unknown, context: { recentText?: string } = {}): Promise<ToolOutcome> {
     try {
       switch (name) {
@@ -396,17 +396,17 @@ export class AgentToolbox {
       if (error instanceof RecipientMissing) return { result: error.message, isError: true };
       throw error;
     }
-    // 10kobo Protect: SERV Reasoning checks what led to this payment before the user can approve it.
+    // CentralMonie Protect: SERV Reasoning checks what led to this payment before the user can approve it.
     let protectNote = '';
     if (this.protect.enabled) {
       const facts = await this.protect.planFacts(user.id, plan.items);
       const check = await this.protect.check(user.id, 'plan', plan.id, { profile: 'payment', request: recentText, facts });
       protectNote =
         check.verdict === 'block'
-          ? ` 10kobo Protect BLOCKED it: ${check.summary ?? ''} It cannot be approved. Tell the user plainly why, and do not try to work around it.`
+          ? ` CentralMonie Protect BLOCKED it: ${check.summary ?? ''} It cannot be approved. Tell the user plainly why, and do not try to work around it.`
           : check.verdict === 'ask'
-            ? ` 10kobo Protect flagged it for the user to confirm: ${check.summary ?? ''}${check.question ? ` Question: ${check.question}` : ''} Tell the user what to check before approving.`
-            : ' 10kobo Protect checked it and found nothing wrong.';
+            ? ` CentralMonie Protect flagged it for the user to confirm: ${check.summary ?? ''}${check.question ? ` Question: ${check.question}` : ''} Tell the user what to check before approving.`
+            : ' CentralMonie Protect checked it and found nothing wrong.';
     }
     return {
       result: `The details for approval are showing below for ${plan.items.length} payment(s), total ${formatNaira(plan.totalKobo)}. Nothing has moved.${protectNote}`,

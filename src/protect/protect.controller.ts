@@ -5,7 +5,7 @@ import { CurrentUser } from '../auth/current-user.decorator';
 import { User } from '../database/schema';
 import { presentCheck, ProtectService } from './protect.service';
 
-/** The user's own 10kobo Protect history: every payment SERV checked, its answer and its reasons. */
+/** The user's own CentralMonie Protect history: every payment SERV checked, its answer and its reasons. */
 @Controller('v1/protect')
 @UseGuards(AuthGuard)
 export class ProtectController {

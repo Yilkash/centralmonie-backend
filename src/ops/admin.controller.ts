@@ -231,7 +231,7 @@ export class AdminController {
         from agent_keys k order by k.created_at desc limit 100`),
     );
     const payout = (key: (typeof keys)[number]) =>
-      key.payout_to_wallet ? '10kobo wallet' : key.payout_near_account ? `NEAR ${key.payout_near_account}` : key.payout_usdc_address ? `USDC on Base ${key.payout_usdc_address.slice(0, 6)}…${key.payout_usdc_address.slice(-4)}` : `${key.payout_bank_name ?? 'Bank'} ${masked(key.payout_account_number)}`;
+      key.payout_to_wallet ? 'CentralMonie wallet' : key.payout_near_account ? `NEAR ${key.payout_near_account}` : key.payout_usdc_address ? `USDC on Base ${key.payout_usdc_address.slice(0, 6)}…${key.payout_usdc_address.slice(-4)}` : `${key.payout_bank_name ?? 'Bank'} ${masked(key.payout_account_number)}`;
     return {
       merchant_keys: keys.map((key) => ({ id: key.id, name: key.name, owner: key.email, payout: payout(key), webhook: key.webhook, websites: key.return_origins, invoices: key.invoices, invoices_today: key.invoices_today, paid: key.paid, created_at: key.created_at, revoked_at: key.revoked_at })),
       payment_links: links.map((link) => ({

@@ -108,7 +108,7 @@ function textOf(content: readonly Anthropic.ContentBlock[]): string {
     .trim();
 }
 
-/** The user's last few messages, newest last: what 10kobo Protect reads to see what led to a payment. */
+/** The user's last few messages, newest last: what CentralMonie Protect reads to see what led to a payment. */
 function recentUserText(turn: ChatTurn): string {
   const earlier = turn.history.filter((message) => message.role === 'user').slice(-4).map((message) => message.content);
   return [...earlier, turn.message].join('\n---\n').slice(-6000);

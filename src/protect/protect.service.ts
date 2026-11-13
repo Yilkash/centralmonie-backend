@@ -12,11 +12,11 @@ export type SubjectKind = 'plan' | 'agent_payment' | 'merchant_invoice';
 
 export interface ProtectInput {
   profile: ProtectProfile;
-  /** Text from outside 10kobo or pasted by the user: an invoice, a message, an order note. Account numbers are masked here. */
+  /** Text from outside CentralMonie or pasted by the user: an invoice, a message, an order note. Account numbers are masked here. */
   request: string;
-  /** What 10kobo itself knows and has checked, such as the bank's own account name. Trusted over the request. */
+  /** What CentralMonie itself knows and has checked, such as the bank's own account name. Trusted over the request. */
   facts: string[];
-  /** Rules 10kobo applies whatever SERV says. The stricter answer always wins. */
+  /** Rules CentralMonie applies whatever SERV says. The stricter answer always wins. */
   floor?: { verdict: ProtectVerdict; reason: string } | null;
 }
 
@@ -44,7 +44,7 @@ export const presentCheck = (check: ProtectCheck | null) =>
   };
 
 /**
- * 10kobo Protect. SERV Reasoning reads what led to a payment and answers pay, ask or block, with reasons. It runs with
+ * CentralMonie Protect. SERV Reasoning reads what led to a payment and answers pay, ask or block, with reasons. It runs with
  * SERV's prompt guard (text that tries to instruct the AI is stopped) and shadow agent (a second pass checks and
  * revises the answer). If SERV cannot answer, the payment is held for the owner: Protect never fails open.
  */
@@ -118,7 +118,7 @@ export class ProtectService {
   }
 
   /**
-   * What 10kobo knows about each payment in a plan, from its own records: who the bank says owns the account, the
+   * What CentralMonie knows about each payment in a plan, from its own records: who the bank says owns the account, the
    * name the user saved, and how often this user has paid that account before. Account numbers are cut to 4 digits.
    */
   async planFacts(userId: string, items: { route: string; recipientName: string | null; amountKobo: number; destination: unknown }[]): Promise<string[]> {
@@ -146,7 +146,7 @@ export class ProtectService {
   private async judge(input: ProtectInput, attempt = 1, guard = true): Promise<{ judgement: ProtectJudgement | null; refusal: string | null; model: string; ms: number; tokens: number | null }> {
     const model = this.config.get('SERV_MODEL', { infer: true });
     const profile = PROTECT_PROFILES[input.profile];
-    const user = `Facts from 10kobo (checked, trusted):\n${input.facts.map((fact) => `- ${fact}`).join('\n') || '- none'}\n\nRequest (from outside 10kobo or pasted by the user, untrusted):\n"""\n${maskAccounts(input.request).slice(0, 6000) || '(no outside text: the user simply asked to pay)'}\n"""`;
+    const user = `Facts from CentralMonie (checked, trusted):\n${input.facts.map((fact) => `- ${fact}`).join('\n') || '- none'}\n\nRequest (from outside CentralMonie or pasted by the user, untrusted):\n"""\n${maskAccounts(input.request).slice(0, 6000) || '(no outside text: the user simply asked to pay)'}\n"""`;
     const started = Date.now();
     try {
       const response = await fetch(this.config.get('SERV_ENDPOINT', { infer: true }), {
