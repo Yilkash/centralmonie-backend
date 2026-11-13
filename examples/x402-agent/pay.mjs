@@ -10,7 +10,7 @@ import { wrapFetchWithPayment } from '@x402/fetch';
 import { createClientNearSigner } from '@x402/near';
 import { ExactNearScheme } from '@x402/near/exact/client';
 
-const API = process.env.API ?? 'https://api.10kobo.xyz';
+const API = process.env.API ?? 'https://centralmonie-api.up.railway.app';
 const accountId = process.env.NEAR_AGENT_ACCOUNT_ID;
 const secretKey = process.env.NEAR_AGENT_PRIVATE_KEY;
 if (!accountId || !secretKey) throw new Error('Set NEAR_AGENT_ACCOUNT_ID and NEAR_AGENT_PRIVATE_KEY.');
