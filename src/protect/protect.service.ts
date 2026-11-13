@@ -29,13 +29,17 @@ export function maskAccounts(text: string): string {
   });
 }
 
+// SERV never sees account numbers, only [ACCT_1]-style stand-ins; people should not see those stand-ins either.
+const unmasked = (text: string) => text.replace(/\[ACCT_\d+\]/g, 'the account number');
+const unmaskedOrNull = (text: string | null) => (text === null ? null : unmasked(text));
+
 export const presentCheck = (check: ProtectCheck | null) =>
   check && {
     verdict: check.verdict,
     serv_verdict: check.servVerdict,
-    summary: check.summary,
-    question: check.question,
-    signals: check.signals,
+    summary: unmaskedOrNull(check.summary),
+    question: unmaskedOrNull(check.question),
+    signals: (check.signals as { name: string; severity: string; evidence: string }[]).map((signal) => ({ ...signal, evidence: unmasked(signal.evidence) })),
     refused: check.refusal,
     model: check.model,
     seconds: check.ms === null ? null : Math.round(check.ms / 100) / 10,
