@@ -8,6 +8,7 @@ import { User } from '../database/schema';
 import { ChainKey, USDC_CHAINS } from '../chain/usdc-chains';
 import { formatNaira, formatUsdc } from '../money/money';
 import { PlanRefused, PlansService, PlanView } from './plans.service';
+import { presentCheck, ProtectService } from '../protect/protect.service';
 
 /** An amount in USDC's six decimals, named as the token the receiver really gets. */
 const inToken = (minor: number, token?: 'USDC' | 'USDT') => formatUsdc(minor).replace('USDC', token ?? 'USDC');
@@ -21,6 +22,7 @@ const fundingBody = z.object({ tx_hash: z.string() });
 
 export const presentPlan = (plan: PlanView) => ({
   id: plan.id,
+  protect: presentCheck(plan.protect),
   status: plan.status,
   quote_expires_at: plan.quoteExpiresAt,
   total_naira: formatNaira(plan.totalKobo),
@@ -61,6 +63,7 @@ export class PlansController {
     private readonly plans: PlansService,
     private readonly funding_: FundingService,
     private readonly pins: PinService,
+    private readonly protect: ProtectService,
   ) {}
 
   @Get(':id')
@@ -72,11 +75,30 @@ export class PlansController {
   @HttpCode(200)
   async approve(@CurrentUser() user: User, @Param('id', ParseUUIDPipe) id: string, @Body() body: unknown) {
     await this.pins.check(user, pinIn(body));
+    await this.enforceProtect(user, id, body);
     try {
       return presentPlan(await this.plans.approve(user, id));
     } catch (error) {
       if (error instanceof PlanRefused) throw new UnprocessableEntityException(error.message);
       throw error;
+    }
+  }
+
+  /**
+   * 10kobo Protect, when on: a payment SERV blocked cannot be approved, and one it flagged needs the owner to confirm
+   * they checked it ("protect_confirmed": true). The plan must belong to the user, which get() checks.
+   */
+  private async enforceProtect(user: User, id: string, body: unknown) {
+    if (!this.protect.enabled) return;
+    await this.plans.get(user.id, id);
+    const check = await this.protect.latest('plan', id);
+    if (!check) return;
+    if (check.verdict === 'block') throw new UnprocessableEntityException(`10kobo Protect blocked this payment. ${check.summary ?? ''}`.trim());
+    if (check.verdict === 'ask' && !check.acknowledgedAt) {
+      if ((body as { protect_confirmed?: unknown } | null)?.protect_confirmed !== true) {
+        throw new UnprocessableEntityException('10kobo Protect asks you to confirm this payment first. Check the warning, then confirm.');
+      }
+      await this.protect.acknowledge('plan', id);
     }
   }
 

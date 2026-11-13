@@ -17,6 +17,8 @@ import { OpsModule } from './ops/ops.module';
 import { PinModule } from './pin/pin.module';
 import { SchedulesModule } from './schedules/schedules.module';
 import { UsersModule } from './users/users.module';
+import { ProtectModule } from './protect/protect.service';
+import { ProtectApiModule } from './protect/protect.controller';
 
 @Module({
   imports: [
@@ -24,6 +26,8 @@ import { UsersModule } from './users/users.module';
     // Only the chosen file is read, so a setting missing from .env.mainnet cannot be filled in from the test .env.
     ConfigModule.forRoot({ isGlobal: true, validate: validateEnv, envFilePath: process.env.DOTENV_CONFIG_PATH ?? '.env', ignoreEnvFile: process.env.NODE_ENV === 'test' }),
     DatabaseModule,
+    ProtectModule,
+    ProtectApiModule,
     ChainModule,
     NotificationsModule,
     WalletModule,

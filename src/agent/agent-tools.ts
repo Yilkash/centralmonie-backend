@@ -15,6 +15,7 @@ import { SchedulesService, whenOf } from '../schedules/schedules.service';
 import { Timing } from '../schedules/timing';
 import { proposeWithRecipients, RecipientMissing } from '../plans/propose-with-recipients';
 import { WalletService } from '../wallet/wallet.service';
+import { ProtectService } from '../protect/protect.service';
 
 const nullable = (type: string) => ({ type: [type, 'null'] });
 
@@ -300,10 +301,12 @@ export class AgentToolbox {
     private readonly schedules: SchedulesService,
     private readonly deposits: NairaDepositsService,
     private readonly payLinks: PayLinksService,
+    private readonly protect: ProtectService,
   ) {}
 
   /** The user comes from the signed-in session, never from the model, so it cannot act for anyone else. */
-  async run(user: User, name: string, input: unknown): Promise<ToolOutcome> {
+  /** context.recentText: the user's latest messages, which may hold a pasted invoice. 10kobo Protect reads it. */
+  async run(user: User, name: string, input: unknown, context: { recentText?: string } = {}): Promise<ToolOutcome> {
     try {
       switch (name) {
         case 'list_contacts':
@@ -315,7 +318,7 @@ export class AgentToolbox {
         case 'list_activity':
           return { result: JSON.stringify(await this.wallet.activity(user.id)) };
         case 'propose_plan':
-          return await this.proposePlan(user, input);
+          return await this.proposePlan(user, input, context.recentText ?? '');
         case 'propose_schedule':
           return await this.proposeSchedule(user, input);
         case 'list_schedules':
@@ -364,7 +367,7 @@ export class AgentToolbox {
     return JSON.stringify(plans.map((plan) => ({ data_plan_id: plan.id, plan: plan.label, price: formatNaira(plan.priceKobo) })));
   }
 
-  private async proposePlan(user: User, input: unknown): Promise<ToolOutcome> {
+  private async proposePlan(user: User, input: unknown, recentText = ''): Promise<ToolOutcome> {
     const { items } = planInput.parse(input);
     let plan: PlanView;
     try {
@@ -393,8 +396,20 @@ export class AgentToolbox {
       if (error instanceof RecipientMissing) return { result: error.message, isError: true };
       throw error;
     }
+    // 10kobo Protect: SERV Reasoning checks what led to this payment before the user can approve it.
+    let protectNote = '';
+    if (this.protect.enabled) {
+      const facts = await this.protect.planFacts(user.id, plan.items);
+      const check = await this.protect.check(user.id, 'plan', plan.id, { profile: 'payment', request: recentText, facts });
+      protectNote =
+        check.verdict === 'block'
+          ? ` 10kobo Protect BLOCKED it: ${check.summary ?? ''} It cannot be approved. Tell the user plainly why, and do not try to work around it.`
+          : check.verdict === 'ask'
+            ? ` 10kobo Protect flagged it for the user to confirm: ${check.summary ?? ''}${check.question ? ` Question: ${check.question}` : ''} Tell the user what to check before approving.`
+            : ' 10kobo Protect checked it and found nothing wrong.';
+    }
     return {
-      result: `The details for approval are showing below for ${plan.items.length} payment(s), total ${formatNaira(plan.totalKobo)}. Nothing has moved.`,
+      result: `The details for approval are showing below for ${plan.items.length} payment(s), total ${formatNaira(plan.totalKobo)}. Nothing has moved.${protectNote}`,
       planId: plan.id,
     };
   }

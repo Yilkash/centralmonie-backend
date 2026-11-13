@@ -14,7 +14,8 @@ import { PaymentEngine } from '../payments/payment-engine.service';
 import { AuditService } from '../ops/audit.service';
 import { GuardsService } from '../ops/guards.service';
 import { SwitchesService } from '../ops/switches.service';
-import { contacts, Plan, PlanItem, Payment, payments, planItems, plans, User, users } from '../database/schema';
+import { contacts, Plan, PlanItem, Payment, payments, planItems, plans, User, users, ProtectCheck } from '../database/schema';
+import { ProtectService } from '../protect/protect.service';
 import { DAILY_LIMIT_KOBO, formatNaira, formatUsdc, koboToUsdcMinor, nairaToKobo, parseUsdc, usdcMinorToKobo } from '../money/money';
 import { DataPlans, ExchangeRates, PaymentProvider, PaymentRequest } from '../providers/providers';
 import { PlanRefused } from './plan-refused';
@@ -34,6 +35,8 @@ export interface PlanView extends Plan {
   totalUsdcMinor: number;
   /** What the wallet must send when payments are waiting for the user's signature. */
   calls: WalletCall[];
+  /** 10kobo Protect's newest check of this plan, when Protect is on. */
+  protect: ProtectCheck | null;
 }
 
 const CROSS_CHAIN_ROUTE_MS = 30 * 60_000;
@@ -54,6 +57,7 @@ export class PlansService {
     private readonly config: ConfigService<Env, true>,
     private readonly guards: GuardsService,
     private readonly audit: AuditService,
+    private readonly protect: ProtectService,
   ) {}
 
   private get onChain(): boolean {
@@ -204,6 +208,7 @@ export class PlansService {
       ),
       totalKobo: items.reduce((sum, item) => sum + item.amountKobo, 0),
       totalUsdcMinor: items.reduce((sum, item) => sum + item.usdcMinor, 0),
+      protect: this.protect.enabled ? await this.protect.latest('plan', planId) : null,
     };
   }
 

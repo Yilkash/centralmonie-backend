@@ -1,4 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
+import { ProtectService } from '../protect/protect.service';
 import { ConfigService } from '@nestjs/config';
 import { and, count, desc, eq, gte, isNull, sql } from 'drizzle-orm';
 import { isAddress } from 'viem';
@@ -74,6 +75,7 @@ export class PayLinksService {
     private readonly banks: BankLookup,
     private readonly agents: AgentApiService,
     private readonly crossChain: CrossChain,
+    private readonly protect: ProtectService,
   ) {}
 
   /** Where the link opens. */
@@ -323,7 +325,18 @@ export class PayLinksService {
       .where(and(eq(payLinks.id, id), isNull(payLinks.cancelledAt), link.paymentId ? eq(payLinks.paymentId, link.paymentId) : sql`${payLinks.paymentId} is null`))
       .returning({ id: payLinks.id });
     if (claimed.length === 0) throw new AgentRefusal('in_progress', 'Someone is paying this link right now. Try again in a moment.', 409);
+    if (link.merchantKeyId && this.protect.enabled) void this.checkOrder(link, payer).catch(() => undefined);
     return this.agents.accept(key, quote.id, payer.clientIp);
+  }
+
+  /** 10kobo Protect for shops: SERV judges the order so the shop knows whether to ship. It never blocks the customer. */
+  private async checkOrder(link: PayLink, payer: PayerDetails): Promise<void> {
+    const items = (link.lineItems ?? []).map((item) => `${item.description}: ₦${item.amountNaira.toLocaleString('en-NG')}`);
+    await this.protect.check(link.userId, 'merchant_invoice', link.id, {
+      profile: 'checkout',
+      request: [`Order ${link.reference ?? link.id}`, ...items, link.note ? `Note: ${link.note}` : '', `Customer name given at checkout: ${payer.payerName || 'none'}`].filter(Boolean).join('\n'),
+      facts: [`Order total ₦${(link.amountKobo / 100).toLocaleString('en-NG')}, paid through 10kobo checkout from ${payer.payFrom}.`, `Refunds, if any, can only go back to the customer's own refund address (${payer.payFrom === 'naira' ? 'bank transfer payer' : 'a crypto address they gave'}), never to an account named in a message.`],
+    });
   }
 }
 

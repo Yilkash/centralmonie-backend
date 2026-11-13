@@ -61,19 +61,19 @@ export class MerchantController {
       lineItems: line_items?.map((item) => ({ description: item.description, amountNaira: item.amount_naira })) ?? null,
       returnUrl: return_url ?? null,
     });
-    return this.merchants.present(await this.merchants.invoice(merchant.key, link.id));
+    return await this.merchants.present(await this.merchants.invoice(merchant.key, link.id));
   }
 
   @Get(':id')
   async get(@Merchant() merchant: { key: MerchantKey }, @Param('id', ParseUUIDPipe) id: string) {
-    return this.merchants.present(await this.merchants.invoice(merchant.key, id));
+    return await this.merchants.present(await this.merchants.invoice(merchant.key, id));
   }
 
   @Post(':id/cancel')
   @HttpCode(200)
   async cancel(@Merchant() merchant: { key: MerchantKey; owner: User }, @Param('id', ParseUUIDPipe) id: string) {
     await this.merchants.cancel(merchant.key, merchant.owner, id);
-    return this.merchants.present(await this.merchants.invoice(merchant.key, id));
+    return await this.merchants.present(await this.merchants.invoice(merchant.key, id));
   }
 }
 

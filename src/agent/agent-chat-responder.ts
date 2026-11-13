@@ -55,7 +55,7 @@ export class AgentChatResponder extends ChatResponder {
         const results: Anthropic.ToolResultBlockParam[] = [];
         for (const block of response.content) {
           if (block.type !== 'tool_use') continue;
-          const outcome = await this.tools.run(turn.user, block.name, block.input);
+          const outcome = await this.tools.run(turn.user, block.name, block.input, { recentText: recentUserText(turn) });
           planId = outcome.planId ?? planId;
           contactId = outcome.contactId ?? contactId;
           scheduleGroupId = outcome.scheduleGroupId ?? scheduleGroupId;
@@ -106,4 +106,10 @@ function textOf(content: readonly Anthropic.ContentBlock[]): string {
     .flatMap((block) => (block.type === 'text' ? [block.text] : []))
     .join('\n')
     .trim();
+}
+
+/** The user's last few messages, newest last: what 10kobo Protect reads to see what led to a payment. */
+function recentUserText(turn: ChatTurn): string {
+  const earlier = turn.history.filter((message) => message.role === 'user').slice(-4).map((message) => message.content);
+  return [...earlier, turn.message].join('\n---\n').slice(-6000);
 }

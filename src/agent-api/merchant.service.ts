@@ -1,4 +1,5 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
+import { presentCheck, ProtectService } from '../protect/protect.service';
 import { and, count, eq, gte, inArray, isNotNull, isNull, lt, lte, or, sql, desc } from 'drizzle-orm';
 import { createHmac, randomBytes, randomUUID } from 'node:crypto';
 import { DATABASE, Database } from '../database/database.module';
@@ -102,6 +103,7 @@ export class MerchantService {
     @Inject(DATABASE) private readonly db: Database,
     private readonly links: PayLinksService,
     private readonly audit: AuditService,
+    private readonly protect: ProtectService,
   ) {}
 
   /** The key and webhook secret are shown once, here, and only their hash or the secret for signing is kept. */
@@ -259,8 +261,10 @@ export class MerchantService {
     return this.links.cancel(owner, id);
   }
 
-  present(row: { link: PayLink; payment: AgentPayment | null }) {
-    return { ...presentOwnLink(row, this.links.url(row.link)), reference: row.link.reference, checkout_url: this.links.url(row.link), return_url: row.link.returnUrl };
+  /** With 10kobo Protect on, the order's newest check: "pay" ship as normal, "ask" hold and check, "block" do not ship. */
+  async present(row: { link: PayLink; payment: AgentPayment | null }) {
+    const protect = this.protect.enabled ? presentCheck(await this.protect.latest('merchant_invoice', row.link.id)) : null;
+    return { ...presentOwnLink(row, this.links.url(row.link)), reference: row.link.reference, checkout_url: this.links.url(row.link), return_url: row.link.returnUrl, ...(this.protect.enabled ? { protect } : {}) };
   }
 
   /** Finds invoices that reached an end state with no notice yet, and makes one notice for each. */
@@ -281,7 +285,7 @@ export class MerchantService {
       .limit(100);
     let queued = 0;
     for (const row of rows) {
-      const invoice = this.present(row);
+      const invoice = await this.present(row);
       const type = STATUS_EVENT[invoice.status];
       if (!type) continue;
       const id = randomUUID();

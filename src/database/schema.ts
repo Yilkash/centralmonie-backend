@@ -529,3 +529,35 @@ export const merchantEvents = pgTable(
   },
   (table) => [uniqueIndex('merchant_events_link_type_idx').on(table.linkId, table.type), index('merchant_events_due_idx').on(table.deliveredAt, table.nextAttemptAt)],
 );
+
+/**
+ * 10kobo Protect: SERV Reasoning's judgement of a payment before money moves, with the reasons it gave. One row per
+ * check. A plan, an agent payment or a merchant invoice can be checked; the newest row for it is the one that counts.
+ */
+export const protectChecks = pgTable(
+  'protect_checks',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    userId: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }),
+    subjectKind: text('subject_kind').notNull(),
+    subjectId: uuid('subject_id').notNull(),
+    profile: text('profile').notNull(),
+    /** pay, ask or block: the final answer after SERV and the facts 10kobo already knows. */
+    verdict: text('verdict').notNull(),
+    servVerdict: text('serv_verdict'),
+    summary: text('summary'),
+    question: text('question'),
+    signals: jsonb('signals').$type<{ name: string; severity: string; evidence: string }[]>().notNull().default([]),
+    /** Set when SERV refused or could not be reached. */
+    refusal: text('refusal'),
+    model: text('model'),
+    ms: integer('ms'),
+    tokens: integer('tokens'),
+    /** When the owner confirmed an "ask" and chose to go ahead. */
+    acknowledgedAt: timestamp('acknowledged_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [index('protect_checks_subject_idx').on(table.subjectKind, table.subjectId, table.createdAt)],
+);
+
+export type ProtectCheck = typeof protectChecks.$inferSelect;

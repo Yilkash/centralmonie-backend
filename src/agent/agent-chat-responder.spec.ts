@@ -75,7 +75,7 @@ describe('AgentChatResponder', () => {
       { result: 'card showing', planId: 'plan-1' },
     );
     const reply = await responder.reply(turn());
-    expect(run).toHaveBeenCalledWith(user, 'propose_plan', { items: [] });
+    expect(run).toHaveBeenCalledWith(user, 'propose_plan', { items: [] }, { recentText: 'hello' });
     expect(reply).toEqual({ text: 'Please check and approve.', planId: 'plan-1', contactId: undefined });
     const results = requests[1]!.messages.at(-1)!.content as Anthropic.ToolResultBlockParam[];
     expect(results[0]).toMatchObject({ tool_use_id: 't1', content: 'card showing', is_error: false });

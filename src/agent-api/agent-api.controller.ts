@@ -7,6 +7,7 @@ import { formatNaira, formatUsdc } from '../money/money';
 import { AdminGuard } from '../ops/admin.controller';
 import { PAY_FROM, PayFrom } from './cross-chain';
 import { nearExactRequirements } from './near-relay';
+import { presentCheck, ProtectService } from '../protect/protect.service';
 import { AgentApiService, AgentRefusal, KEYLESS_KEY_ID, NAIRA, NAIRA_PAYER } from './agent-api.service';
 import { PayLinksService, presentLink, presentOwnLink, presentPublicLink } from './pay-links.service';
 import { decodeSignature, encode, firstChallenge, provesPayment, quotedChallenge, settlement, tokenProblem, X402_PAY_FROM, decodeNearExact } from './x402';
@@ -17,6 +18,8 @@ const quoteBody = z.object({
   account_number: z.string().regex(/^\d{10}$/, 'An account number has 10 digits.'),
   pay_from: z.enum(Object.keys(PAY_FROM) as [PayFrom, ...PayFrom[]]).default('base'),
   refund_to: z.string().trim().min(2).max(100),
+  // 10kobo Protect reads it: the invoice or message the agent is paying from. Optional.
+  invoice_text: z.string().max(6000).optional(),
 });
 const paymentBody = z.object({ quote_id: z.string().uuid() });
 const relayBody = z.object({ signed_delegate: z.string().min(10).max(8000) });
@@ -62,6 +65,27 @@ export const presentPayment = (payment: AgentPayment) => ({
       }
     : {}),
 });
+
+/**
+ * 10kobo Protect for agents, when on: SERV Reasoning reads the agent's purpose and invoice against what the bank says
+ * about the account. A block refuses the payment. An "ask" refuses an agent with no key, which has no owner here to
+ * confirm; an agent with a key gets the warning with its payment.
+ */
+async function protectAgentPayment(protect: ProtectService, payment: AgentPayment, keyless: boolean, said: { purpose?: string | null; invoiceText?: string | null; payerName?: string | null }) {
+  if (!protect.enabled) return null;
+  const check = await protect.check(null, 'agent_payment', payment.id, {
+    profile: 'agent',
+    request: [said.purpose ? `Purpose: ${said.purpose}` : '', said.invoiceText ? `Invoice:\n${said.invoiceText}` : ''].filter(Boolean).join('\n\n'),
+    facts: [
+      `Payment of ₦${(payment.amountKobo / 100).toLocaleString('en-NG')} to ${payment.bankName} account ending ${payment.accountNumber.slice(-4)}.`,
+      `The bank's own name for this account is "${payment.accountName}".`,
+      said.payerName ? `The agent says it pays for: ${said.payerName}.` : 'The agent did not say who it pays for.',
+    ],
+  });
+  if (check.verdict === 'block') throw new AgentRefusal('protect_blocked', `10kobo Protect blocked this payment: ${check.summary ?? 'it looks unsafe'}`, 422);
+  if (check.verdict === 'ask' && keyless) throw new AgentRefusal('protect_needs_owner', `10kobo Protect wants a person to confirm this payment first: ${check.summary ?? ''}`.trim(), 422);
+  return presentCheck(check);
+}
 
 const invalid = (error: z.ZodError) => new AgentRefusal('invalid_request', error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`).join('; '), 400);
 
@@ -114,7 +138,10 @@ export class X402Guard implements CanActivate {
 @UseFilters(AgentRefusalFilter)
 @UseGuards(AgentKeyGuard)
 export class AgentApiController {
-  constructor(private readonly agents: AgentApiService) {}
+  constructor(
+    private readonly agents: AgentApiService,
+    private readonly protect: ProtectService,
+  ) {}
 
   /** The price and the bank's name for the account. Moves nothing. */
   @Post('quotes')
@@ -122,8 +149,10 @@ export class AgentApiController {
   async quote(@CurrentKey() key: AgentKey, @Body() body: unknown) {
     const parsed = quoteBody.safeParse(body);
     if (!parsed.success) throw invalid(parsed.error);
-    const { amount_naira, bank_name, account_number, pay_from, refund_to } = parsed.data;
-    return presentPayment(await this.agents.quote(key, { amountNaira: amount_naira, bankName: bank_name, accountNumber: account_number, payFrom: pay_from, refundTo: refund_to }));
+    const { amount_naira, bank_name, account_number, pay_from, refund_to, invoice_text } = parsed.data;
+    const payment = await this.agents.quote(key, { amountNaira: amount_naira, bankName: bank_name, accountNumber: account_number, payFrom: pay_from, refundTo: refund_to });
+    const protect = await protectAgentPayment(this.protect, payment, false, { purpose: (body as { purpose?: string })?.purpose ?? null, invoiceText: invoice_text ?? null });
+    return { ...presentPayment(payment), ...(protect ? { protect } : {}) };
   }
 
   /** Accepts a quote and returns where to send the USDC. Safe to repeat. */
@@ -160,7 +189,10 @@ interface X402Reply {
 @UseFilters(AgentRefusalFilter)
 @UseGuards(X402Guard)
 export class AgentX402Controller {
-  constructor(private readonly agents: AgentApiService) {}
+  constructor(
+    private readonly agents: AgentApiService,
+    private readonly protect: ProtectService,
+  ) {}
 
   /** Pays the gas for a signed USDC transfer from NEAR, so an agent needs no NEAR. Safe to refuse: nothing moves unless it passes. */
   @Post('pay/:id/relay')
@@ -199,6 +231,8 @@ export class AgentX402Controller {
       clientIp: request.ip,
       ...(payer.success ? { payerName: payer.data.payer_name, payerEmail: payer.data.payer_email, purpose: payer.data.purpose } : {}),
     });
+    // Checked before any offer to pay is made, so a blocked payment never gets a deposit address.
+    await protectAgentPayment(this.protect, payment, key.id === KEYLESS_KEY_ID, { purpose: payer.success ? payer.data.purpose : null, invoiceText: parsed.data.invoice_text ?? null, payerName: payer.success ? payer.data.payer_name : null });
     const url = `${request.protocol}://${request.hostname}/v1/agent/x402/pay/${payment.id}`;
     if (pay_from === 'near') {
       const accepted = await this.agents.accept(key, payment.id, request.ip);
