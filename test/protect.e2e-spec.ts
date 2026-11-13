@@ -84,7 +84,7 @@ describe('10kobo Protect', () => {
   it('asks SERV with its prompt guard, shadow agent and strict format, and never shows it an account number', async () => {
     await propose('Mum: please send upkeep to my Opay 8031234568, thanks');
     const sent = received[0]!;
-    expect(sent.tools.map((tool) => tool.function.name)).toEqual(['serv_prompt_guard', 'serv_shadow_agent']);
+    expect(sent.tools.map((tool) => tool.function.name)).toEqual(['serv_prompt_guard', 'serv_disable_content_filter', 'serv_shadow_agent']);
     expect(sent.response_format).toMatchObject({ type: 'json_schema', json_schema: { strict: true } });
     const text = sent.messages.map((message) => message.content).join('\n');
     expect(text).not.toMatch(/\d{10}/);
@@ -134,6 +134,14 @@ describe('10kobo Protect', () => {
     const plan = (await call('GET', `/v1/plans/${outcome.planId}`)).json();
     expect(plan.protect.verdict).toBe('block');
     expect(plan.protect.signals[0].name).toMatch(/Instructions hidden/);
+  });
+
+  it('asks again when SERV refuses harmless text, and then waits for the owner instead of blocking', async () => {
+    answer = { status: 200, text: "I can't share that." };
+    const outcome = await propose('send mum 100 naira for food');
+    expect(received).toHaveLength(2);
+    const plan = (await call('GET', `/v1/plans/${outcome.planId}`)).json();
+    expect(plan.protect.verdict).toBe('ask');
   });
 
   it('lists the user\'s own checks', async () => {

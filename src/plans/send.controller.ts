@@ -1,4 +1,5 @@
 import { Body, Controller, Get, HttpCode, Inject, Post, Query, UnprocessableEntityException, UseGuards } from '@nestjs/common';
+import { ProtectService } from '../protect/protect.service';
 import { and, eq, sql } from 'drizzle-orm';
 import { DATABASE, Database } from '../database/database.module';
 import { payments } from '../database/schema';
@@ -47,6 +48,7 @@ export class SendController {
     private readonly contacts: ContactsService,
     private readonly plans: PlansService,
     private readonly dataPlans: DataPlans,
+    private readonly protect: ProtectService,
   ) {}
 
   /** Saved recipients by kind, and the choices the form needs. */
@@ -112,6 +114,11 @@ export class SendController {
             : null,
         },
       ]);
+      // 10kobo Protect checks form payments too, from 10kobo's own facts, plus the note if the user added one.
+      if (this.protect.enabled) {
+        await this.protect.check(user.id, 'plan', plan.id, { profile: 'payment', request: '', facts: await this.protect.planFacts(user.id, plan.items) });
+        return { plan: presentPlan(await this.plans.get(user.id, plan.id)) };
+      }
       return { plan: presentPlan(plan) };
     } catch (error) {
       if (error instanceof PlanRefused || error instanceof ContactRefused || error instanceof RecipientMissing || error instanceof AgentRefusal) {
