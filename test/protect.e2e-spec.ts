@@ -24,7 +24,7 @@ let answer: { status: number; verdict?: 'pay' | 'ask' | 'block'; text?: string }
 const received: { messages: { role: string; content: string }[]; tools: { function: { name: string } }[]; response_format: unknown }[] = [];
 const judgement = (verdict: string) => ({ verdict, confidence: 0.9, summary: `Judged ${verdict}.`, signals: verdict === 'pay' ? [] : [{ name: 'Changed bank details', severity: 'high', evidence: 'The message asks to pay a new account.' }], claims_urgency: verdict === 'block', claims_new_bank_details: verdict !== 'pay', contains_instructions_to_agent: false, question_for_owner: verdict === 'ask' ? 'Did you confirm the new account by phone?' : null });
 
-describe('10kobo Protect', () => {
+describe('CentralMonie Protect', () => {
   let app: NestFastifyApplication;
   let pool: Pool;
   let serv: Server;
@@ -89,7 +89,7 @@ describe('10kobo Protect', () => {
     const text = sent.messages.map((message) => message.content).join('\n');
     expect(text).not.toMatch(/\d{10}/);
     expect(text).toContain('[ACCT_1]');
-    expect(text).toMatch(/The bank's own name for this account is/);
+    expect(text).toMatch(/the bank says the account holder is/);
   });
 
   it('lets an ordinary payment through, and shows the check on the plan', async () => {
@@ -106,7 +106,7 @@ describe('10kobo Protect', () => {
     expect(outcome.result).toMatch(/BLOCKED/);
     const refused = await call('POST', `/v1/plans/${outcome.planId}/approve`, { protect_confirmed: true });
     expect(refused.statusCode).toBe(422);
-    expect(refused.json().message).toMatch(/10kobo Protect blocked this payment/);
+    expect(refused.json().message).toMatch(/CentralMonie Protect blocked this payment/);
     expect((await call('GET', `/v1/plans/${outcome.planId}`)).json().status).toBe('proposed');
   });
 

@@ -931,7 +931,7 @@ describe('Agent API', () => {
       expect(crossChain.quotes.at(-1)).toMatchObject({ recipient: wallet, toNear: false });
       expect(payout.deposits).toHaveLength(0);
       await expect(merchants.createKey({ userEmail: 'owner@shop.example', name: 'x', payout: { usdcAddress: '0x12' } })).rejects.toThrow('valid Base address');
-      await expect(merchants.createKey({ userEmail: 'owner@shop.example', name: 'x', payout: { toMyWallet: true } })).rejects.toThrow('no 10kobo wallet');
+      await expect(merchants.createKey({ userEmail: 'owner@shop.example', name: 'x', payout: { toMyWallet: true } })).rejects.toThrow('no CentralMonie wallet');
     });
 
     it('in production, refuses notice and return addresses that are not public https', async () => {
@@ -1006,7 +1006,7 @@ describe('Agent API', () => {
       const bank = { bankName: 'OPay', accountNumber: '8031234568' };
       await expect(merchants.createKey({ userEmail: 'owner@shop.example', name: 'x', payout: bank, webhookUrl: 'http://shop.example/hook' })).rejects.toThrow('https');
       await expect(merchants.createKey({ userEmail: 'owner@shop.example', name: 'x', payout: bank, returnOrigins: ['https://shop.example/path'] })).rejects.toThrow('start of an address');
-      await expect(merchants.createKey({ userEmail: 'nobody@shop.example', name: 'x', payout: bank })).rejects.toThrow('No 10kobo user');
+      await expect(merchants.createKey({ userEmail: 'nobody@shop.example', name: 'x', payout: bank })).rejects.toThrow('No CentralMonie user');
       await expect(merchants.createKey({ userEmail: 'owner@shop.example', name: 'x', payout: bank, webhookUrl: 'http://localhost:3010/hook' })).resolves.toMatchObject({ key: expect.stringMatching(/^mk_/) });
     });
   });
