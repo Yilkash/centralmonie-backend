@@ -11,6 +11,8 @@ import { NotificationsService } from '../notifications/notifications.service';
 const CURSOR = 'deposits';
 const MAX_RANGE = 1000;
 const FIRST_LOOK_BACK = 100;
+// After an outage the cursor can be hours behind; up to this many ranges are read per run, so it catches up in one go.
+const RANGES_PER_RUN = 40;
 
 /** Watches the chain for USDC arriving in users' wallets, and tells each user once. */
 @Injectable()
@@ -23,11 +25,21 @@ export class DepositsService {
   ) {}
 
   async watch(): Promise<number> {
+    let announced = 0;
+    for (let pass = 0; pass < RANGES_PER_RUN; pass += 1) {
+      const step = await this.watchRange();
+      announced += step.announced;
+      if (step.caughtUp) break;
+    }
+    return announced;
+  }
+
+  private async watchRange(): Promise<{ announced: number; caughtUp: boolean }> {
     const wallets = await this.db.select({ id: users.id, wallet: users.walletAddress }).from(users).where(isNotNull(users.walletAddress));
     const latest = await this.chain.latestBlock();
     const [cursor] = await this.db.select().from(chainCursors).where(eq(chainCursors.name, CURSOR));
     const from = cursor ? cursor.block + 1 : Math.max(latest - FIRST_LOOK_BACK, 0);
-    if (from > latest) return 0;
+    if (from > latest) return { announced: 0, caughtUp: true };
     const to = Math.min(latest, from + MAX_RANGE);
 
     const collection = this.config.get('COLLECTION_ADDRESS', { infer: true })?.toLowerCase();
@@ -54,6 +66,6 @@ export class DepositsService {
       .insert(chainCursors)
       .values({ name: CURSOR, block: to })
       .onConflictDoUpdate({ target: chainCursors.name, set: { block: to } });
-    return announced;
+    return { announced, caughtUp: to >= latest };
   }
 }
