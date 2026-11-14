@@ -19,7 +19,11 @@ const envSchema = z.object({
 
   // simulated: approving pays at once and moves nothing. chain: the user signs and USDC really moves.
   PAYMENTS_MODE: z.enum(['simulated', 'chain']).default('simulated'),
-  CHAIN_RPC_URL: z.string().url().default('https://sepolia.base.org'),
+  // One URL, or several separated by commas: the next is tried when one fails or is busy.
+  CHAIN_RPC_URL: z
+    .string()
+    .default('https://sepolia.base.org')
+    .refine((value) => value.split(',').every((url) => z.string().url().safeParse(url.trim()).success), 'CHAIN_RPC_URL must be URLs separated by commas'),
   CHAIN_ID: z.coerce.number().int().default(84532),
   USDC_ADDRESS: z.string().default('0x036CbD53842c5426634e7929541eC2318f3dCF7e'),
   // Base mainnet (8453) means real money. It is refused unless this is exactly the phrase below.

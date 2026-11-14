@@ -5,6 +5,7 @@ import {
   createWalletClient,
   defineChain,
   encodeFunctionData,
+  fallback,
   http,
   parseEventLogs,
   type Address,
@@ -58,6 +59,17 @@ export class ViemChain extends Chain {
   private readonly bundlerUrl: string | undefined;
   private serverAccount: Promise<Address> | undefined;
 
+  private rpcUrls(): string[] {
+    return this.rpcUrl.split(',').map((url) => url.trim()).filter(Boolean);
+  }
+
+  /** Free public nodes refuse when busy (429), so with several URLs each request moves on to the next. */
+  private transport() {
+    const urls = this.rpcUrls();
+    if (urls.length === 1) return http(urls[0], { retryCount: 3, timeout: 20000 });
+    return fallback(urls.map((url) => http(url, { retryCount: 1, timeout: 15000 })), { retryCount: 2 });
+  }
+
   constructor(config: ConfigService<Env, true>) {
     super();
     this.rpcUrl = config.get('CHAIN_RPC_URL', { infer: true });
@@ -69,9 +81,9 @@ export class ViemChain extends Chain {
       id: config.get('CHAIN_ID', { infer: true }),
       name: 'configured',
       nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
-      rpcUrls: { default: { http: [this.rpcUrl] } },
+      rpcUrls: { default: { http: this.rpcUrls() } },
     });
-    this.client = createPublicClient({ chain: this.chainDef, transport: http(this.rpcUrl, { retryCount: 3, timeout: 20000 }) });
+    this.client = createPublicClient({ chain: this.chainDef, transport: this.transport() });
   }
 
   usdcAddress(): string {
@@ -142,7 +154,7 @@ export class ViemChain extends Chain {
   }
 
   private wallet(key: string) {
-    return createWalletClient({ account: privateKeyToAccount(key as Hex), chain: this.chainDef, transport: http(this.rpcUrl, { retryCount: 3, timeout: 20000 }) });
+    return createWalletClient({ account: privateKeyToAccount(key as Hex), chain: this.chainDef, transport: this.transport() });
   }
 
   async sendFromCollection(to: string, usdcMinor: number): Promise<string | null> {
